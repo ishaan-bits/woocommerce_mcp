@@ -1,0 +1,221 @@
+# Threat Model — MCP Gateway
+
+**Status:** planned controls. Nothing here is implemented yet; this document defines what the
+security milestone must actually build and how it will be verified.
+
+Method: identify assets → draw trust boundaries → list threats → attach controls → record what
+is explicitly out of scope. Loosely STRIDE-flavoured, kept plain-English.
+
+---
+
+## 1. Assets worth protecting
+
+| # | Asset | Why an attacker wants it |
+| --- | --- | --- |
+| A1 | WooCommerce consumer key/secret | Full read/write on the store: read customer orders, create products, change order status. |
+| A2 | Users' API keys | Direct impersonation of a dashboard/MCP user. |
+| A3 | `API_KEY_PEPPER` + DB of key hashes | Together they allow offline derivation of usable API keys. |
+| A4 | Audit log | Deleting or forging it hides misuse. |
+| A5 | The LLM/agent identity (later) | Turning the chat agent into a tool-calling puppet. |
+| A6 | The Kubernetes cluster itself | Cryptomining, lateral movement, reading every Secret. |
+| A7 | Store data (orders, customers) | PII, revenue and reputational damage. |
+
+## 2. Trust boundaries
+
+```text
+  [ untrusted internet ]
+          │  HTTPS (Ingress, TLS)
+  ────────┼─────────────────────────────────── boundary B1
+          ▼
+  [ dashboard browser ]      [ external MCP client ]
+          │ REST /api/*             │ MCP /mcp
+  ────────┼─────────────────────────┼─────────────── boundary B2 (authn happens here)
+          ▼                         ▼
+  ┌─────────────────────────────────────────────┐
+  │                GATEWAY                      │
+  │  authn → authz → schema validation → routing│─── writes audit log
+  └─────────────────────────────────────────────┘
+  ────────┼─────────────────────────────────────── boundary B3 (upstream trust)
+          ▼  Streamable HTTP (cluster-internal)
+  [ woocommerce-mcp ]   [ inventory-mcp ]   [ support-mcp ]
+  ────────┼─────────────────────────────────────── boundary B4
+          ▼
+  [ WooCommerce store / other data sources ]
+          │
+  [ PostgreSQL: users, key hashes, audit ] ← reached only from gateway
+```
+
+Rules implied by the diagram:
+
+- **B1/B2:** nothing crosses without authentication (except, deliberately, nothing — no
+  anonymous endpoints).
+- **B3:** upstreams are *semi-trusted*: they are our code today, but the gateway must treat
+  their responses as untrusted input (a compromised upstream must not be able to forge an
+  audit row or smuggle a call to another upstream).
+- **B4:** WooCommerce credentials are used on exactly one side of B4, inside `woocommerce-mcp`.
+
+---
+
+## 3. Planned controls
+
+### C1 — API-key hashing (protects A2, A3)
+
+- Keys are ≥32 bytes of CSPRNG randomness, displayed **once** at creation.
+- Storage: `sha256(key || API_KEY_PEPPER)` + a non-secret `key_prefix` for UI display.
+- Lookup by prefix → constant-time comparison of the hash (`crypto.timingSafeEqual`).
+- The pepper is a separate Kubernetes Secret from the database credentials.
+- Revocation sets `revoked_at`; the hash row stays for audit continuity.
+- Rotation: issue a new key, revoke the old one — both keys may briefly coexist.
+
+**Verified by:** a test asserting the plaintext key never appears in the DB; a test asserting a
+revoked key returns `401` on the very next request.
+
+### C2 — Role enforcement (protects A1, A5)
+
+Two roles for two users:
+
+| Role | May do |
+| --- | --- |
+| `admin` | everything, including `create_product`, `update_order_status`, upstream enable/disable, reading the audit log |
+| `reader` | read-only tools (`list_products`, `list_orders`, `get_order`), no admin API |
+
+- The role comes from the authenticated principal, **never** from a request body or header a
+  client controls.
+- Denials return a structured `403`/MCP error and still write an audit row with
+  `outcome: "denied"`.
+
+**Verified by:** a matrix test — each user × each tool → expected allow/deny.
+
+### C3 — Upstream credential isolation (protects A1)
+
+- WooCommerce consumer key/secret exist **only** as env vars inside the `woocommerce-mcp` Pod,
+  mounted from a Kubernetes Secret.
+- They are never sent to the gateway, never returned by any API, never logged (log scrubbing
+  for `ck_`/`cs_` prefixes), never in the dashboard bundle.
+- The gateway holds only the *URL* of the WooCommerce MCP server, not store credentials.
+- Store API keys get the **minimum WooCommerce permission** that works (`read` vs `read/write`
+  split if two keys are feasible).
+
+**Verified by:** grep-style test over logs/responses for `ck_`/`cs_`; a code review checklist
+item on every new endpoint.
+
+### C4 — URL validation / SSRF prevention (protects A6)
+
+The gateway will call URLs that operators can configure, which is the classic SSRF foot-gun.
+
+- Upstream base URLs come from configuration, not from client requests. A downstream client can
+  select *which configured upstream*, never *where* it points.
+- On load, each URL is validated: `https`/`http` only, no embedded credentials, no
+  user-info/`@` tricks, normalized before use.
+- DNS resolution is checked at connect time: reject loopback, link-local (`169.254.0.0/16`),
+  private ranges (`10/8`, `172.16/12`, `192.168/16`), CGNAT (`100.64/10`), IPv6 equivalents —
+  **unless** an explicit allow-list entry permits the in-cluster service range.
+- Re-validate after redirects; cap redirects (≤3) and re-check every hop.
+- No proxy inheritance from environment variables for upstream calls.
+- Response size limits so a malicious upstream cannot exhaust memory.
+
+**Verified by:** unit tests for each rejected host form (`http://169.254.169.254/…`,
+`http://user@internal`, decimal-IP encodings, redirect-to-metadata) and a test that a
+configured in-cluster URL still works.
+
+### C5 — Tool permissions (protects A1, A5)
+
+Per-principal grants: `allowed_upstreams` and `allowed_tools` stored in Postgres.
+
+- A tool call is checked in order: key valid → not revoked → upstream enabled → tool permitted
+  by role → tool permitted by grant → arguments match JSON Schema.
+- Upstream **enable/disable** is a first-class control: disabling `woocommerce` instantly
+  removes its tools from `tools/list` and rejects `tools/call` with a clear error.
+- Tool inputs are validated with zod against the registered schema **before** any outbound
+  call, so arguments cannot smuggle query parameters (e.g. an unexpected `status` filter).
+
+**Verified by:** disable-upstream test (list shrinks, call rejects), schema-rejection tests.
+
+### C6 — Audit logs (protects A4, forensics overall)
+
+One append-only table, written by the gateway's single execution path:
+
+```text
+id, occurred_at, key_id, user_id, role, upstream_id, tool_name, qualified_name,
+outcome(success|error|timeout|denied), duration_ms, error_code
+```
+
+- Written for **every** outcome, including denials and timeouts — a log that only records
+  successes is attacker-friendly.
+- Arguments and responses are **not** stored wholesale (they contain PII/order data); store a
+  schema-validated summary or a hash instead.
+- Application rows are `INSERT`-only from the app's DB role (no `UPDATE`/`DELETE` grant).
+- The gateway's own failures must not lose the record of the failure: write-ahead to the
+  request handler before returning.
+
+**Verified by:** a test that a denied call produces a row; a DB-role test that the app cannot
+`DELETE` rows.
+
+### C7 — Failure isolation / resilience (protects availability of A6/A7)
+
+- Per-upstream connect timeout and per-call timeout (defaults in `packages/shared`).
+- One upstream failing → only its tools return structured errors; all other upstreams keep
+  serving.
+- Bounded concurrency per upstream; a bulk job cannot starve interactive calls.
+- Input and response size limits; JSON body size cap on `/mcp` and `/api`.
+- Upstream health is tracked so the dashboard can show degraded state rather than hanging.
+- Gateway restarts are handled by Kubernetes, not by an upstream's misbehaviour.
+- Rate limiting per API key (slow-start, configurable).
+
+**Verified by:** a fault-injection test — kill `woocommerce-mcp` mid-suite and assert
+`inventory_*` tools still succeed and the failing ones return `timeout`/`unreachable` errors
+within the deadline.
+
+### C8 — Supporting controls
+
+| Control | Notes |
+| --- | --- |
+| TLS | Terminated at Ingress; cluster-internal traffic stays on the private network (documented as accepted risk for local; NetworkPolicy in prod values). |
+| Secrets in git | Impossible by policy: `.env` git-ignored, `.env.example` holds placeholders only, real values only in Kubernetes Secrets. |
+| Least-privilege RBAC | Each Pod gets its own ServiceAccount; no `cluster-admin`; the gateway's DB role can `INSERT`/`SELECT` only. |
+| Dependency hygiene | `npm audit` in the check script; lockfile committed; free/open-source dependencies only (budget constraint). |
+| Input validation | zod at every boundary: REST body, MCP tool args, upstream responses (they are untrusted too). |
+| Logging hygiene | Structured logs, scrubbed of `ck_`, `cs_`, `sk_`, `Bearer` and API-key-looking strings. |
+| Error messages | Never echo internal URLs, stack traces or SQL to clients. |
+
+---
+
+## 4. Threat → control map
+
+| Threat | STRIDE | Control |
+| --- | --- | --- |
+| Stolen DB dump → usable API keys | Tampering | C1 hashing + pepper |
+| User A calls tools meant for User B | Elevation of privilege | C2 roles, C5 grants |
+| Client-supplied upstream URL → internal scan | SSRF / Elevation | C4 URL validation |
+| Gateway response/log leaks store credentials | Information disclosure | C3 isolation, C8 scrubbing |
+| Caller hides misuse | Repudiation | C6 audit log |
+| Disabling one upstream bricks everything | Denial of service | C7 isolation, C5 toggles |
+| Malicious tool arguments → crafted WooCommerce query | Tampering | C5 schema validation |
+| Compromised upstream forges responses | Tampering | B3 treating upstreams as untrusted input, response validation |
+| Secret committed to git | Information disclosure | C8 policy + `.gitignore` |
+| Chat agent tricked by prompt injection into a write | Elevation of privilege | agent uses ordinary path: C2 + C5 + schema validation still apply |
+
+---
+
+## 5. Explicitly out of scope (for now)
+
+- **WooCommerce/WordPress hardening** — we assume the store's own auth and updates are managed
+  by the store operator.
+- **Multi-tenant isolation between different *companies*** — this project has two users in one
+  organisation.
+- **Full WAF / DDoS protection** — no paid services allowed.
+- **Formal cryptographic review** — we use standard library primitives (SHA-256, CSPRNG,
+  `timingSafeEqual`) and standard constructions only.
+- **Non-HTTP lateral movement inside the cluster** — deferred until NetworkPolicy in the
+  production values milestone.
+
+---
+
+## 6. Security milestone exit criteria
+
+The security milestone is complete when every control C1–C7 has:
+
+1. working code (not a stub),
+2. an automated test that fails if the control is removed,
+3. a demo script showing the control in action, and
+4. a paragraph here updated from *planned* to *implemented* with the test name.

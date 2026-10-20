@@ -1,0 +1,19 @@
+{
+  "name": "@mcp/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend API and MCP gateway. Acts as an MCP server to downstream clients and an MCP client to upstream MCP servers. Implementation starts in a later milestone.",
+  "type": "module",
+  "dependencies": {
+    "@mcp/shared": "*",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "express": "^5.3.0",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1"
+  }
+}
