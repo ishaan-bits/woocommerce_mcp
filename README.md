@@ -23,7 +23,8 @@ beginner-friendly language.
 
 ## Current status
 
-**Milestone 0 complete (scaffold) and Milestone 1 complete (WooCommerce MCP server).**
+**Milestone 0 complete (scaffold), Milestone 1 complete (WooCommerce MCP server) and
+Milestone 2 complete (gateway core).**
 
 | Area | Status |
 | --- | --- |
@@ -31,7 +32,8 @@ beginner-friendly language.
 | `packages/shared` contract types | ✅ builds, type-checks, imports (5 WooCommerce tool names) |
 | `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 69 tests, no real store needed |
 | Documentation (`docs/`) | ✅ architecture, decisions, threat model, learning guide |
-| Gateway, dashboard, inventory/support MCP servers | ⬜ **not implemented** — package manifests only, no source, no endpoints |
+| Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, 36 tests, no Docker/network needed |
+| Dashboard, inventory/support MCP servers | ⬜ **not implemented** — package manifests only, no source, no endpoints |
 | Docker images / Kubernetes / Helm | ⬜ **not implemented** — `infra/*` contain explanatory READMEs only |
 | PostgreSQL schema, API keys, audit log | ⬜ not implemented |
 | LLM / chat agent | ⬜ not implemented (no API key required or used) |
@@ -41,6 +43,9 @@ are deliberately honest: empty workspaces have **no placeholder endpoints** that
 mistaken for finished features. The WooCommerce MCP server is tested against a **mock**
 WooCommerce REST API — it has **not** been verified against a real store (none is available
 on this machine); see [services/woocommerce-mcp/README.md](./services/woocommerce-mcp/README.md).
+The gateway is tested against **fake in-process MCP upstreams** — it has **not** been paired
+with the real WooCommerce MCP server process yet (that live pairing belongs to Milestones 6–7);
+see [apps/gateway/README.md](./apps/gateway/README.md).
 
 ---
 
@@ -69,7 +74,7 @@ Verification of these versions happened against the npm registry on 2026-10-21 �
 mcp/
 ├── apps/
 │   ├── dashboard/              # React + Vite frontend        [manifest only]
-│   └── gateway/                # API + MCP gateway            [manifest only]
+│   └── gateway/                # API + MCP gateway            [implemented]
 ├── services/
 │   ├── woocommerce-mcp/        # Our WooCommerce MCP server   [implemented]
 │   ├── inventory-mcp/          # Independent inventory server [manifest only]
@@ -105,23 +110,27 @@ mcp/
 | npm | 11.19.0 | workspaces, installs |
 | Git | 2.55.0 | version control |
 | Python 3 | 3.9.6 | not required by the project |
+| Colima | 0.10.3 | runs the local Docker engine VM (Docker Desktop not used) |
+| Docker CLI | 29.9.1 (server 29.5.2 via Colima) | image builds (Milestone 6) |
+| kubectl | 1.37.1 | Kubernetes (Milestone 7) |
+| kind | 0.33.0 | local cluster (Milestone 7) — cluster `urumi-local` running |
+| Helm | 4.3.1 | charts (Milestone 7) |
 
-**Not installed — required by later milestones (not installed by this milestone):**
+**Still not installed:**
 
 | Tool | Needed from | Install when (all free) |
 | --- | --- | --- |
-| Docker | image builds (Milestone 6) | `brew install docker` (Docker Desktop or OrbStack/colima) |
-| kubectl | Kubernetes (Milestone 7) | `brew install kubectl` |
-| Helm | Kubernetes (Milestone 7) | `brew install helm` |
-| Kind or k3d | local cluster (Milestone 7) | `brew install kind` (or `k3d`) |
 | Ollama | optional local LLM (Milestone 9) | optional; Groq free tier is the default plan |
 
 Also not present: a WooCommerce store. Milestone 1 shipped against a **mock** WooCommerce REST
 API (no store, Docker or network needed); verifying against a real store — a free local
 container or trial store — remains an open follow-up.
 
-**Environment limitation:** until Docker + a local cluster exist, **no container or Kubernetes
-check can run**. That does not block Milestones 1–5 (pure Node/TypeScript work).
+**Environment status (updated 2026-10-21):** Docker (via Colima), kubectl, kind and Helm are
+installed, and a local kind cluster `urumi-local` is running (created for Milestones 6–7 with
+explicit approval). No container or Kubernetes artifact exists yet — the Dockerfiles and the
+Helm chart still belong to Milestones 6–7, so `npm run check` runs **no container/Kubernetes
+check** until then. That does not block the application milestones (3–5, pure Node/TypeScript).
 
 ---
 
@@ -140,8 +149,17 @@ cd services/woocommerce-mcp
 WOOCOMMERCE_STORE_URL=... WOOCOMMERCE_CONSUMER_KEY=... WOOCOMMERCE_CONSUMER_SECRET=... npm run dev
 ```
 
+To run the gateway locally (it needs at least one upstream URL):
+
+```bash
+cd apps/gateway
+WOOCOMMERCE_MCP_URL=http://127.0.0.1:8081/mcp npm run dev
+```
+
 See [services/woocommerce-mcp/README.md](./services/woocommerce-mcp/README.md) for the tools,
-endpoints, test strategy and known limitations.
+endpoints, test strategy and known limitations, and
+[apps/gateway/README.md](./apps/gateway/README.md) for gateway endpoints, environment
+variables, routing rules and test strategy.
 
 ---
 
@@ -150,8 +168,8 @@ endpoints, test strategy and known limitations.
 | # | Milestone | Deliverable |
 | --- | --- | --- |
 | 0 | **Inspect, document, scaffold** | ✅ done |
-| 1 | WooCommerce MCP server | ← you are here: 5 tools over Streamable HTTP, tested against a mock store |
-| 2 | Gateway core | MCP server + client, discovery, aggregation, routing, timeouts |
+| 1 | WooCommerce MCP server | ✅ done: 5 tools over Streamable HTTP, tested against a mock store |
+| 2 | **Gateway core** | ← you are here: MCP server + client, discovery, aggregation, routing, timeouts |
 | 3 | Auth + audit | 2 users, hashed revocable keys, roles, audit log (Postgres) |
 | 4 | Dashboard | React UI: chat, tool list, upstream toggles, audit view |
 | 5 | Inventory + Support servers | prove "add an upstream without gateway code" |

@@ -321,3 +321,77 @@ recorded as future work if a plain-HTTP store is ever required.
 **Trade-offs.** Local plain-HTTP WordPress installs will get HTTP 401 until the store is put
 behind HTTPS (or the operator terminates TLS in front of it). Honest failure with a pointed
 message beats silent credential leakage.
+
+## D18 — The gateway validates tool arguments with ajv against the published JSON Schema
+
+**Context.** Threat-model C5 requires validating tool inputs *against the registered schema*
+**before** any outbound call, so unexpected arguments (e.g. an extra `status` filter) never
+reach a WooCommerce query string. The gateway learns schemas from MCP `tools/list`, which
+publishes **JSON Schema**, not zod. zod v4 cannot parse JSON Schema, and the SDK's
+zod → JSON Schema conversion is one-way. Writing this down matters because C5's original
+wording ("validated with zod") is not literally implementable at the gateway layer.
+
+**Decision.** The gateway compiles each tool's published `inputSchema` with **ajv** (already
+in the dependency tree transitively, MIT, zero audit findings) and rejects invalid arguments
+with `McpError -32602` *before* creating any upstream request. The upstream MCP servers keep
+validating with their own zod schemas (Milestone 1 behavior unchanged) — two validators on
+the same contract, one per side.
+
+**Alternatives.** (a) Forward blindly and let upstreams validate — loses the "before any
+outbound call" property entirely; a misbehaving upstream would receive arbitrary arguments.
+(b) Duplicate each upstream's zod schemas in the gateway — two sources of truth that drift
+the moment an upstream changes; defeats the reason the gateway consumes *published* schemas.
+(c) Use a zod-from-JSON-Schema converter package — an extra, less-standard dependency for
+what ajv already does well.
+
+**Trade-offs.** ajv becomes a declared direct dependency (it was already installed; `npm
+audit` stays clean). Two validators exist in the system, but they cannot disagree about the
+*contract*: the gateway validates against the exact schema the upstream itself published.
+If ajv accepts something zod rejects (or vice versa) the upstream still runs its own check as
+the final word — the gateway validation is a fast pre-filter, not a replacement.
+
+## D19 — Gateway scripts build `@mcp/shared` first (the D14 follow-through)
+
+**Context.** D14 observed that npm workspaces do **not** run scripts in topological order, so
+a consumer of `@mcp/shared`'s `dist/` must build it explicitly. `woocommerce-mcp` sidestepped
+this by not importing shared at all, but the gateway is shared's intended consumer: routing
+uses `UPSTREAM_IDS`, the contract check uses `WOOCOMMERCE_TOOLS`, and the public types come
+from `AggregatedTool`/`UpstreamConfig`/`UpstreamHealth`.
+
+**Decision.** Every script in `apps/gateway/package.json` that touches TypeScript
+(`build`, `typecheck`, `test`) starts with `npm run build -w @mcp/shared && …` — one cheap,
+deterministic `tsc` before the real work.
+
+**Alternatives.** (a) Don't import shared — redeclare `UPSTREAM_IDS` in the gateway, which is
+exactly the drift D14 was written to prevent. (b) `prepare`/`prepack` hooks — invisible
+machinery that surprises people and misbehaves with `--ignore-scripts`. (c) Only a root-level
+orchestration script — but developers (and CI) run workspace scripts directly too.
+
+**Trade-offs.** `@mcp/shared` is rebuilt several times per `npm run check` run; it compiles
+in well under a second, so the redundancy costs little and removes the "works only if you
+remembered to build first" trap.
+
+## D20 — Upstream availability policy: last-known tools stay published while an upstream is down
+
+**Context.** § 9.2 requires that when the WooCommerce MCP server is down its tools return
+structured errors while every other upstream keeps working — and the learning guide's Stage 3
+checkpoint phrases the same promise as: *the gateway still serves the other upstreams' tools*.
+That leaves a design question for `tools/list` itself: does a dead upstream make its tools
+vanish immediately?
+
+**Decision.** Tool lists are cached per upstream for `TOOL_CACHE_TTL_MS` (default 60 s).
+A discovery failure **keeps the last-known list** for that upstream (calls against it then
+fail structurally: `unreachable` / `did not respond within N ms`, always without internal
+URLs — threat-model C8). An upstream that has **never** answered is omitted from `tools/list`
+but still returns a structured error if called by name. `/readyz` reports per-upstream
+reachability without ever failing the gateway itself.
+
+**Alternatives.** (a) Fail the whole `tools/list` if any upstream is down — one flaky
+upstream breaks every client; violates isolation. (b) Evict tools the moment a refresh fails
+— the tool list flaps, breaking cached clients, docs and dashboards during blips. (c) Cache
+forever — stale schemas and dead tools accumulate; rejected.
+
+**Trade-offs.** After an outage that overlaps a schema change, the gateway can validate
+against a slightly stale schema until the TTL expires (the upstream's own validation is still
+the final word, so nothing unsafe is forwarded). Availability with honest `/readyz` reporting
+beats a tool list that flaps with every network hiccup.

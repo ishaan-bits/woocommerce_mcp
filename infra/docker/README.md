@@ -21,6 +21,7 @@ Planned rules (decided in advance so images are consistent):
 - No secrets baked in — secrets arrive at runtime from Kubernetes Secrets.
 - One base image family (official `node:<lts>-alpine`), pinned by tag.
 
-**Blocker:** Docker is not installed on this machine, so images cannot be built or verified
-yet. This directory is created now only so the repository layout matches the documented
-architecture. Do not describe any image as "working".
+**Status (updated 2026-10-21):** Docker (CLI + engine via Colima) **is** installed, so
+images *could* now be built — but no Dockerfile exists yet (Milestone 6) and no image has
+been built or verified. This directory still only explains the planned layout. Do not
+describe any image as "working".

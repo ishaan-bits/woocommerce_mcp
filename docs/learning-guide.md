@@ -1,9 +1,9 @@
 # Learning Guide — staged roadmap
 
 A sequence of what to understand **before** each implementation phase, how to prove you
-understood it, and questions a recruiter/interviewer could reasonably ask. Stages 0–2 now have
-implementations in this repo (scaffold, then `services/woocommerce-mcp`); the checkpoints say
-what is proven today and what is still open.
+understood it, and questions a recruiter/interviewer could reasonably ask. Stages 0–3 now have
+implementations in this repo (scaffold, `services/woocommerce-mcp`, then `apps/gateway`); the
+checkpoints say what is proven today and what is still open.
 
 Suggested rhythm: for each stage, learn → build (in its milestone) → explain it back in one
 paragraph without notes. If you cannot explain it in plain words, you do not know it yet.
@@ -92,7 +92,7 @@ differs; that is the remaining Stage 2 checkpoint.
 
 ---
 
-## Stage 3 — The gateway (Milestone 2)
+## Stage 3 — The gateway (Milestone 2) — *implemented (fake upstreams)*
 
 **Concepts**
 
@@ -105,7 +105,10 @@ differs; that is the remaining Stage 2 checkpoint.
 - Reverse proxies and SSE: why `proxy_buffering off` matters.
 
 **Checkpoint:** with `woocommerce-mcp` stopped, the gateway still serves the other upstreams'
-tools and returns a structured error for WooCommerce ones.
+tools and returns a structured error for WooCommerce ones. *Proven today by
+`apps/gateway/test/mcp-failure.test.ts` with fake upstreams (one stops answering after
+discovery, one never accepts connections, one is disabled); the live variant — really stopping
+`services/woocommerce-mcp` beside a running gateway — is still to be demonstrated.*
 
 **Recruiter questions**
 - Two upstreams both expose `list_products`. What does your client send and how do you route it?

@@ -321,8 +321,11 @@ different client tomorrow.
 **Why Helm matters beyond convenience:** it is the mechanism that makes "same stack, two
 environments" a config diff instead of two drifting copies of YAML.
 
-**Environment limitation (blocking for that milestone):** Docker, kubectl, Helm, Kind and k3d
-are **not installed** on this machine. See the README prerequisites section.
+**Environment status (updated 2026-10-21):** Colima (Docker engine), Docker CLI, kubectl, kind
+and Helm **are installed**, and a local kind cluster `urumi-local` is running (created with
+explicit approval for Milestones 6–7). No image has been built and no chart exists yet, so the
+deployment milestones still have nothing real to describe — see the README prerequisites
+section.
 
 ---
 
@@ -444,9 +447,37 @@ is available on this machine; see README). Basic auth requires the store to be s
 HTTPS (D17); `list_orders` accepts a single status per call because that is all the
 WooCommerce endpoint supports.
 
+### Implemented in Milestone 2 (verifiable now)
+
+`apps/gateway` is both an MCP server (downstream) and an MCP client (upstreams), built on the
+same official TypeScript SDK:
+
+| Piece | Implementation |
+| --- | --- |
+| MCP server side | Streamable HTTP at `/mcp`, one SDK `Server` per session (D15 pattern); `tools/list` serves the aggregated registry, `tools/call` routes by prefix |
+| MCP client side | one SDK `Client` + streamable-HTTP transport per upstream; lazy connect bounded by `UPSTREAM_CONNECT_TIMEOUT_MS`, per-call timeout via `RequestOptions.timeout` |
+| Qualified naming (D5) | `woocommerce_list_products` etc. — split on the **first** known upstream prefix, so local names may contain underscores |
+| Registry | discovers each upstream's tools with `tools/list`, caches them for `TOOL_CACHE_TTL_MS` (default 60 s), re-discovers when stale |
+| Contract check (D14) | at discovery, warns `woocommerce_tool_contract_drift` if any of the five contract tool names disappears upstream |
+| Pre-forward validation (D18) | ajv compiles each tool's **published** JSON Schema; invalid arguments are rejected with `McpError -32602` before any outbound call |
+| Failure isolation (learning-guide Stage 3 checkpoint) | a timed-out upstream returns a structured `isError` result (`upstream '<id>' did not respond within N ms` — never an internal URL); other upstreams keep working; a stopped-but-known upstream keeps serving its last-known list for one TTL window; an upstream that never answered is omitted from `tools/list` yet still answers clearly if called by name |
+| Probes | `/healthz` OK once listening; `/readyz` reports sessions plus per-upstream `reachable`/`last_error` **without** failing the gateway itself |
+| Draining | `SIGTERM`/`SIGINT` stop new sessions, answer `503`, finish in-flight work, exit 0 |
+
+Verified by a **36-test suite** (`npm test -w @mcp/gateway`) using the official SDK client
+against in-process fake upstreams over loopback — including an upstream that answers slowly
+past the timeout, one that never accepts connections, and a disabled one — so the suite runs
+with **no Docker, no network and no real upstream process**.
+
+**Honest gaps.** No authentication or audit log yet (Milestone 3). Upstreams are enabled by
+setting `*_MCP_URL` environment variables; dashboard/Postgres toggles come in Milestone 4.
+Rate limiting and bounded per-upstream concurrency (threat-model C7) are not enforced yet.
+The gateway has **not** been run against the real `services/woocommerce-mcp` process — tests
+use fake upstreams, and the live pairing belongs to Milestones 6–7.
+
 ### Planned — deliberately **not** present yet
 
-- Any source in `apps/gateway`, `apps/dashboard`, `services/inventory-mcp` or
+- Any source in `apps/dashboard`, `services/inventory-mcp` or
   `services/support-mcp` (package manifests only — no placeholder endpoints, so nothing can
   be mistaken for a working feature).
 - Docker images, Kubernetes manifests, Helm charts (`infra/*` contain explanatory READMEs only).
@@ -462,8 +493,8 @@ Nothing in this repository should be described as "working" unless a check in
 | # | Milestone | Why it comes here |
 | --- | --- | --- |
 | 0 | **Inspect, document, scaffold** | You cannot interview-well on code you have not drawn first, and you cannot draw it without knowing your toolchain. |
-| 1 | **WooCommerce MCP server** ← you are here | Smallest end-to-end unit: one server, one real external API, no gateway. Proves Streamable HTTP works before anything depends on it. |
-| 2 | **Gateway core** (MCP server + client, registry, routing, timeouts) | Now there are exactly two moving parts to debug. |
+| 1 | **WooCommerce MCP server** | Smallest end-to-end unit: one server, one real external API, no gateway. Proves Streamable HTTP works before anything depends on it. |
+| 2 | **Gateway core** (MCP server + client, registry, routing, timeouts) ← you are here | Now there are exactly two moving parts to debug. |
 | 3 | **Postgres + auth** (two users, hashed API keys, roles, audit log) | Auth without a data store is theatre; data store without a call path has nothing to protect. |
 | 4 | **Dashboard backend + React UI** | UI over a stable API, not over a moving target. |
 | 5 | **Inventory + Support MCP servers** | Proves the "add an upstream without touching gateway code" claim. |

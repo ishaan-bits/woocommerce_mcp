@@ -30,5 +30,6 @@ Design commitments made now, implemented later:
 - **Environment separation** lives entirely in values: image tags, replicas, resources, ingress
   class, persistence size.
 
-**Blockers:** Docker, kubectl, Helm, Kind and k3d are not installed on this machine. Nothing in
-this directory should be treated as deployable.
+**Status (updated 2026-10-21):** Docker (via Colima), kubectl, kind and Helm 4.3.1 **are**
+installed and a local kind cluster `urumi-local` is running — but the chart itself does not
+exist yet (Milestone 7), so nothing in this directory should be treated as deployable.

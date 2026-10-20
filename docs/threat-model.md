@@ -126,8 +126,10 @@ Per-principal grants: `allowed_upstreams` and `allowed_tools` stored in Postgres
   by role → tool permitted by grant → arguments match JSON Schema.
 - Upstream **enable/disable** is a first-class control: disabling `woocommerce` instantly
   removes its tools from `tools/list` and rejects `tools/call` with a clear error.
-- Tool inputs are validated with zod against the registered schema **before** any outbound
-  call, so arguments cannot smuggle query parameters (e.g. an unexpected `status` filter).
+- Tool inputs are validated against the registered schema **before** any outbound call — with
+  ajv at the gateway (the registry stores the JSON Schema MCP publishes; decision D18) and with
+  zod inside each MCP server — so arguments cannot smuggle query parameters (e.g. an unexpected
+  `status` filter).
 
 **Verified by:** disable-upstream test (list shrinks, call rejects), schema-rejection tests.
 
