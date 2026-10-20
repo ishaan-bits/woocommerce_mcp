@@ -16,6 +16,8 @@ export interface AppConfig {
   toolCacheTtlMs: number;
   logLevel: LogLevel;
   upstreams: UpstreamConfig[];
+  apiKeyPepper: string;
+  databaseUrl: string;
 }
 
 export const DEFAULT_HOST = "127.0.0.1";
@@ -94,6 +96,24 @@ const envSchema = z.object({
       error: "LOG_LEVEL must be one of debug, info, warn, error",
     })
     .default("info"),
+  apiKeyPepper: z
+    .string({
+      error: "API_KEY_PEPPER is required and must be at least 16 characters",
+    })
+    .min(16, "API_KEY_PEPPER is required and must be at least 16 characters"),
+  databaseUrl: z
+    .string({ error: "DATABASE_URL is required (postgres:// or postgresql:// URL)" })
+    .refine(
+      (value) => {
+        try {
+          const url = new URL(value);
+          return url.protocol === "postgres:" || url.protocol === "postgresql:";
+        } catch {
+          return false;
+        }
+      },
+      "DATABASE_URL must be a valid postgres:// or postgresql:// URL",
+    ),
 });
 
 function trimmed(env: Record<string, string | undefined>, key: string): string | undefined {
@@ -113,6 +133,8 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     timeoutMs: trimmed(env, "UPSTREAM_TIMEOUT_MS"),
     connectTimeoutMs: trimmed(env, "UPSTREAM_CONNECT_TIMEOUT_MS"),
     logLevel: trimmed(env, "LOG_LEVEL"),
+    apiKeyPepper: trimmed(env, "API_KEY_PEPPER"),
+    databaseUrl: trimmed(env, "DATABASE_URL"),
   });
 
   const issues: string[] = [];
@@ -123,7 +145,16 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
   const upstreams: UpstreamConfig[] = [];
   const data = parsed.success
     ? parsed.data
-    : { host: DEFAULT_HOST, port: DEFAULT_PORT, toolCacheTtlMs: DEFAULT_TOOL_CACHE_TTL_MS, timeoutMs: DEFAULT_UPSTREAM_TIMEOUT_MS, connectTimeoutMs: DEFAULT_CONNECT_TIMEOUT_MS, logLevel: "info" as LogLevel };
+    : {
+        host: DEFAULT_HOST,
+        port: DEFAULT_PORT,
+        toolCacheTtlMs: DEFAULT_TOOL_CACHE_TTL_MS,
+        timeoutMs: DEFAULT_UPSTREAM_TIMEOUT_MS,
+        connectTimeoutMs: DEFAULT_CONNECT_TIMEOUT_MS,
+        logLevel: "info" as LogLevel,
+        apiKeyPepper: "",
+        databaseUrl: "",
+      };
 
   for (const upstreamId of UPSTREAM_IDS) {
     const envKey = UPSTREAM_URL_ENV[upstreamId];
@@ -145,7 +176,7 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     });
   }
 
-  if (issues.length === 0 && upstreams.length === 0) {
+  if (upstreams.length === 0) {
     issues.push(
       `at least one upstream URL is required: set ${UPSTREAM_IDS.map((id) => UPSTREAM_URL_ENV[id]).join(", ")}`,
     );
@@ -161,6 +192,8 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     toolCacheTtlMs: data.toolCacheTtlMs,
     logLevel: data.logLevel,
     upstreams,
+    apiKeyPepper: data.apiKeyPepper,
+    databaseUrl: data.databaseUrl,
   };
 }
 

@@ -25,6 +25,11 @@ npm run build
 
 echo
 echo "==> Tests (workspaces that define a test script)"
+if [[ -n "${TEST_DATABASE_URL:-}" ]]; then
+  echo "TEST_DATABASE_URL is set - the gateway PostgreSQL integration suite WILL RUN"
+else
+  echo "TEST_DATABASE_URL is unset - gateway PostgreSQL integration tests skip with a printed reason"
+fi
 npm run test
 
 echo

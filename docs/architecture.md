@@ -210,9 +210,9 @@ enabled, which makes clients and docs unstable. Recorded as decision D5.
 ```text
 tools/call { name: "woocommerce_list_products", arguments: {...} }
    │
-   ├─ 1. authenticate API key → principal (user, role, allowed tools)
-   ├─ 2. authorize: is this principal allowed this qualified tool?      → 403 + audit "denied"
-   ├─ 3. validate arguments against the cached JSON Schema (zod)        → -32602 + audit
+   ├─ 1. authenticate API key → principal (user, role, allowed tools)   → 401 + audit auth_failed
+   ├─ 2. authorize: role ceiling + upstream grant + tool grant          → MCP -32003 / REST 403 + audit "denied"
+   ├─ 3. validate arguments against the cached JSON Schema (ajv)        → -32602 + audit
    ├─ 4. strip prefix → upstreamId + local name; check upstream enabled → error + audit
    ├─ 5. forward over that upstream's MCP session with a timeout
    │        ├─ success → audit "success", return result
@@ -464,16 +464,44 @@ same official TypeScript SDK:
 | Probes | `/healthz` OK once listening; `/readyz` reports sessions plus per-upstream `reachable`/`last_error` **without** failing the gateway itself |
 | Draining | `SIGTERM`/`SIGINT` stop new sessions, answer `503`, finish in-flight work, exit 0 |
 
-Verified by a **36-test suite** (`npm test -w @mcp/gateway`) using the official SDK client
+Verified at that milestone by a **36-test suite** (grown to 77 + 5 PostgreSQL integration
+tests by Milestone 3; `npm test -w @mcp/gateway`) using the official SDK client
 against in-process fake upstreams over loopback — including an upstream that answers slowly
 past the timeout, one that never accepts connections, and a disabled one — so the suite runs
 with **no Docker, no network and no real upstream process**.
 
-**Honest gaps.** No authentication or audit log yet (Milestone 3). Upstreams are enabled by
-setting `*_MCP_URL` environment variables; dashboard/Postgres toggles come in Milestone 4.
+**Honest gaps.** Upstreams are enabled by setting `*_MCP_URL` environment variables;
+dashboard-side toggles come in Milestone 4.
 Rate limiting and bounded per-upstream concurrency (threat-model C7) are not enforced yet.
 The gateway has **not** been run against the real `services/woocommerce-mcp` process — tests
 use fake upstreams, and the live pairing belongs to Milestones 6–7.
+
+### Implemented in Milestone 3 (verifiable now)
+
+PostgreSQL-backed authentication, authorization and audit (threat-model B2/C1/C2/C5/C6):
+
+| Piece | Implementation |
+| --- | --- |
+| Schema + migrations | `apps/gateway/migrations/001_init.sql` — `users`, `api_keys`, `audit_log` — applied by `npm run migrate` through a tracked `schema_migrations` table; seeds the two demo principals (`admin-demo`, `reader-demo`) with their grants |
+| API keys (C1 / D8) | `umk_` + base64url(32 random bytes), shown **once** at issuance, stored as `sha256(key‖API_KEY_PEPPER)` hex plus a 12-char public prefix; constant-time verification (`crypto.timingSafeEqual`), **no caching**, so revocation binds on the next request |
+| Auth middleware (B2) | fail-closed on missing / malformed / structurally invalid / unknown / revoked credentials — all with the *same* 401 body (no oracle), the exact reason recorded only in the audit row; a database outage answers 503 and denies (`service_unavailable`); `/healthz` and `/readyz` stay public per D21 |
+| Authorization (C2 / C5) | check order: role ceiling (reader cannot reach write-verb tools) → upstream grant → exact `tools:<qualified>` grant, all derived from the authenticated principal; MCP denials answer `McpError -32003`, admin-API denials answer `403` and still write an `access_denied` row |
+| Admin API | `GET /api/me`, `GET/POST /api/keys`, `POST /api/keys/:id/revoke` (idempotent), `GET /api/audit` (limit 1–100, keyset `before` cursor per D22) — admin-only, reader receives 403 |
+| Audit writer (C6 / §5.4) | the single `createAuditWriter` path, awaited write-ahead, **exactly one row per tool call including denials**; `action` column per D22; fields sanitized (control characters stripped, 200-char cap, conservative error-code charset); plaintext keys, arguments and responses are never stored |
+| Least-privilege DB role | migration runner creates `mcp_gateway_app`: `INSERT`+`SELECT` on `audit_log` (append-only), `SELECT` on `users`/`api_keys`, column-limited `UPDATE (revoked_at)` on `api_keys`, no `DELETE` anywhere |
+
+Verified by a **77-test suite** (`npm test -w @mcp/gateway`) where fakes sit only at the
+upstream and database edges, plus a **5-test PostgreSQL integration suite**
+(`test/integration/postgres.test.ts`) that runs migrations, the auth middleware, the admin
+API, the DB-role privilege checks and the full MCP exactly-one-audit-row flow against a
+**real PostgreSQL 17** container. The integration suite runs when `TEST_DATABASE_URL` is
+set and prints an explicit skip reason when it is not — it is never skipped silently.
+
+**Honest gaps.** Two seeded local users only — there is no dashboard login/session yet
+(Milestone 4), no rate limiting or bounded per-upstream concurrency (threat-model C7), and
+key bootstrap in tests writes directly through the repository (production bootstrap tooling
+is ops work). The integration suite has not been exercised against a managed PostgreSQL
+with TLS; it runs against a disposable local container.
 
 ### Planned — deliberately **not** present yet
 
@@ -481,7 +509,8 @@ use fake upstreams, and the live pairing belongs to Milestones 6–7.
   `services/support-mcp` (package manifests only — no placeholder endpoints, so nothing can
   be mistaken for a working feature).
 - Docker images, Kubernetes manifests, Helm charts (`infra/*` contain explanatory READMEs only).
-- WooCommerce credentials, LLM integration, API keys, audit logs, Postgres schema.
+- A real WooCommerce store's credentials, LLM integration, dashboard login/session,
+  rate limiting / bounded per-upstream concurrency (threat-model C7).
 
 Nothing in this repository should be described as "working" unless a check in
 `scripts/check.sh` proves it.
@@ -494,9 +523,9 @@ Nothing in this repository should be described as "working" unless a check in
 | --- | --- | --- |
 | 0 | **Inspect, document, scaffold** | You cannot interview-well on code you have not drawn first, and you cannot draw it without knowing your toolchain. |
 | 1 | **WooCommerce MCP server** | Smallest end-to-end unit: one server, one real external API, no gateway. Proves Streamable HTTP works before anything depends on it. |
-| 2 | **Gateway core** (MCP server + client, registry, routing, timeouts) ← you are here | Now there are exactly two moving parts to debug. |
+| 2 | **Gateway core** (MCP server + client, registry, routing, timeouts) | Now there are exactly two moving parts to debug. |
 | 3 | **Postgres + auth** (two users, hashed API keys, roles, audit log) | Auth without a data store is theatre; data store without a call path has nothing to protect. |
-| 4 | **Dashboard backend + React UI** | UI over a stable API, not over a moving target. |
+| 4 | **Dashboard backend + React UI** ← you are here | UI over a stable API, not over a moving target. |
 | 5 | **Inventory + Support MCP servers** | Proves the "add an upstream without touching gateway code" claim. |
 | 6 | **Docker images** | Wrap each unit once its runtime deps are final. |
 | 7 | **Kubernetes + Helm (local, then prod values)** | Deployment last, so manifests describe reality instead of guesses. |

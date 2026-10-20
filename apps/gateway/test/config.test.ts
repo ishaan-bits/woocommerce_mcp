@@ -4,11 +4,16 @@ import { ConfigurationError } from "../src/errors.ts";
 import { loadConfig, safeConfigSummary, UPSTREAM_URL_ENV } from "../src/config.ts";
 
 const VALID_URL = "http://127.0.0.1:8081/mcp";
+const REQUIRED_ENV = {
+  API_KEY_PEPPER: "test-pepper-0123456789abcdef",
+  DATABASE_URL: "postgresql://mcp:pw@127.0.0.1:5432/mcp_gateway",
+};
 
 describe("gateway configuration", () => {
   test("provides defaults with a single woocommerce upstream", () => {
-    const config = loadConfig({ WOOCOMMERCE_MCP_URL: VALID_URL });
+    const config = loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL });
     assert.equal(config.host, "127.0.0.1");
+    assert.equal(config.apiKeyPepper, REQUIRED_ENV.API_KEY_PEPPER);
     assert.equal(config.port, 8080);
     assert.equal(config.toolCacheTtlMs, 60_000);
     assert.equal(config.logLevel, "info");
@@ -29,6 +34,7 @@ describe("gateway configuration", () => {
 
   test("reads all three upstream URLs from their env vars", () => {
     const config = loadConfig({
+      ...REQUIRED_ENV,
       WOOCOMMERCE_MCP_URL: VALID_URL,
       INVENTORY_MCP_URL: "http://127.0.0.1:8082/mcp",
       SUPPORT_MCP_URL: "http://127.0.0.1:8083/mcp",
@@ -101,8 +107,31 @@ describe("gateway configuration", () => {
     }
   });
 
+  test("fails fast when API_KEY_PEPPER is missing or too short", () => {
+    assert.throws(
+      () => loadConfig({ ...REQUIRED_ENV, API_KEY_PEPPER: undefined, WOOCOMMERCE_MCP_URL: VALID_URL }),
+      /API_KEY_PEPPER is required and must be at least 16 characters/,
+    );
+    assert.throws(
+      () => loadConfig({ ...REQUIRED_ENV, API_KEY_PEPPER: "short", WOOCOMMERCE_MCP_URL: VALID_URL }),
+      /API_KEY_PEPPER is required and must be at least 16 characters/,
+    );
+  });
+
+  test("fails fast when DATABASE_URL is missing or not postgres", () => {
+    assert.throws(
+      () => loadConfig({ ...REQUIRED_ENV, DATABASE_URL: undefined, WOOCOMMERCE_MCP_URL: VALID_URL }),
+      /DATABASE_URL is required/,
+    );
+    assert.throws(
+      () => loadConfig({ ...REQUIRED_ENV, DATABASE_URL: "mysql://localhost/db", WOOCOMMERCE_MCP_URL: VALID_URL }),
+      /DATABASE_URL must be a valid postgres:\/\/ or postgresql:\/\/ URL/,
+    );
+  });
+
   test("the safe summary exposes origins only, never paths or credentials", () => {
     const config = loadConfig({
+      ...REQUIRED_ENV,
       WOOCOMMERCE_MCP_URL: "https://store.example/mcp",
       INVENTORY_MCP_URL: "http://127.0.0.1:8082/mcp",
     });

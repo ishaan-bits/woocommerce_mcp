@@ -59,15 +59,24 @@ export interface ApiKeyPrincipal {
 
 export type ToolCallOutcome = "success" | "error" | "timeout" | "denied";
 
+export type AuditAction =
+  | "tool_call"
+  | "auth_failed"
+  | "access_denied"
+  | "key_created"
+  | "key_revoked";
+
 export interface AuditLogEntry {
   readonly id: string;
   readonly occurredAt: string;
-  readonly keyId: string;
-  readonly userId: string;
-  readonly role: UserRole;
+  readonly action: AuditAction;
+  /** Key UUID when known, non-secret key prefix for unknown-key attempts, null when no credential. */
+  readonly keyId: string | null;
+  readonly userId: string | null;
+  readonly role: UserRole | null;
   readonly upstreamId: UpstreamId | null;
-  readonly toolName: string;
-  readonly qualifiedName: string;
+  readonly toolName: string | null;
+  readonly qualifiedName: string | null;
   readonly outcome: ToolCallOutcome;
   readonly durationMs: number;
   readonly errorCode: string | null;

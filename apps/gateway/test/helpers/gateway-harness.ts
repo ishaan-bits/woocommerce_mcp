@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import net from "node:net";
-import type { UpstreamId } from "@mcp/shared";
+import { UPSTREAM_IDS, WOOCOMMERCE_TOOLS, type UpstreamId } from "@mcp/shared";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createApp, type McpApp } from "../../src/app.ts";
@@ -10,7 +10,14 @@ import { createLogger, type Logger } from "../../src/logger.ts";
 import type { UpstreamRegistry } from "../../src/upstream-registry.ts";
 import { createUpstreamRegistry } from "../../src/upstream-registry.ts";
 import { startFakeUpstream, type FakeToolSpec, type FakeUpstream } from "./fake-upstream.ts";
-import { makeConfig } from "./config.ts";
+import { makeConfig, TEST_PEPPER } from "./config.ts";
+import { FakeAuditRepository, FakeAuthRepository } from "./fake-repos.ts";
+import { isWriteLocalName } from "../../src/auth/authorization.ts";
+import type { StoredUser } from "../../src/db/auth-repository.ts";
+
+export const ADMIN_USER_ID = "11111111-1111-4111-8111-111111111111";
+export const READER_USER_ID = "22222222-2222-4222-8222-222222222222";
+export { TEST_PEPPER };
 
 export interface FakeUpstreamSpec {
   id: UpstreamId;
@@ -29,6 +36,11 @@ export interface StartGatewayOptions {
   now?: () => number;
   logger?: Logger;
   config?: Partial<AppConfig>;
+  /** Key the harness client authenticates with; defaults to a fresh admin key. */
+  clientKey?: string;
+  pepper?: string;
+  authRepo?: FakeAuthRepository;
+  auditRepo?: FakeAuditRepository;
 }
 
 export interface GatewayHarness {
@@ -37,6 +49,13 @@ export interface GatewayHarness {
   registry: UpstreamRegistry;
   mcpApp: McpApp;
   fakes: Map<UpstreamId, FakeUpstream>;
+  authRepo: FakeAuthRepository;
+  auditRepo: FakeAuditRepository;
+  pepper: string;
+  adminKey: string;
+  readerKey: string;
+  /** Auth header object for raw fetches: { authorization: "Bearer ..." }. */
+  authHeaders(key?: string): Record<string, string>;
   stopFake(id: UpstreamId): Promise<void>;
   close(): Promise<void>;
 }
@@ -177,7 +196,49 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
     clientInfo: { name: "harness-gateway", version: "0.0.0" },
   });
 
-  const mcpApp = createApp({ config, logger, registry });
+  const pepper = options.pepper ?? TEST_PEPPER;
+  const authRepo = options.authRepo ?? new FakeAuthRepository();
+  const auditRepo = options.auditRepo ?? new FakeAuditRepository();
+
+  // Grants are STATIC per-principal configuration (C5 / the migration seed),
+  // deliberately independent of which upstreams currently discover tools — a
+  // dead upstream must still be *authorized* so its failure surfaces as the
+  // structural isolation error, not a permission denial. Spec-derived names
+  // are added on top so ad-hoc test tools are callable too.
+  const qualifiedNames = new Set<string>([
+    ...WOOCOMMERCE_TOOLS.map((name) => `woocommerce_${name}`),
+    "inventory_list_products",
+    "inventory_adjust_stock",
+    "support_create_ticket",
+  ]);
+  for (const spec of specs) {
+    for (const tool of spec.tools) {
+      qualifiedNames.add(`${spec.id}_${tool.name}`);
+    }
+  }
+  const grantedUpstreams: UpstreamId[] = ["woocommerce", "inventory", "support"];
+  const adminUser: StoredUser = {
+    id: ADMIN_USER_ID,
+    displayName: "admin-demo",
+    role: "admin",
+    allowedUpstreams: grantedUpstreams,
+    allowedTools: [...qualifiedNames].map((name) => `tools:${name}`),
+  };
+  const readerUser: StoredUser = {
+    id: READER_USER_ID,
+    displayName: "reader-demo",
+    role: "reader",
+    allowedUpstreams: grantedUpstreams,
+    allowedTools: [...qualifiedNames]
+      .filter((name) => !isWriteLocalName(name.slice(name.indexOf("_") + 1)))
+      .map((name) => `tools:${name}`),
+  };
+  authRepo.seedUser(adminUser);
+  authRepo.seedUser(readerUser);
+  const adminKey = options.clientKey ?? authRepo.issueKey(ADMIN_USER_ID, pepper).key;
+  const readerKey = authRepo.issueKey(READER_USER_ID, pepper).key;
+
+  const mcpApp = createApp({ config, logger, registry, authRepo, auditRepo });
 
   const httpServer: HttpServer = mcpApp.app.listen(0, "127.0.0.1");
   await new Promise<void>((resolve, reject) => {
@@ -187,8 +248,11 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
   const address = httpServer.address() as AddressInfo;
   const origin = `http://127.0.0.1:${address.port}`;
 
+  const connectKey = options.clientKey ?? adminKey;
   const client = new Client({ name: "harness-client", version: "0.0.0" });
-  const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`));
+  const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
+    requestInit: { headers: { authorization: `Bearer ${connectKey}` } },
+  });
   await client.connect(transport);
 
   let closed = false;
@@ -199,6 +263,14 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
     registry,
     mcpApp,
     fakes,
+    authRepo,
+    auditRepo,
+    pepper,
+    adminKey,
+    readerKey,
+    authHeaders(key) {
+      return { authorization: `Bearer ${key ?? connectKey}` };
+    },
     async stopFake(id: UpstreamId): Promise<void> {
       const fake = fakes.get(id);
       if (fake !== undefined) {

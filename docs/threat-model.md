@@ -1,7 +1,10 @@
 # Threat Model — MCP Gateway
 
-**Status:** planned controls. Nothing here is implemented yet; this document defines what the
-security milestone must actually build and how it will be verified.
+**Status (updated after Milestone 3):** C1 (API-key hashing), C2 (role enforcement) and
+C6 (audit logs) are **implemented and test-verified**; C5's per-principal grants and
+pre-forward schema validation are implemented, with the dashboard-side controls still to
+come. C3, C4, C7, C8 and the B1 boundary hardening remain planned for Milestone 8 — each
+control below names its verifying test once implemented.
 
 Method: identify assets → draw trust boundaries → list threats → attach controls → record what
 is explicitly out of scope. Loosely STRIDE-flavoured, kept plain-English.
@@ -47,8 +50,11 @@ is explicitly out of scope. Loosely STRIDE-flavoured, kept plain-English.
 
 Rules implied by the diagram:
 
-- **B1/B2:** nothing crosses without authentication (except, deliberately, nothing — no
-  anonymous endpoints).
+- **B1/B2:** nothing crosses without authentication. The one deliberate exception is
+  operational: `/healthz` and `/readyz` answer unauthenticated because container probes
+  cannot present an API key (decision D21) — they expose aggregate status only. Everything
+  else (`/mcp`, `/api/*`) fails closed on missing, malformed, invalid or revoked
+  credentials.
 - **B3:** upstreams are *semi-trusted*: they are our code today, but the gateway must treat
   their responses as untrusted input (a compromised upstream must not be able to forge an
   audit row or smuggle a call to another upstream).
@@ -56,7 +62,7 @@ Rules implied by the diagram:
 
 ---
 
-## 3. Planned controls
+## 3. Controls
 
 ### C1 — API-key hashing (protects A2, A3)
 
@@ -67,8 +73,13 @@ Rules implied by the diagram:
 - Revocation sets `revoked_at`; the hash row stays for audit continuity.
 - Rotation: issue a new key, revoke the old one — both keys may briefly coexist.
 
-**Verified by:** a test asserting the plaintext key never appears in the DB; a test asserting a
-revoked key returns `401` on the very next request.
+**Status: implemented (Milestone 3). Verified by:** `test/auth-keys.test.ts` (format,
+pepper sensitivity, strict digest checks), `test/auth-middleware.test.ts` ("a revoked key is
+rejected on the next request", "every credential failure returns the identical 401 body"),
+`test/api.test.ts` (stored material contains the prefix and sha256 hex, never the
+plaintext), and the real-database suite `test/integration/postgres.test.ts` ("key lifecycle
+… and audit rows run against the real tables" — no plaintext column, no plaintext value,
+`401` after revocation).
 
 ### C2 — Role enforcement (protects A1, A5)
 
@@ -84,7 +95,12 @@ Two roles for two users:
 - Denials return a structured `403`/MCP error and still write an audit row with
   `outcome: "denied"`.
 
-**Verified by:** a matrix test — each user × each tool → expected allow/deny.
+**Status: implemented (Milestone 3). Verified by:** the matrix in
+`test/authorization.test.ts` (admin/reader × read/write × granted/ungranted upstream/tool,
+including "the reader role is a ceiling over grants"), the end-to-end denial in
+`test/authz-e2e.test.ts` (reader write call → `McpError -32003` + exactly one denied audit
+row), and the `403` + `access_denied` rows against real PostgreSQL in
+`test/integration/postgres.test.ts`.
 
 ### C3 — Upstream credential isolation (protects A1)
 
@@ -122,8 +138,10 @@ configured in-cluster URL still works.
 
 Per-principal grants: `allowed_upstreams` and `allowed_tools` stored in Postgres.
 
-- A tool call is checked in order: key valid → not revoked → upstream enabled → tool permitted
-  by role → tool permitted by grant → arguments match JSON Schema.
+- A tool call is checked in order: key valid → not revoked → tool permitted by role →
+  upstream granted → exact `tools:<qualified>` grant → arguments match JSON Schema →
+  upstream enabled/reachable. Everything up to the grant checks is derived from the
+  authenticated principal, never from request input.
 - Upstream **enable/disable** is a first-class control: disabling `woocommerce` instantly
   removes its tools from `tools/list` and rejects `tools/call` with a clear error.
 - Tool inputs are validated against the registered schema **before** any outbound call — with
@@ -131,16 +149,25 @@ Per-principal grants: `allowed_upstreams` and `allowed_tools` stored in Postgres
   zod inside each MCP server — so arguments cannot smuggle query parameters (e.g. an unexpected
   `status` filter).
 
-**Verified by:** disable-upstream test (list shrinks, call rejects), schema-rejection tests.
+**Status: grants + validation implemented (Milestone 3); enable/disable is still
+configuration (dashboard toggles in Milestone 4). Verified by:** disable-upstream test (list
+shrinks, call rejects), schema-rejection tests, `test/authorization.test.ts` (grant order),
+`test/authz-e2e.test.ts` ("a non-write tool outside the grant list is denied before any
+validation or routing"), and grants read from PostgreSQL in
+`test/integration/postgres.test.ts`.
 
 ### C6 — Audit logs (protects A4, forensics overall)
 
 One append-only table, written by the gateway's single execution path:
 
 ```text
-id, occurred_at, key_id, user_id, role, upstream_id, tool_name, qualified_name,
+id, occurred_at, action(tool_call|auth_failed|access_denied|key_created|key_revoked),
+key_id, user_id, role, upstream_id, tool_name, qualified_name,
 outcome(success|error|timeout|denied), duration_ms, error_code
 ```
+
+(The `action` dimension is a Milestone 3 additive extension — decision D22 — so denied
+credential presentations and admin-API 403s share the timeline with tool calls.)
 
 - Written for **every** outcome, including denials and timeouts — a log that only records
   successes is attacker-friendly.
@@ -150,8 +177,12 @@ outcome(success|error|timeout|denied), duration_ms, error_code
 - The gateway's own failures must not lose the record of the failure: write-ahead to the
   request handler before returning.
 
-**Verified by:** a test that a denied call produces a row; a DB-role test that the app cannot
-`DELETE` rows.
+**Status: implemented (Milestone 3). Verified by:** `test/audit.test.ts` (sanitization,
+failed-writer degradation), `test/authz-e2e.test.ts` ("exactly one audit row for the denied
+call"), and against real PostgreSQL: `test/integration/postgres.test.ts` — "MCP tool calls
+write exactly one audit row per call into PostgreSQL (§5.4)" (count is `before+1` per call,
+`tools/list` writes none) and "the runtime role is append-only on audit_log" (`DELETE` and
+`key_hash` rewrites fail with `42501`, `INSERT` and `UPDATE (revoked_at)` succeed).
 
 ### C7 — Failure isolation / resilience (protects availability of A6/A7)
 

@@ -117,7 +117,7 @@ discovery, one never accepts connections, one is disabled); the live variant —
 
 ---
 
-## Stage 4 — Data, auth and audit (Milestone 3)
+## Stage 4 — Data, auth and audit (Milestone 3) — *implemented (real PostgreSQL)*
 
 **Concepts**
 
@@ -128,7 +128,16 @@ discovery, one never accepts connections, one is disabled); the live variant —
 - Secrets: env vars vs files vs Kubernetes Secrets; what belongs where.
 
 **Checkpoint:** two users exist with different powers; revoking a key takes effect on the next
-request; every call leaves one audit row, including denials.
+request; every call leaves one audit row, including denials. *Proven today by: the two seeded
+users in `apps/gateway/migrations/001_init.sql` (`admin-demo`, `reader-demo` with different
+grants); `test/authorization.test.ts` + `test/authz-e2e.test.ts` (different powers over MCP,
+reader write call denied with exactly one audit row); `test/auth-middleware.test.ts` and
+`test/integration/postgres.test.ts` (a revoked key answers `401` on the very next request
+against the real row); and `test/integration/postgres.test.ts` → "MCP tool calls write
+exactly one audit row per call into PostgreSQL" (`count` moves by exactly one per call,
+`tools/list` writes none) plus "the runtime role is append-only" (the app role cannot
+`DELETE`). The integration half needs `TEST_DATABASE_URL` and prints an explicit skip reason
+when unset.*
 
 **Recruiter questions**
 - bcrypt or SHA-256 for API keys? Justify.

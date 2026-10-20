@@ -2,10 +2,17 @@ import { randomUUID } from "node:crypto";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { API_PREFIX } from "@mcp/shared";
 import type { Express, NextFunction, Request, Response } from "express";
+import { createApiRouter } from "./api/routes.ts";
+import { createAuditWriter } from "./audit.ts";
+import { createAuthMiddleware, principalOf } from "./auth/middleware.ts";
+import { authorizeToolCall } from "./auth/authorization.ts";
 import type { AppConfig } from "./config.ts";
+import type { AuditRepository } from "./db/audit-repository.ts";
+import type { AuthRepository } from "./db/auth-repository.ts";
 import type { Logger } from "./logger.ts";
-import { createGatewayMcpServer } from "./mcp-server.ts";
+import { createGatewayMcpServer, PERMISSION_DENIED } from "./mcp-server.ts";
 import type { UpstreamRegistry } from "./upstream-registry.ts";
 
 export const DEFAULT_MAX_SESSIONS = 100;
@@ -15,6 +22,8 @@ export interface CreateAppOptions {
   config: AppConfig;
   logger: Logger;
   registry: UpstreamRegistry;
+  authRepo: AuthRepository;
+  auditRepo: AuditRepository;
   maxSessions?: number;
   sessionIdleMs?: number;
   sweepIntervalMs?: number;
@@ -30,6 +39,8 @@ interface Session {
   transport: StreamableHTTPServerTransport;
   open: number;
   lastActive: number;
+  /** Sessions are bound to the principal that created them (see §auth). */
+  userId: string;
 }
 
 function sessionHeader(req: Request): string | undefined {
@@ -42,7 +53,7 @@ function jsonRpcError(res: Response, status: number, code: number, message: stri
 }
 
 export function createApp(options: CreateAppOptions): McpApp {
-  const { config, logger, registry } = options;
+  const { config, logger, registry, authRepo, auditRepo } = options;
   const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const sessionIdleMs = options.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
   const sweepIntervalMs = options.sweepIntervalMs ?? Math.max(1_000, Math.floor(sessionIdleMs / 3));
@@ -52,6 +63,32 @@ export function createApp(options: CreateAppOptions): McpApp {
     host: config.host,
     allowedHosts: undefined,
   });
+
+  const audit = createAuditWriter(auditRepo, logger);
+
+  // Boundary B2: every request except the operational probes needs a valid,
+  // unrevoked API key (fail-closed; D21 keeps /healthz and /readyz open).
+  app.use(
+    createAuthMiddleware({
+      repo: authRepo,
+      pepper: config.apiKeyPepper,
+      audit,
+      logger,
+    }),
+  );
+
+  // D6: the REST surface shares the same authentication, authorization and
+  // audit writer as /mcp. Tools are only ever executed on /mcp.
+  app.use(
+    API_PREFIX,
+    createApiRouter({
+      authRepo,
+      auditRepo,
+      audit,
+      pepper: config.apiKeyPepper,
+      now,
+    }),
+  );
 
   const sessions = new Map<string, Session>();
   let draining = false;
@@ -80,6 +117,32 @@ export function createApp(options: CreateAppOptions): McpApp {
   }, sweepIntervalMs);
   sweeper.unref();
 
+  /** Continuation requests must present the same principal the session was created with. */
+  function sessionAllowed(session: Session, req: Request, res: Response): boolean {
+    const principal = principalOf(req);
+    if (principal === null) {
+      jsonRpcError(res, 401, -32000, "Unauthorized");
+      return false;
+    }
+    if (session.userId !== principal.userId) {
+      void audit.record({
+        action: "access_denied",
+        keyId: principal.keyId,
+        userId: principal.userId,
+        role: principal.role,
+        upstreamId: null,
+        toolName: null,
+        qualifiedName: null,
+        outcome: "denied",
+        durationMs: 0,
+        errorCode: "session_principal_mismatch",
+      });
+      jsonRpcError(res, 403, PERMISSION_DENIED, "Session belongs to another principal");
+      return false;
+    }
+    return true;
+  }
+
   app.post("/mcp", async (req, res) => {
     const sessionId = sessionHeader(req);
     try {
@@ -90,18 +153,27 @@ export function createApp(options: CreateAppOptions): McpApp {
       const session = sessionId !== undefined ? sessions.get(sessionId) : undefined;
       let transport: StreamableHTTPServerTransport;
       if (session !== undefined) {
+        if (!sessionAllowed(session, req, res)) {
+          return;
+        }
         transport = session.transport;
         session.lastActive = now();
         trackResponse(session, res);
       } else if (sessionId === undefined && isInitializeRequest(req.body)) {
+        const principal = principalOf(req);
+        if (principal === null) {
+          jsonRpcError(res, 401, -32000, "Unauthorized");
+          return;
+        }
         if (sessions.size >= maxSessions) {
           jsonRpcError(res, 503, -32000, "Too many open sessions");
           return;
         }
+        const ownerUserId = principal.userId;
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sid) => {
-            sessions.set(sid, { transport, open: 0, lastActive: now() });
+            sessions.set(sid, { transport, open: 0, lastActive: now(), userId: ownerUserId });
             logger.info("session_initialized", { session_id: sid });
           },
         });
@@ -112,7 +184,13 @@ export function createApp(options: CreateAppOptions): McpApp {
             logger.info("session_closed", { session_id: sid });
           }
         };
-        const server = createGatewayMcpServer({ registry, logger });
+        const server = createGatewayMcpServer({
+          registry,
+          logger,
+          audit,
+          principal,
+          authorize: authorizeToolCall.bind(null, principal),
+        });
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
         return;
@@ -143,6 +221,9 @@ export function createApp(options: CreateAppOptions): McpApp {
       jsonRpcError(res, 404, -32001, "Session not found");
       return;
     }
+    if (!sessionAllowed(session, req, res)) {
+      return;
+    }
     session.lastActive = now();
     trackResponse(session, res);
     try {
@@ -164,6 +245,9 @@ export function createApp(options: CreateAppOptions): McpApp {
     const session = sessions.get(sessionId);
     if (session === undefined) {
       jsonRpcError(res, 404, -32001, "Session not found");
+      return;
+    }
+    if (!sessionAllowed(session, req, res)) {
       return;
     }
     session.lastActive = now();

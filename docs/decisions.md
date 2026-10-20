@@ -395,3 +395,54 @@ forever — stale schemas and dead tools accumulate; rejected.
 against a slightly stale schema until the TTL expires (the upstream's own validation is still
 the final word, so nothing unsafe is forwarded). Availability with honest `/readyz` reporting
 beats a tool list that flaps with every network hiccup.
+
+## D21 — Operational probes stay unauthenticated (the B2 exception)
+
+**Context.** Threat-model boundary B2 says nothing crosses without authentication. The
+gateway's `GET /healthz` and `GET /readyz` are consumed by container orchestrators and load
+balancers *before* any credentials exist — Kubernetes liveness/readiness probes cannot
+present an API key.
+
+**Decision.** `/healthz` and `/readyz` remain public; every other route — `/mcp`, all of
+`/api/*` — sits behind the fail-closed auth middleware (`createAuthMiddleware`,
+`test/auth-middleware.test.ts: "operational probes stay public"`). The probes expose
+aggregate operational state only (process liveness, session counts, per-upstream
+reachability); they reveal no tool data, no user data and no configuration secrets.
+
+**Alternatives.** (a) Authenticate the probes too — breaks every orchestrator probe spec
+(no credential channel exists for kubelet) and the Docker healthcheck. (b) Bind probes to a
+separate port without auth — two listeners, two port configs, more to get wrong; rejected as
+complexity without a security gain given the payload is status-only.
+
+**Trade-offs.** An unauthenticated caller can learn liveness and upstream reachability.
+That is a deliberate, narrow information disclosure in exchange for operability; the payload
+is documented as aggregate status and must stay that way (adding detail to probes would
+re-open this decision).
+
+## D22 — Audit rows carry an `action` dimension (additive contract change)
+
+**Context.** Threat-model C6 fixes the audit columns (`occurred_at, key_id, user_id, role,
+upstream_id, tool_name, qualified_name, outcome, duration_ms, error_code`) with
+`outcome ∈ {success, error, timeout, denied}`. Milestone 3 needs rows for things that are
+not tool calls at all — a failed key presentation, an admin-API 403, key issuance and
+revocation — and architecture §5.4's "exactly one audit row" rule needs to distinguish a
+denied *call* from a denied *request*.
+
+**Decision.** One append-only table gains an `action` column:
+`tool_call | auth_failed | access_denied | key_created | key_revoked`
+(`AuditAction` in `packages/shared`). Every row still carries the original C6 columns;
+`outcome` keeps its C6 meaning inside each action. The change is **additive** — existing
+column contracts are untouched — and it was explicitly sanctioned by the assignment's
+instruction to extend shared contracts where authentication, authorization, auditing, API
+responses or key lifecycles require it.
+
+**Alternatives.** (a) Overload `tool_name`/`error_code` to smuggle the row kind — greppable
+only by convention, un-indexable; rejected. (b) Separate tables (auth_events, tool_calls) —
+two writers, two retention policies, and forensics wants one timeline; rejected for now
+(review at the 10M-rows question, learning-guide Stage 4).
+
+**Trade-offs.** One more column to keep in sync across gateway, dashboard (M4) and any
+exporter; the conservative charset sanitization (`action` is enum-checked by the DB) keeps
+it injection-safe. With `id BIGSERIAL` plus `occurred_at DESC` indexing, the audit reader
+uses keyset pagination (never OFFSET), which is the honest answer to "your table has 10M
+rows".

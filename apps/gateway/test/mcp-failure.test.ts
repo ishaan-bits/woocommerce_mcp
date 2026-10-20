@@ -179,7 +179,7 @@ describe("upstream failures are isolated and structural", () => {
     try {
       const response = await fetch(`${harness.origin}/mcp`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...harness.authHeaders() },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
       });
       assert.equal(response.status, 400);
@@ -200,7 +200,7 @@ describe("upstream failures are isolated and structural", () => {
 
     const initialize = await fetch(`${harness.origin}/mcp`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...harness.authHeaders() },
       body: JSON.stringify(INITIALIZE_BODY),
     });
     assert.equal(initialize.status, 503);
