@@ -23,21 +23,24 @@ beginner-friendly language.
 
 ## Current status
 
-**Milestone 0 complete: inspect → document → scaffold.**
+**Milestone 0 complete (scaffold) and Milestone 1 complete (WooCommerce MCP server).**
 
 | Area | Status |
 | --- | --- |
 | Repository layout + npm workspaces | ✅ `npm install` resolves all 6 workspaces |
 | `packages/shared` contract types | ✅ builds, type-checks, imports (5 WooCommerce tool names) |
+| `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 69 tests, no real store needed |
 | Documentation (`docs/`) | ✅ architecture, decisions, threat model, learning guide |
-| Gateway, dashboard, 3 MCP servers | ⬜ **not implemented** — package manifests only, no source, no endpoints |
+| Gateway, dashboard, inventory/support MCP servers | ⬜ **not implemented** — package manifests only, no source, no endpoints |
 | Docker images / Kubernetes / Helm | ⬜ **not implemented** — `infra/*` contain explanatory READMEs only |
 | PostgreSQL schema, API keys, audit log | ⬜ not implemented |
 | LLM / chat agent | ⬜ not implemented (no API key required or used) |
 
 No feature should be described as working unless `npm run check` proves it. Files in this repo
 are deliberately honest: empty workspaces have **no placeholder endpoints** that could be
-mistaken for finished features.
+mistaken for finished features. The WooCommerce MCP server is tested against a **mock**
+WooCommerce REST API — it has **not** been verified against a real store (none is available
+on this machine); see [services/woocommerce-mcp/README.md](./services/woocommerce-mcp/README.md).
 
 ---
 
@@ -45,7 +48,7 @@ mistaken for finished features.
 
 | Layer | Choice | Why |
 | --- | --- | --- |
-| Backend language | TypeScript (strict) on Node.js ≥ 20.19 | Official MCP SDK is TypeScript-first |
+| Backend language | TypeScript (strict) on Node.js ≥ 23.6 | Official MCP SDK is TypeScript-first; native type stripping runs tests straight from `.ts` |
 | MCP | `@modelcontextprotocol/sdk`, **Streamable HTTP** at `/mcp` | Current standard, network-native for Kubernetes |
 | HTTP layer | Express 5 | Best-documented; SDK-compatible |
 | Frontend | React 19 + Vite 8 | Fast dev server, static build |
@@ -68,7 +71,7 @@ mcp/
 │   ├── dashboard/              # React + Vite frontend        [manifest only]
 │   └── gateway/                # API + MCP gateway            [manifest only]
 ├── services/
-│   ├── woocommerce-mcp/        # Our WooCommerce MCP server   [manifest only]
+│   ├── woocommerce-mcp/        # Our WooCommerce MCP server   [implemented]
 │   ├── inventory-mcp/          # Independent inventory server [manifest only]
 │   └── support-mcp/            # Independent support server   [manifest only]
 ├── packages/
@@ -98,7 +101,7 @@ mcp/
 
 | Tool | Version | Needed for |
 | --- | --- | --- |
-| Node.js | v26.7.0 (project requires ≥ 20.19) | everything |
+| Node.js | v26.7.0 (project requires ≥ 23.6.0) | everything |
 | npm | 11.19.0 | workspaces, installs |
 | Git | 2.55.0 | version control |
 | Python 3 | 3.9.6 | not required by the project |
@@ -113,8 +116,9 @@ mcp/
 | Kind or k3d | local cluster (Milestone 7) | `brew install kind` (or `k3d`) |
 | Ollama | optional local LLM (Milestone 9) | optional; Groq free tier is the default plan |
 
-Also not present: a WooCommerce store. Milestone 1 needs a store (a free local
-`woocommerce/wordpress` container, or a free trial store) — decide at that milestone.
+Also not present: a WooCommerce store. Milestone 1 shipped against a **mock** WooCommerce REST
+API (no store, Docker or network needed); verifying against a real store — a free local
+container or trial store — remains an open follow-up.
 
 **Environment limitation:** until Docker + a local cluster exist, **no container or Kubernetes
 check can run**. That does not block Milestones 1–5 (pure Node/TypeScript work).
@@ -125,11 +129,19 @@ check can run**. That does not block Milestones 1–5 (pure Node/TypeScript work
 
 ```bash
 npm install     # install workspace dependencies
-npm run check   # validate: workspace tree, typecheck, build, import smoke test, audit
+npm run check   # validate: workspace tree, typecheck, build, tests, import smoke test, audit
 ```
 
-Environment variables are documented in [.env.example](./.env.example). Nothing there is
-required yet; copy to `.env` when a milestone needs it (`.env` is git-ignored).
+Environment variables are documented in [.env.example](./.env.example). Copy to `.env` when a
+milestone needs it (`.env` is git-ignored). To run the WooCommerce MCP server locally:
+
+```bash
+cd services/woocommerce-mcp
+WOOCOMMERCE_STORE_URL=... WOOCOMMERCE_CONSUMER_KEY=... WOOCOMMERCE_CONSUMER_SECRET=... npm run dev
+```
+
+See [services/woocommerce-mcp/README.md](./services/woocommerce-mcp/README.md) for the tools,
+endpoints, test strategy and known limitations.
 
 ---
 
@@ -137,8 +149,8 @@ required yet; copy to `.env` when a milestone needs it (`.env` is git-ignored).
 
 | # | Milestone | Deliverable |
 | --- | --- | --- |
-| 0 | **Inspect, document, scaffold** | ← you are here |
-| 1 | WooCommerce MCP server | 5 tools over Streamable HTTP, real REST calls |
+| 0 | **Inspect, document, scaffold** | ✅ done |
+| 1 | WooCommerce MCP server | ← you are here: 5 tools over Streamable HTTP, tested against a mock store |
 | 2 | Gateway core | MCP server + client, discovery, aggregation, routing, timeouts |
 | 3 | Auth + audit | 2 users, hashed revocable keys, roles, audit log (Postgres) |
 | 4 | Dashboard | React UI: chat, tool list, upstream toggles, audit view |

@@ -1,8 +1,9 @@
 # Learning Guide — staged roadmap
 
 A sequence of what to understand **before** each implementation phase, how to prove you
-understood it, and questions a recruiter/interviewer could reasonably ask. Nothing here is
-implemented yet; this is the study plan that makes each milestone explainable.
+understood it, and questions a recruiter/interviewer could reasonably ask. Stages 0–2 now have
+implementations in this repo (scaffold, then `services/woocommerce-mcp`); the checkpoints say
+what is proven today and what is still open.
 
 Suggested rhythm: for each stage, learn → build (in its milestone) → explain it back in one
 paragraph without notes. If you cannot explain it in plain words, you do not know it yet.
@@ -46,7 +47,10 @@ paragraph without notes. If you cannot explain it in plain words, you do not kno
   server-initiated messages.
 - Why `description` and `inputSchema` matter: the LLM reads them to pick the tool.
 - Error codes: `-32602` invalid params, `-32601` method not found, plus `isError` tool results
-  (a *tool* failure is not a *protocol* failure).
+  (a *tool* failure is not a *protocol* failure). Note the shipped SDK's behavior (verified in
+  1.32.1): a tool handler that throws — *including* argument validation failures — comes back
+  as a result with `isError: true` whose text carries the `-32602` message, not as a raw
+  JSON-RPC error. `test/mcp-failure.test.ts` pins this down.
 
 **Checkpoint:** using the official SDK docs, describe in writing how you would implement a
 single `ping` tool server on Streamable HTTP — without writing it yet.
@@ -59,20 +63,27 @@ single `ping` tool server on Streamable HTTP — without writing it yet.
 
 ---
 
-## Stage 2 — WooCommerce REST API + our first MCP server (Milestone 1)
+## Stage 2 — WooCommerce REST API + our first MCP server (Milestone 1) — *implemented (mock store)*
 
 **Concepts**
 
 - WordPress/WooCommerce REST basics: `/wp-json/wc/v3/{products,orders}`.
-- Consumer key/secret creation, read vs read/write permission, Basic auth over HTTPS.
-- Pagination (`page`, `per_page`), filtering, and WooCommerce's rate limits.
+- Consumer key/secret creation, read vs read_write permission, Basic auth over HTTPS — and
+  why WooCommerce ignores Basic auth on plain HTTP (it demands OAuth 1.0a there; see
+  decision D17).
+- Pagination (`page`, `per_page`, `X-WP-Total`/`X-WP-TotalPages`), filtering, and
+  WooCommerce's rate limits.
 - Designing tool schemas: narrow enums (order `status`), bounded integers (`per_page ≤ 100`),
-  required vs optional fields.
-- Mapping HTTP errors (401/403/404/429/500) to honest MCP errors.
+  decimal-string prices (`"19.99"`), ISO-8601 instants with explicit offsets, required vs
+  optional fields.
+- Mapping HTTP errors (401/403/404/429/500) and transport failures (timeout, connection,
+  redirect, non-JSON body) to honest MCP error results.
 - Idempotency reality: `POST create_product` twice = two products; what you tell the caller.
 
-**Checkpoint:** the five tools work against a real (or local, free) store, and a failing call
-returns an error — not fake data.
+**Checkpoint:** the five tools work end to end over Streamable HTTP against the in-repo mock
+store (`npm test` in `services/woocommerce-mcp`), and a failing call returns an error result —
+not fake data. **Still open:** repeat against a real (free, local) store and record what
+differs; that is the remaining Stage 2 checkpoint.
 
 **Recruiter questions**
 - How did you decide the tool boundaries?

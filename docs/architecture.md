@@ -419,10 +419,36 @@ Key points for the interview:
 - This documentation set: `architecture.md`, `decisions.md`, `threat-model.md`,
   `learning-guide.md`, `README.md`, `.env.example`, `.gitignore`.
 
+### Implemented in Milestone 1 (verifiable now)
+
+`services/woocommerce-mcp` is a genuine MCP server built on the official TypeScript SDK,
+serving **Streamable HTTP at `/mcp`** with these five tools:
+
+| Tool | WooCommerce call | Kind |
+| --- | --- | --- |
+| `list_products` | `GET /wp-json/wc/v3/products` | read |
+| `create_product` | `POST /wp-json/wc/v3/products` | write (not idempotent) |
+| `list_orders` | `GET /wp-json/wc/v3/orders` | read |
+| `get_order` | `GET /wp-json/wc/v3/orders/{id}` | read |
+| `update_order_status` | `PUT /wp-json/wc/v3/orders/{id}` | write (idempotent per status) |
+
+Also implemented: `/healthz` and `/readyz` probes; session lifecycle with capacity cap,
+idle sweep and graceful draining; per-request timeouts via `AbortSignal`; a JSON logger that
+redacts `ck_`/`cs_` credentials; environment validation that fails fast with one issue per
+problem; and a **69-test suite** (`npm test`) that needs **no real store, no Docker and no
+network** — a mock WooCommerce REST API plus the official SDK client over loopback exercise
+the full MCP handshake, tool calls, validation failures and upstream error mapping.
+
+**Honest gaps.** The server has **not** been verified against a real WooCommerce store (none
+is available on this machine; see README). Basic auth requires the store to be served over
+HTTPS (D17); `list_orders` accepts a single status per call because that is all the
+WooCommerce endpoint supports.
+
 ### Planned — deliberately **not** present yet
 
-- Any source in `apps/gateway`, `apps/dashboard` or the three `services/*` (package manifests
-  only — no placeholder endpoints, so nothing can be mistaken for a working feature).
+- Any source in `apps/gateway`, `apps/dashboard`, `services/inventory-mcp` or
+  `services/support-mcp` (package manifests only — no placeholder endpoints, so nothing can
+  be mistaken for a working feature).
 - Docker images, Kubernetes manifests, Helm charts (`infra/*` contain explanatory READMEs only).
 - WooCommerce credentials, LLM integration, API keys, audit logs, Postgres schema.
 
@@ -435,8 +461,8 @@ Nothing in this repository should be described as "working" unless a check in
 
 | # | Milestone | Why it comes here |
 | --- | --- | --- |
-| 0 | **Inspect, document, scaffold** ← you are here | You cannot interview-well on code you have not drawn first, and you cannot draw it without knowing your toolchain. |
-| 1 | **WooCommerce MCP server** | Smallest end-to-end unit: one server, one real external API, no gateway. Proves Streamable HTTP works before anything depends on it. |
+| 0 | **Inspect, document, scaffold** | You cannot interview-well on code you have not drawn first, and you cannot draw it without knowing your toolchain. |
+| 1 | **WooCommerce MCP server** ← you are here | Smallest end-to-end unit: one server, one real external API, no gateway. Proves Streamable HTTP works before anything depends on it. |
 | 2 | **Gateway core** (MCP server + client, registry, routing, timeouts) | Now there are exactly two moving parts to debug. |
 | 3 | **Postgres + auth** (two users, hashed API keys, roles, audit log) | Auth without a data store is theatre; data store without a call path has nothing to protect. |
 | 4 | **Dashboard backend + React UI** | UI over a stable API, not over a moving target. |

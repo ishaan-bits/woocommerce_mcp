@@ -238,3 +238,86 @@ compatible against the npm registry on 2026-10-21 (`npm view …`): TypeScript 5
 
 **Trade-offs.** Caret ranges can pull minor upgrades later; the lockfile is the real guarantee.
 Exact pins would make upgrades manual and noisy for a solo project.
+
+---
+
+## D14 — `services/woocommerce-mcp` does not depend on `@mcp/shared`
+
+**Context.** `packages/shared` lists the five WooCommerce tool names for the gateway to
+consume. The natural instinct is to import that list from the server so the names cannot
+drift. npm workspaces do not, however, run workspace scripts in topological order, so a
+cross-package import would require `packages/shared/dist` to exist *before*
+`services/woocommerce-mcp` typechecks — a build-order trap for a beginner-friendly repo.
+
+**Decision.** `services/woocommerce-mcp` declares **no** dependency on `@mcp/shared`. Tool
+names, input schemas and descriptions live in `src/tool-schemas.ts` / `src/mcp-server.ts`.
+`packages/shared` remains the gateway-facing contract; keeping the two lists in sync is a
+manual, documented step for Milestone 2 (the gateway will compare names at discovery time).
+
+**Alternatives.** (a) Cross-import with a `prepack`/`prepare` build chain — extra machinery
+and a confusing failure mode (`dist` missing) for two consuming sites. (b) Move the canonical
+tool *definitions* (zod schemas) into `shared` — premature: the gateway needs names and JSON
+Schema, not this server's zod internals.
+
+**Trade-offs.** The two lists can drift; accepted for Milestone 1 and mitigated in Milestone 2
+by a discovery-time assertion rather than a compile-time import.
+
+---
+
+## D15 — Stateful Streamable HTTP sessions (one `McpServer` per session)
+
+**Context.** The SDK's Streamable HTTP transport supports a stateful pattern (server-generated
+`Mcp-Session-Id`, sessions kept in a map) and a stateless pattern (`sessionIdGenerator:
+undefined`, one shared server).
+
+**Decision.** Stateful, mirroring the SDK's shipped `simpleStreamableHttp` example: each
+initialize creates a transport **and** an `McpServer`, sessions are keyed by id, unknown
+sessions get `404 -32001`, non-initialize POSTs without a session get `400 -32000`, capacity is
+capped (default 100, `503` beyond), idle sessions are swept (default 30 minutes), and shutdown
+drains (`503 "Server is shutting down"`) before closing transports.
+
+**Alternatives.** Stateless — simpler and horizontally friendly, but no per-client SSE stream
+and a weaker fit for the gateway's per-client session/audit story in Milestone 2.
+
+**Trade-offs.** Session state lives in process memory (no cross-replica sharing yet); the
+sweeper and capacity cap exist so a leak is bounded. Revisit when replicas > 1.
+
+---
+
+## D16 — Node's built-in test runner and native type stripping (no jest/vitest)
+
+**Context.** Tests must run with zero extra tooling, and the SDK is ESM-first.
+
+**Decision.** `node --test "test/**/*.test.ts"` runs TypeScript sources directly via Node's
+native type stripping, so the engines floor is **Node ≥ 23.6.0** (raised from 20.19). Source
+and tests import with explicit `.ts` specifiers; `tsconfig.base.json` sets
+`allowImportingTsExtensions` + `rewriteRelativeImportExtensions` so `tsc` builds still emit
+`.js` imports. Constraints: no enums/namespaces/parameter properties (non-erasable syntax).
+
+**Alternatives.** vitest (great DX, but a second toolchain and dependency tree); jest +
+ts-jest (CJS friction with the ESM SDK); compile-then-test (slower loop, two configs).
+
+**Trade-offs.** No watch UI or coverage dashboard; a higher Node floor. Accepted: one
+toolchain, zero extra dependencies, tests exercise the same files that ship.
+
+---
+
+## D17 — Basic auth header only; plain-HTTP stores are out of scope
+
+**Context.** WooCommerce's own `WC_REST_Authentication` (verified in WooCommerce core source)
+only runs `perform_basic_authentication()` when `is_ssl()` is true. Over plain HTTP it falls
+back to OAuth 1.0a one-legged signing. Query-string `consumer_key`/`consumer_secret` are a
+fallback *within* the SSL path, not a plain-HTTP mechanism.
+
+**Decision.** The client sends credentials **only** as an HTTP Basic `Authorization` header
+over the `WOOCOMMERCE_STORE_URL` the operator supplies, refuses to put credentials in URLs,
+warns at startup when the store URL is `http://`, and recommends HTTPS. OAuth 1.0a signing is
+**not implemented**; documenting the gap beats shipping an unverifiable signature scheme.
+
+**Alternatives.** Query-string credentials — secrets in URLs, logs and proxies; rejected.
+OAuth 1.0a — correct for plain HTTP but a substantial, hard-to-verify-in-CI addition;
+recorded as future work if a plain-HTTP store is ever required.
+
+**Trade-offs.** Local plain-HTTP WordPress installs will get HTTP 401 until the store is put
+behind HTTPS (or the operator terminates TLS in front of it). Honest failure with a pointed
+message beats silent credential leakage.

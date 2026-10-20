@@ -24,6 +24,10 @@ echo "==> Build (workspaces that define a build script)"
 npm run build
 
 echo
+echo "==> Tests (workspaces that define a test script)"
+npm run test
+
+echo
 echo "==> Import smoke test for @mcp/shared"
 node -e "import('./packages/shared/dist/index.js').then(m => { if (m.WOOCOMMERCE_TOOLS.length !== 5) { throw new Error('unexpected tool list'); } console.log('shared package imports OK:', m.WOOCOMMERCE_TOOLS.join(', ')); })"
 
