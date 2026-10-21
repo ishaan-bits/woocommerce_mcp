@@ -234,8 +234,8 @@ Both live in the `gateway` process, but they are different surfaces for differen
 | Path | `/mcp` | `/api/*` |
 | Protocol | MCP (JSON-RPC) | Plain REST + JSON |
 | Consumer | AI clients, MCP SDKs, the future chat agent | The React dashboard |
-| Jobs | tool discovery, tool execution | login/session, upstream enable/disable, audit-log queries, tool-list mirror, chat history |
-| Typical verbs | `tools/list`, `tools/call` | `GET /api/upstreams`, `POST /api/upstreams/woocommerce:enable`, `GET /api/audit` |
+| Jobs | tool discovery, tool execution | login/session, upstream enable/disable, audit-log queries, tool-list mirror (chat history arrives with the M9 agent) |
+| Typical verbs | `tools/list`, `tools/call` | `POST /api/auth/login`, `GET /api/upstreams`, `POST /api/upstreams/woocommerce:enable`, `GET /api/audit` |
 
 **Why not one protocol for both?**
 
@@ -470,8 +470,9 @@ against in-process fake upstreams over loopback — including an upstream that a
 past the timeout, one that never accepts connections, and a disabled one — so the suite runs
 with **no Docker, no network and no real upstream process**.
 
-**Honest gaps.** Upstreams are enabled by setting `*_MCP_URL` environment variables;
-dashboard-side toggles come in Milestone 4.
+**Honest gaps.** Upstream *URLs* are still enabled by setting `*_MCP_URL` environment
+variables; the on/off bit gained a server-side toggle in Milestone 4 (`/api/upstreams`,
+persisted — see below).
 Rate limiting and bounded per-upstream concurrency (threat-model C7) are not enforced yet.
 The gateway has **not** been run against the real `services/woocommerce-mcp` process — tests
 use fake upstreams, and the live pairing belongs to Milestones 6–7.
@@ -497,20 +498,48 @@ API, the DB-role privilege checks and the full MCP exactly-one-audit-row flow ag
 **real PostgreSQL 17** container. The integration suite runs when `TEST_DATABASE_URL` is
 set and prints an explicit skip reason when it is not — it is never skipped silently.
 
-**Honest gaps.** Two seeded local users only — there is no dashboard login/session yet
-(Milestone 4), no rate limiting or bounded per-upstream concurrency (threat-model C7), and
+**Honest gaps.** Two seeded local users only (no signup/self-service — provisioning is
+still ops work), no rate limiting or bounded per-upstream concurrency (threat-model C7), and
 key bootstrap in tests writes directly through the repository (production bootstrap tooling
 is ops work). The integration suite has not been exercised against a managed PostgreSQL
 with TLS; it runs against a disposable local container.
 
+### Implemented in Milestone 4 (verifiable now)
+
+The React dashboard **and** the REST endpoints it needs (threat-model C1/C2/C5/C6 gained
+their browser-side halves; decisions D23, D24):
+
+| Piece | Implementation |
+| --- | --- |
+| Browser auth (D23) | `POST /api/auth/login` (key in JSON body) → `urumi_session` `HttpOnly; SameSite=Strict; Secure` cookie holding a random token; only `sha256(token)` stored in `web_sessions` (12 h TTL), re-validated against the key's `revoked_at` every request; `POST /api/auth/logout` deletes the row then clears the cookie. Cookie is honored **only** under `/api/*` and only when no `Authorization` header is present — `/mcp` stays Bearer-only |
+| Dashboard REST surface | `GET /api/tools` (registry mirror, not audited — it executes nothing), `GET /api/upstreams` (configured/enabled/reachable/last_error per fixed id, no upstream connect on read), `POST /api/upstreams/:spec` (`<id>:enable\|disable`: admin gate → 400 malformed/unknown id → 409 not-configured → idempotent no-op → persist-then-apply → one audit row), plus the M3 routes unchanged |
+| Upstream toggles (D24) | `upstream_overrides` table (migration 002) + `UpstreamState.enabledOverride` on the registry; overrides are loaded and applied **before** the first refresh at boot (a failed read is fatal — fail closed), so a disabled upstream stays disabled across restarts |
+| Audit extension (D22) | `upstream_enabled` / `upstream_disabled` actions (migration 002 re-creates the CHECK); toggles, login failures (`auth_failed`) and admin denials (`access_denied`) share the tool-call timeline |
+| Dashboard SPA | `apps/dashboard`: React 19 + Vite 8 hash-routed SPA — overview, tools, upstreams (admin-only toggles with per-row busy state and server-403 banners), audit (keyset pagination, clamped limit), chat **foundation** (explicitly non-functional until M9); loading/empty/error/401/403 states everywhere; relative `/api` requests only, zero env vars in the bundle, no credential in any storage |
+| Least privilege (new grants) | `mcp_gateway_app` gains `SELECT, INSERT, UPDATE` on `upstream_overrides` and `SELECT, INSERT, DELETE` on `web_sessions` (ephemeral, self-owned) — still **no DELETE** on audit/users/api_keys |
+
+Verified by a **97-test gateway unit suite** (`npm test -w @mcp/gateway` — the M3 77 plus
+login/session, cookies, tools/upstream endpoints, toggle-idempotency, authorization and a
+real-registry `test/registry-toggle.test.ts`), a **9-test PostgreSQL integration suite**
+(migration 002, real session lifecycle, toggle rows, override survival across a simulated
+restart, privilege grants for the new tables), and a **14-test dashboard suite**
+(`npm test -w @mcp/dashboard` — API-client auth/error mapping, relative-URL discipline,
+audit redaction projection, pagination bounds) on top of `tsc` + `vite build`.
+
+**Honest gaps.** The chat screen is a labelled foundation — the gateway has no agent
+endpoint (M9), so nothing is generated or sent. Component DOM behavior is covered by
+typecheck + production build rather than a DOM test framework (logic lives in tested pure
+modules); no server-rendered session for the SPA beyond the cookie; no logout-everywhere /
+session listing UI.
+
 ### Planned — deliberately **not** present yet
 
-- Any source in `apps/dashboard`, `services/inventory-mcp` or
-  `services/support-mcp` (package manifests only — no placeholder endpoints, so nothing can
-  be mistaken for a working feature).
+- Any source in `services/inventory-mcp` or `services/support-mcp` (package manifests only
+  — no placeholder endpoints, so nothing can be mistaken for a working feature).
 - Docker images, Kubernetes manifests, Helm charts (`infra/*` contain explanatory READMEs only).
-- A real WooCommerce store's credentials, LLM integration, dashboard login/session,
-  rate limiting / bounded per-upstream concurrency (threat-model C7).
+- A real WooCommerce store's credentials, LLM integration / chat agent (the dashboard's chat
+  page is a labelled foundation only), rate limiting / bounded per-upstream concurrency
+  (threat-model C7).
 
 Nothing in this repository should be described as "working" unless a check in
 `scripts/check.sh` proves it.
@@ -525,8 +554,8 @@ Nothing in this repository should be described as "working" unless a check in
 | 1 | **WooCommerce MCP server** | Smallest end-to-end unit: one server, one real external API, no gateway. Proves Streamable HTTP works before anything depends on it. |
 | 2 | **Gateway core** (MCP server + client, registry, routing, timeouts) | Now there are exactly two moving parts to debug. |
 | 3 | **Postgres + auth** (two users, hashed API keys, roles, audit log) | Auth without a data store is theatre; data store without a call path has nothing to protect. |
-| 4 | **Dashboard backend + React UI** ← you are here | UI over a stable API, not over a moving target. |
-| 5 | **Inventory + Support MCP servers** | Proves the "add an upstream without touching gateway code" claim. |
+| 4 | **Dashboard backend + React UI** | ✅ done: login/session, tools/upstreams/audit APIs, React SPA (chat foundation) |
+| 5 | **Inventory + Support MCP servers** ← you are here | Proves the "add an upstream without touching gateway code" claim. |
 | 6 | **Docker images** | Wrap each unit once its runtime deps are final. |
 | 7 | **Kubernetes + Helm (local, then prod values)** | Deployment last, so manifests describe reality instead of guesses. |
 | 8 | **Security hardening + threat-model review** | Controls verified against the running system. |

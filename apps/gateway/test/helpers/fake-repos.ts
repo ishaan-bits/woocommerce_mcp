@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AuditLogEntry, UpstreamId, UserRole } from "@mcp/shared";
+import { type AggregatedTool, type AuditLogEntry, type UpstreamHealth, type UpstreamId, type UserRole } from "@mcp/shared";
 import type { AuditRepository, NewAuditEntry } from "../../src/db/audit-repository.ts";
 import type {
   AuthRepository,
@@ -8,6 +8,9 @@ import type {
   StoredApiKey,
   StoredUser,
 } from "../../src/db/auth-repository.ts";
+import type { SessionRepository, StoredSession } from "../../src/db/session-repository.ts";
+import type { UpstreamStateRepository } from "../../src/db/upstream-state-repository.ts";
+import type { UpstreamRegistry } from "../../src/upstream-registry.ts";
 import { generateApiKey } from "../../src/auth/keys.ts";
 
 /**
@@ -77,6 +80,18 @@ export class FakeAuthRepository implements AuthRepository {
   async findByPrefix(keyPrefix: string): Promise<StoredApiKey[]> {
     this.guard();
     return [...(this.byPrefix.get(keyPrefix) ?? [])];
+  }
+
+  async findKeyById(keyId: string): Promise<StoredApiKey | null> {
+    this.guard();
+    for (const rows of this.byPrefix.values()) {
+      for (const row of rows) {
+        if (row.id === keyId) {
+          return { ...row, user: row.user };
+        }
+      }
+    }
+    return null;
   }
 
   async createKey(userId: string, keyPrefix: string, keyHash: string): Promise<CreateKeyResult> {
@@ -180,4 +195,132 @@ export class FakeAuditRepository implements AuditRepository {
   byAction(action: AuditLogEntry["action"]): AuditLogEntry[] {
     return this.entries.filter((entry) => entry.action === action).map(({ raw: _raw, ...entry }) => entry);
   }
+}
+
+/** In-memory web_sessions (D23): same contract as the PostgreSQL one. */
+export class FakeSessionRepository implements SessionRepository {
+  private readonly rows = new Map<string, StoredSession>();
+  down = false;
+
+  private guard(): void {
+    if (this.down) {
+      throw new Error("fake session store is down (ECONNREFUSED 127.0.0.1:5432)");
+    }
+  }
+
+  async create(session: StoredSession): Promise<void> {
+    this.guard();
+    this.rows.set(session.tokenHash, session);
+  }
+
+  async find(tokenHash: string): Promise<StoredSession | null> {
+    this.guard();
+    return this.rows.get(tokenHash) ?? null;
+  }
+
+  async delete(tokenHash: string): Promise<boolean> {
+    this.guard();
+    return this.rows.delete(tokenHash);
+  }
+
+  async deleteExpired(nowIso: string): Promise<number> {
+    this.guard();
+    let removed = 0;
+    for (const [hash, row] of this.rows) {
+      if (Date.parse(row.expiresAt) <= Date.parse(nowIso)) {
+        this.rows.delete(hash);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  /** Test convenience. */
+  get size(): number {
+    return this.rows.size;
+  }
+}
+
+/** In-memory upstream_overrides (D24): same contract as the PostgreSQL one. */
+export class FakeUpstreamStateRepository implements UpstreamStateRepository {
+  readonly overrides = new Map<string, { enabled: boolean; updatedBy: string | null }>();
+  down = false;
+
+  private guard(): void {
+    if (this.down) {
+      throw new Error("fake upstream state store is down (ECONNREFUSED 127.0.0.1:5432)");
+    }
+  }
+
+  async getOverrides(): Promise<Record<string, boolean>> {
+    this.guard();
+    const out: Record<string, boolean> = {};
+    for (const [id, entry] of this.overrides) {
+      out[id] = entry.enabled;
+    }
+    return out;
+  }
+
+  async setOverride(upstreamId: string, enabled: boolean, updatedBy: string | null): Promise<void> {
+    this.guard();
+    this.overrides.set(upstreamId, { enabled, updatedBy });
+  }
+}
+
+export interface FakeRegistryEntry {
+  id: UpstreamId;
+  enabled: boolean;
+  reachable?: boolean;
+  lastErrorMessage?: string | null;
+  tools?: Array<Omit<AggregatedTool, "enabled">>;
+}
+
+/**
+ * Registry stand-in for REST-layer tests: mirrors the real contract
+ * (enable gating in listAggregatedTools, health(), setEnabled) without any
+ * MCP client or network. MCP-path behaviour of the *real* registry is covered
+ * by the mcp- and authz- suites through the gateway harness.
+ */
+export class FakeUpstreamRegistry implements UpstreamRegistry {
+  readonly entries: FakeRegistryEntry[];
+  readonly toggles: Array<{ id: UpstreamId; enabled: boolean }> = [];
+
+  constructor(entries: FakeRegistryEntry[]) {
+    this.entries = entries;
+  }
+
+  async listAggregatedTools(): Promise<AggregatedTool[]> {
+    return this.entries
+      .filter((entry) => entry.enabled)
+      .flatMap((entry) => entry.tools ?? [])
+      .map((tool) => ({ ...tool, enabled: true }));
+  }
+
+  async callTool(): Promise<never> {
+    throw new Error("FakeUpstreamRegistry.callTool is not used by these tests");
+  }
+
+  health(): UpstreamHealth[] {
+    return this.entries.map((entry) => ({
+      id: entry.id,
+      enabled: entry.enabled,
+      reachable: entry.reachable ?? false,
+      lastCheckedAt: new Date().toISOString(),
+      lastErrorMessage: entry.lastErrorMessage ?? null,
+    }));
+  }
+
+  setEnabled(upstreamId: string, enabled: boolean): boolean {
+    const entry = this.entries.find((candidate) => candidate.id === upstreamId);
+    if (entry === undefined) {
+      return false;
+    }
+    entry.enabled = enabled;
+    this.toggles.push({ id: entry.id, enabled });
+    return true;
+  }
+
+  async refresh(): Promise<void> {}
+
+  async close(): Promise<void> {}
 }

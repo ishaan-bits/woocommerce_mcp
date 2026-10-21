@@ -11,7 +11,7 @@ import type { UpstreamRegistry } from "../../src/upstream-registry.ts";
 import { createUpstreamRegistry } from "../../src/upstream-registry.ts";
 import { startFakeUpstream, type FakeToolSpec, type FakeUpstream } from "./fake-upstream.ts";
 import { makeConfig, TEST_PEPPER } from "./config.ts";
-import { FakeAuditRepository, FakeAuthRepository } from "./fake-repos.ts";
+import { FakeAuditRepository, FakeAuthRepository, FakeSessionRepository, FakeUpstreamStateRepository } from "./fake-repos.ts";
 import { isWriteLocalName } from "../../src/auth/authorization.ts";
 import type { StoredUser } from "../../src/db/auth-repository.ts";
 
@@ -238,7 +238,15 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
   const adminKey = options.clientKey ?? authRepo.issueKey(ADMIN_USER_ID, pepper).key;
   const readerKey = authRepo.issueKey(READER_USER_ID, pepper).key;
 
-  const mcpApp = createApp({ config, logger, registry, authRepo, auditRepo });
+  const mcpApp = createApp({
+    config,
+    logger,
+    registry,
+    authRepo,
+    auditRepo,
+    sessionRepo: new FakeSessionRepository(),
+    upstreamStateRepo: new FakeUpstreamStateRepository(),
+  });
 
   const httpServer: HttpServer = mcpApp.app.listen(0, "127.0.0.1");
   await new Promise<void>((resolve, reject) => {

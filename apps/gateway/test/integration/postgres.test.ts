@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -13,8 +14,9 @@ import { generateApiKey } from "../../src/auth/keys.ts";
 import { createDatabaseDeps, type DatabaseDeps } from "../../src/db/index.ts";
 import { runMigrations } from "../../src/db/migrate.ts";
 import { createLogger, type Logger } from "../../src/logger.ts";
-import { createUpstreamRegistry } from "../../src/upstream-registry.ts";
+import { applyUpstreamOverrides, createUpstreamRegistry } from "../../src/upstream-registry.ts";
 import { makeConfig, TEST_PEPPER } from "../helpers/config.ts";
+import { FakeUpstreamRegistry } from "../helpers/fake-repos.ts";
 import { startFakeUpstream, type FakeToolSpec } from "../helpers/fake-upstream.ts";
 import { startMiniApp } from "../helpers/mini-app.ts";
 
@@ -85,7 +87,9 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
     }
     await deps.pool.end();
     try {
-      await admin.query(`DROP TABLE IF EXISTS audit_log, api_keys, users, schema_migrations CASCADE`);
+      await admin.query(
+        `DROP TABLE IF EXISTS audit_log, api_keys, users, web_sessions, upstream_overrides, schema_migrations CASCADE`,
+      );
       await admin.query(`DROP ROLE IF EXISTS mcp_gateway_app`);
     } catch {
       // Teardown is best-effort; the container/database is disposable anyway.
@@ -100,7 +104,7 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
     const applied = await admin.query<{ filename: string }>(`SELECT filename FROM schema_migrations`);
     assert.deepEqual(
       applied.rows.map((row) => row.filename),
-      ["001_init.sql"],
+      ["001_init.sql", "002_dashboard.sql"],
     );
 
     const tables = await admin.query<{ regclass: string | null }>(
@@ -108,11 +112,16 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
     );
     assert.equal(tables.rows[0]?.regclass, "users");
     const more = await Promise.all(
-      ["api_keys", "audit_log"].map((table) =>
+      ["api_keys", "audit_log", "web_sessions", "upstream_overrides"].map((table) =>
         admin.query<{ regclass: string | null }>(`SELECT to_regclass('public.${table}')::text AS regclass`),
       ),
     );
-    assert.deepEqual(more.map((result) => result.rows[0]?.regclass), ["api_keys", "audit_log"]);
+    assert.deepEqual(more.map((result) => result.rows[0]?.regclass), [
+      "api_keys",
+      "audit_log",
+      "web_sessions",
+      "upstream_overrides",
+    ]);
 
     const users = await admin.query<{ display_name: string; role: string; allowed_tools: string[] }>(
       `SELECT display_name, role, allowed_tools FROM users ORDER BY display_name`,
@@ -139,11 +148,23 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
 
   test("key lifecycle, 401/403 semantics and audit rows run against the real tables", async () => {
     const audit = createAuditWriter(deps.auditRepo, logger);
+    const registry = new FakeUpstreamRegistry([{ id: "woocommerce", enabled: true, reachable: true }]);
     const mini = await startMiniApp((app) => {
-      app.use(createAuthMiddleware({ repo: deps.authRepo, pepper: TEST_PEPPER, audit, logger }));
+      app.use(
+        createAuthMiddleware({ repo: deps.authRepo, sessions: deps.sessionRepo, pepper: TEST_PEPPER, audit, logger }),
+      );
       app.use(
         "/api",
-        createApiRouter({ authRepo: deps.authRepo, auditRepo: deps.auditRepo, audit, pepper: TEST_PEPPER }),
+        createApiRouter({
+          authRepo: deps.authRepo,
+          auditRepo: deps.auditRepo,
+          audit,
+          sessions: deps.sessionRepo,
+          upstreamState: deps.upstreamStateRepo,
+          registry,
+          logger,
+          pepper: TEST_PEPPER,
+        }),
       );
       app.get("/me", (req, res) => {
         res.json({ principal: principalOf(req) });
@@ -300,6 +321,40 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
       // Reads are granted.
       await roleClient.query(`SELECT id FROM users`);
       await roleClient.query(`SELECT id FROM api_keys`);
+
+      // Dashboard sessions (D23): the runtime role writes and prunes only the
+      // ephemeral session store — never the audit or user tables.
+      const probeToken = "f".repeat(64);
+      await roleClient.query(
+        `INSERT INTO web_sessions (token_hash, user_id, key_id, expires_at)
+         VALUES ($1, $2, $3, now() + interval '1 minute')`,
+        [probeToken, ADMIN_ID, adminKeyId],
+      );
+      const sessionRows = await roleClient.query(`SELECT token_hash FROM web_sessions WHERE token_hash = $1`, [
+        probeToken,
+      ]);
+      assert.equal(sessionRows.rowCount, 1);
+      await roleClient.query(`DELETE FROM web_sessions WHERE token_hash = $1`, [probeToken]);
+      await assert.rejects(
+        () => roleClient.query(`DELETE FROM users`),
+        (error: unknown) => (error as { code?: string }).code === "42501",
+        "DELETE on users must be insufficient_privilege",
+      );
+
+      // Upstream toggles (D24): updated in place, never deleted by the runtime role.
+      await roleClient.query(
+        `INSERT INTO upstream_overrides (upstream_id, enabled, updated_by) VALUES ('woocommerce', false, $1)
+         ON CONFLICT (upstream_id) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now()`,
+        [ADMIN_ID],
+      );
+      await roleClient.query(`UPDATE upstream_overrides SET enabled = true WHERE upstream_id = 'woocommerce'`);
+      await assert.rejects(
+        () => roleClient.query(`DELETE FROM upstream_overrides`),
+        (error: unknown) => (error as { code?: string }).code === "42501",
+        "DELETE on upstream_overrides must be insufficient_privilege",
+      );
+      await roleClient.query(`DELETE FROM web_sessions`).catch(() => undefined);
+      await admin.query(`DELETE FROM upstream_overrides WHERE upstream_id = 'woocommerce'`);
     } finally {
       await roleClient.end();
     }
@@ -322,7 +377,15 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
       logger,
       clientInfo: { name: "integration-gateway", version: "0.0.0" },
     });
-    const mcpApp = createApp({ config, logger, registry, authRepo: deps.authRepo, auditRepo: deps.auditRepo });
+    const mcpApp = createApp({
+      config,
+      logger,
+      registry,
+      authRepo: deps.authRepo,
+      auditRepo: deps.auditRepo,
+      sessionRepo: deps.sessionRepo,
+      upstreamStateRepo: deps.upstreamStateRepo,
+    });
     const httpServer = mcpApp.app.listen(0, "127.0.0.1");
     await new Promise<void>((resolve, reject) => {
       httpServer.once("listening", () => resolve());
@@ -415,6 +478,191 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
       });
       await registry.close();
       await fake.close();
+    }
+  });
+
+  test("migration 002 extends the audit action CHECK to the dashboard actions (D22)", async () => {
+    await admin.query(
+      `INSERT INTO audit_log (action, outcome, upstream_id) VALUES ('upstream_enabled', 'success', 'woocommerce')`,
+    );
+    await admin.query(
+      `INSERT INTO audit_log (action, outcome, upstream_id) VALUES ('upstream_disabled', 'success', 'woocommerce')`,
+    );
+    // The database, not just the TypeScript union, rejects unknown actions.
+    await assert.rejects(
+      () => admin.query(`INSERT INTO audit_log (action, outcome) VALUES ('made_up_action', 'success')`),
+      (error: unknown) => (error as { code?: string }).code === "23514",
+      "an unknown audit action must violate the CHECK constraint",
+    );
+    await admin.query(`DELETE FROM audit_log WHERE action IN ('upstream_enabled', 'upstream_disabled')`);
+  });
+
+  /** The dashboard REST surface wired to the *real* session/audit/override stores. */
+  async function startDashboardApp(registry: FakeUpstreamRegistry): Promise<{ origin: string; close(): Promise<void> }> {
+    const audit = createAuditWriter(deps.auditRepo, logger);
+    return startMiniApp((app) => {
+      app.use(
+        createAuthMiddleware({ repo: deps.authRepo, sessions: deps.sessionRepo, pepper: TEST_PEPPER, audit, logger }),
+      );
+      app.use(
+        "/api",
+        createApiRouter({
+          authRepo: deps.authRepo,
+          auditRepo: deps.auditRepo,
+          audit,
+          sessions: deps.sessionRepo,
+          upstreamState: deps.upstreamStateRepo,
+          registry,
+          logger,
+          pepper: TEST_PEPPER,
+        }),
+      );
+    });
+  }
+
+  test("dashboard login/session lifecycle runs against the real web_sessions table (D23)", async () => {
+    const registry = new FakeUpstreamRegistry([{ id: "woocommerce", enabled: true, reachable: true }]);
+    const mini = await startDashboardApp(registry);
+    try {
+      // A dedicated key so the shared adminKey stays valid for later tests.
+      const generated = generateApiKey(TEST_PEPPER);
+      const created = await deps.authRepo.createKey(ADMIN_ID, generated.keyPrefix, generated.keyHash);
+
+      const loginRes = await fetch(`${mini.origin}/api/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key: generated.key }),
+      });
+      assert.equal(loginRes.status, 200);
+      const setCookie = loginRes.headers.get("set-cookie") ?? "";
+      assert.ok(setCookie.includes("HttpOnly") && setCookie.includes("SameSite=Strict"));
+      const cookie = setCookie.split(";")[0] ?? "";
+
+      // The row stores sha256(token) bound to the key — never the plaintext key.
+      const token = cookie.slice("urumi_session=".length);
+      const tokenHash = createHash("sha256").update(token, "utf8").digest("hex");
+      const rows = await admin.query<{ key_id: string; user_id: string }>(
+        `SELECT key_id, user_id FROM web_sessions WHERE token_hash = $1`,
+        [tokenHash],
+      );
+      assert.equal(rows.rowCount, 1);
+      assert.equal(rows.rows[0]?.key_id, created.id);
+      assert.equal(rows.rows[0]?.user_id, ADMIN_ID);
+      const leak = await admin.query<{ n: number }>(`SELECT count(*)::int AS n FROM web_sessions WHERE token_hash = $1`, [
+        generated.key,
+      ]);
+      assert.equal(leak.rows[0]?.n, 0, "plaintext key must never be stored");
+
+      const me = await fetch(`${mini.origin}/api/me`, { headers: { cookie } });
+      assert.equal(me.status, 200);
+      const meBody = (await me.json()) as { user_id: string; role: string };
+      assert.equal(meBody.user_id, ADMIN_ID);
+      assert.equal(meBody.role, "admin");
+
+      // Revoking the key kills the live session on its next request (C1/D23).
+      await deps.authRepo.revokeKey(created.id);
+      const after = await fetch(`${mini.origin}/api/me`, { headers: { cookie } });
+      assert.equal(after.status, 401);
+
+      // The audit surface never carries key material to the browser (C1/C6).
+      const auditRes = await fetch(`${mini.origin}/api/audit?limit=100`, {
+        headers: { authorization: `Bearer ${adminKey}` },
+      });
+      assert.equal(auditRes.status, 200);
+      const raw = JSON.stringify(await auditRes.json());
+      assert.ok(!raw.includes("umk_"), "no key material in audit responses");
+      assert.ok(!raw.includes(generated.key), "no plaintext key in audit responses");
+      assert.ok(!raw.includes("key_hash"), "no stored hashes in audit responses");
+    } finally {
+      await mini.close();
+    }
+  });
+
+  test("dashboard toggle writes the override and audit rows into PostgreSQL (D24)", async () => {
+    const registry = new FakeUpstreamRegistry([{ id: "woocommerce", enabled: true, reachable: true }]);
+    const mini = await startDashboardApp(registry);
+    try {
+      const disabled = await fetch(`${mini.origin}/api/upstreams/woocommerce:disable`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${adminKey}` },
+      });
+      assert.equal(disabled.status, 200);
+      assert.deepEqual(await disabled.json(), { id: "woocommerce", enabled: false, changed: true });
+
+      const override = await admin.query<{ enabled: boolean; updated_by: string }>(
+        `SELECT enabled, updated_by FROM upstream_overrides WHERE upstream_id = 'woocommerce'`,
+      );
+      assert.deepEqual(override.rows, [{ enabled: false, updated_by: ADMIN_ID }]);
+
+      const row = await admin.query<{ action: string; upstream_id: string; outcome: string; user_id: string }>(
+        `SELECT action, upstream_id, outcome, user_id FROM audit_log
+          WHERE action = 'upstream_disabled' ORDER BY id DESC LIMIT 1`,
+      );
+      assert.deepEqual(row.rows[0], {
+        action: "upstream_disabled",
+        upstream_id: "woocommerce",
+        outcome: "success",
+        user_id: ADMIN_ID,
+      });
+
+      // Unauthorized attempt: real 403 + access_denied row, no state change.
+      const readerGen = generateApiKey(TEST_PEPPER);
+      await deps.authRepo.createKey(READER_ID, readerGen.keyPrefix, readerGen.keyHash);
+      const denied = await fetch(`${mini.origin}/api/upstreams/woocommerce:enable`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${readerGen.key}` },
+      });
+      assert.equal(denied.status, 403);
+      const denial = await admin.query<{ role: string; outcome: string; error_code: string }>(
+        `SELECT role, outcome, error_code FROM audit_log
+          WHERE action = 'access_denied' ORDER BY id DESC LIMIT 1`,
+      );
+      assert.deepEqual(denial.rows[0], { role: "reader", outcome: "denied", error_code: "role_forbidden" });
+      assert.equal(
+        (await admin.query(`SELECT enabled FROM upstream_overrides WHERE upstream_id = 'woocommerce'`)).rows[0]
+          ?.enabled,
+        false,
+        "the denied attempt must not flip the stored state",
+      );
+
+      await admin.query(`DELETE FROM upstream_overrides`);
+    } finally {
+      await mini.close();
+    }
+  });
+
+  test("stored overrides re-apply onto a fresh registry after a simulated restart (D24)", async () => {
+    await deps.upstreamStateRepo.setOverride("woocommerce", false, ADMIN_ID);
+    const overrides = await deps.upstreamStateRepo.getOverrides();
+    assert.deepEqual(overrides, { woocommerce: false });
+
+    // A brand-new registry (same env config as a restarted gateway would get).
+    const config = makeConfig({
+      databaseUrl,
+      upstreams: [
+        { id: "woocommerce", baseUrl: "http://127.0.0.1:1/mcp", enabled: true, timeoutMs: 1_000, connectTimeoutMs: 500 },
+      ],
+    });
+    const registry = createUpstreamRegistry({
+      configs: config.upstreams,
+      toolCacheTtlMs: 1_000,
+      logger,
+      clientInfo: { name: "integration-restart", version: "0.0.0" },
+    });
+    try {
+      assert.equal(registry.health().find((entry) => entry.id === "woocommerce")?.enabled, true);
+      const applied = applyUpstreamOverrides(registry, overrides, logger);
+      assert.equal(applied, 1);
+      assert.equal(
+        registry.health().find((entry) => entry.id === "woocommerce")?.enabled,
+        false,
+        "the stored disable must survive the restart",
+      );
+      // Unknown ids (env URL removed) are skipped, not fatal.
+      assert.equal(applyUpstreamOverrides(registry, { ghost: false }, logger), 0);
+    } finally {
+      await registry.close();
+      await admin.query(`DELETE FROM upstream_overrides`);
     }
   });
 });

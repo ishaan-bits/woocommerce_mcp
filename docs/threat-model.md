@@ -1,10 +1,12 @@
 # Threat Model — MCP Gateway
 
-**Status (updated after Milestone 3):** C1 (API-key hashing), C2 (role enforcement) and
-C6 (audit logs) are **implemented and test-verified**; C5's per-principal grants and
-pre-forward schema validation are implemented, with the dashboard-side controls still to
-come. C3, C4, C7, C8 and the B1 boundary hardening remain planned for Milestone 8 — each
-control below names its verifying test once implemented.
+**Status (updated after Milestone 4):** C1 (API-key hashing + browser session cookies),
+C2 (role enforcement, now including upstream toggles) and C6 (audit logs, including
+`upstream_enabled`/`upstream_disabled` rows) are **implemented and test-verified**; C5's
+per-principal grants and pre-forward schema validation are implemented, and enable/disable
+is a real server-side control backed by `upstream_overrides`. C3, C4, C7, C8 and the B1
+boundary hardening remain planned for Milestone 8 — each control below names its verifying
+test once implemented.
 
 Method: identify assets → draw trust boundaries → list threats → attach controls → record what
 is explicitly out of scope. Loosely STRIDE-flavoured, kept plain-English.
@@ -50,11 +52,14 @@ is explicitly out of scope. Loosely STRIDE-flavoured, kept plain-English.
 
 Rules implied by the diagram:
 
-- **B1/B2:** nothing crosses without authentication. The one deliberate exception is
+- **B1/B2:** nothing crosses without authentication. The deliberate exceptions are
   operational: `/healthz` and `/readyz` answer unauthenticated because container probes
-  cannot present an API key (decision D21) — they expose aggregate status only. Everything
-  else (`/mcp`, `/api/*`) fails closed on missing, malformed, invalid or revoked
-  credentials.
+  cannot present an API key (decision D21), and `POST /api/auth/login` must be reachable
+  *to obtain* credentials — it exposes no data and audits every failure (D23). The probes
+  expose aggregate status only. Everything else (`/mcp`, `/api/*`) fails closed on
+  missing, malformed, invalid or revoked credentials; browser requests pass either a
+  Bearer key or the `urumi_session` cookie, and the cookie is honored **only** under
+  `/api/*` (never `/mcp`, never as a fallback for a presented-but-invalid Bearer).
 - **B3:** upstreams are *semi-trusted*: they are our code today, but the gateway must treat
   their responses as untrusted input (a compromised upstream must not be able to forge an
   audit row or smuggle a call to another upstream).
@@ -72,6 +77,13 @@ Rules implied by the diagram:
 - The pepper is a separate Kubernetes Secret from the database credentials.
 - Revocation sets `revoked_at`; the hash row stays for audit continuity.
 - Rotation: issue a new key, revoke the old one — both keys may briefly coexist.
+- **Browser sessions (Milestone 4, D23):** the dashboard exchanges a key (JSON body only,
+  never a URL) for an opaque 32-byte token delivered as `HttpOnly; SameSite=Strict;
+  Secure` cookie; only `sha256(token)` is stored server-side (`web_sessions`, 12-hour
+  TTL), bound to the key's user, and re-validated against the key's `revoked_at` on every
+  request — revoking a key ends its sessions. The plaintext key never enters
+  `localStorage`/`sessionStorage`/URLs/logs, and no credential of any kind exists in the
+  frontend bundle or build variables.
 
 **Status: implemented (Milestone 3). Verified by:** `test/auth-keys.test.ts` (format,
 pepper sensitivity, strict digest checks), `test/auth-middleware.test.ts` ("a revoked key is
@@ -79,7 +91,13 @@ rejected on the next request", "every credential failure returns the identical 4
 `test/api.test.ts` (stored material contains the prefix and sha256 hex, never the
 plaintext), and the real-database suite `test/integration/postgres.test.ts` ("key lifecycle
 … and audit rows run against the real tables" — no plaintext column, no plaintext value,
-`401` after revocation).
+`401` after revocation). Session-cookie behavior (Milestone 4) is verified by
+`test/auth-middleware.test.ts` (cookie grants access under `/api`, is ignored for `/mcp`,
+never used as fallback for a malformed Bearer, dies with the key),
+`test/api.test.ts` ("dashboard login/session" — wrong key → 401 + audit row, logout
+removes the session, cookie value is never echoed in responses) and
+`test/integration/postgres.test.ts` (real session create → read → lazy-expiry → revoke
+round trip in `web_sessions`).
 
 ### C2 — Role enforcement (protects A1, A5)
 
@@ -149,25 +167,34 @@ Per-principal grants: `allowed_upstreams` and `allowed_tools` stored in Postgres
   zod inside each MCP server — so arguments cannot smuggle query parameters (e.g. an unexpected
   `status` filter).
 
-**Status: grants + validation implemented (Milestone 3); enable/disable is still
-configuration (dashboard toggles in Milestone 4). Verified by:** disable-upstream test (list
-shrinks, call rejects), schema-rejection tests, `test/authorization.test.ts` (grant order),
+**Status: implemented (Milestone 3 grants/validation; Milestone 4 toggles). Enable/disable
+is a server-side control:** `POST /api/upstreams/<id>:enable|disable` (admin only, fixed
+id set, 409 for unconfigured upstreams) persists to `upstream_overrides` and applies a
+registry override (D24); disabling instantly removes the tools from `tools/list` and
+rejects `tools/call`. Verified by: disable-upstream test (list shrinks, call rejects),
+`test/registry-toggle.test.ts` (real registry + MCP client through the toggle path),
+`test/api.test.ts` (unknown id → 400, non-configured → 409, reader → 403 + audit row,
+idempotent re-send → `changed:false` with no duplicate row), schema-rejection tests,
+`test/authorization.test.ts` (grant order),
 `test/authz-e2e.test.ts` ("a non-write tool outside the grant list is denied before any
-validation or routing"), and grants read from PostgreSQL in
-`test/integration/postgres.test.ts`.
+validation or routing"), grants read from PostgreSQL in
+`test/integration/postgres.test.ts`, plus the override-survives-restart test (rows reapplied
+at boot).
 
 ### C6 — Audit logs (protects A4, forensics overall)
 
 One append-only table, written by the gateway's single execution path:
 
 ```text
-id, occurred_at, action(tool_call|auth_failed|access_denied|key_created|key_revoked),
+id, occurred_at, action(tool_call|auth_failed|access_denied|key_created|key_revoked|
+upstream_enabled|upstream_disabled),
 key_id, user_id, role, upstream_id, tool_name, qualified_name,
 outcome(success|error|timeout|denied), duration_ms, error_code
 ```
 
 (The `action` dimension is a Milestone 3 additive extension — decision D22 — so denied
-credential presentations and admin-API 403s share the timeline with tool calls.)
+credential presentations and admin-API 403s share the timeline with tool calls; Milestone 4
+additively added the two upstream-toggle actions, also under D22.)
 
 - Written for **every** outcome, including denials and timeouts — a log that only records
   successes is attacker-friendly.
@@ -177,12 +204,19 @@ credential presentations and admin-API 403s share the timeline with tool calls.)
 - The gateway's own failures must not lose the record of the failure: write-ahead to the
   request handler before returning.
 
-**Status: implemented (Milestone 3). Verified by:** `test/audit.test.ts` (sanitization,
-failed-writer degradation), `test/authz-e2e.test.ts` ("exactly one audit row for the denied
-call"), and against real PostgreSQL: `test/integration/postgres.test.ts` — "MCP tool calls
-write exactly one audit row per call into PostgreSQL (§5.4)" (count is `before+1` per call,
-`tools/list` writes none) and "the runtime role is append-only on audit_log" (`DELETE` and
-`key_hash` rewrites fail with `42501`, `INSERT` and `UPDATE (revoked_at)` succeed).
+**Status: implemented (Milestone 3; toggle rows since Milestone 4). Verified by:**
+`test/audit.test.ts` (sanitization, failed-writer degradation),
+`test/authz-e2e.test.ts` ("exactly one audit row for the denied call"), and against real
+PostgreSQL: `test/integration/postgres.test.ts` — "MCP tool calls write exactly one audit
+row per call into PostgreSQL (§5.4)" (count is `before+1` per call,
+`tools/list` writes none), "the runtime role is append-only on audit_log" (`DELETE` and
+`key_hash` rewrites fail with `42501`, `INSERT` and `UPDATE (revoked_at)` succeed), the
+migration-002 action-check assertion (all seven actions accepted, unknown rejected), and
+the toggle flow writing exactly one `upstream_enabled`/`upstream_disabled` row.
+On the **read** side, the dashboard viewer projects rows through a whitelisted view-model
+(`projectAuditRow` in `apps/dashboard/src/state.ts`) — key ids, hashes, headers, cookies
+and any unexpected field are dropped before rendering, verified by
+`apps/dashboard/test/state.test.ts`.
 
 ### C7 — Failure isolation / resilience (protects availability of A6/A7)
 

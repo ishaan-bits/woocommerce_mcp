@@ -446,3 +446,86 @@ exporter; the conservative charset sanitization (`action` is enum-checked by the
 it injection-safe. With `id BIGSERIAL` plus `occurred_at DESC` indexing, the audit reader
 uses keyset pagination (never OFFSET), which is the honest answer to "your table has 10M
 rows".
+
+## D23 — Dashboard sessions: httpOnly cookie holding a random token, never the API key
+
+**Context.** Milestone 4 needs a browser login. The assignment forbids privileged keys in
+frontend source/build variables, plaintext keys in `localStorage`/`sessionStorage`/URLs,
+and — implicitly — any weakening of `/mcp`'s Bearer-only contract. The dashboard also has
+no SSR layer (plain Vite SPA), so "sessions" means either client-stored secrets or a
+server-verified cookie.
+
+**Decision.** `POST /api/auth/login` accepts `{ "key": "umk_…" }` **in the JSON body**
+(never a URL/query/header). The key is verified through the same
+`sha256(key‖pepper)` + `timingSafeEqual` path as every other request (extracted to
+`src/auth/verify.ts` so middleware and login cannot drift). On success the gateway:
+
+1. generates 32 random bytes (base64url) as the session token,
+2. stores **only** `sha256(token)` as the `web_sessions` primary key, bound to the key's
+   `user_id`/`key_id`, with a 12-hour `expires_at`,
+3. returns `Set-Cookie: urumi_session=<token>; HttpOnly; SameSite=Strict; Secure; Path=/`.
+
+Subsequent `/api` requests authenticate from that cookie. The middleware honors the cookie
+**only** when (a) the path starts with `/api` (so `/mcp` stays Bearer-only, exactly as
+before), (b) no `Authorization` header is present (a malformed Bearer never falls back to
+the cookie), and (c) a `sessions` repository exists. `/healthz`, `/readyz` and
+`POST /api/auth/login` remain the only public routes (D21 extended by one entry — login
+must be reachable by an unauthenticated client by definition). Logout deletes the session
+row *before* clearing the cookie. Revoking the underlying API key kills future sessions
+too, because `verifySession` re-checks the key's `revoked_at` on every request.
+
+**Alternatives.** (a) Store the API key itself in a cookie or localStorage — rejected:
+plaintext key in the browser violates the assignment, and `HttpOnly` protects a *key*
+worse than a *token* (a key is reusable forever; a token expires and is server-revocable).
+(b) JWT sessions — rejected: no signing-key management, no server-side revocation without
+adding a denylist (which is a table with extra steps), and the session store is one
+primary-key lookup. (c) Bearer header re-sent from JS each request — rejected: the key
+would live in JS-reachable storage by necessity.
+
+**Trade-offs.** Sessions are server state: a database outage fails logins and sessions
+fail closed (`503`, same posture as C6 write-ahead). 12 hours is a fixed TTL with no
+"remember me" and no sliding refresh — chosen for an admin tool, not a consumer app.
+`Secure` is set even in dev (localhost counts as trustworthy); a browser that refuses
+`Secure` cookies over plain HTTP would need a dev exception we deliberately did not add.
+Cookie auth is honored under `/api` only, which is a narrower exception than "all non-MCP
+routes" and is asserted by tests (`test/auth-middleware.test.ts`).
+
+## D24 — Upstream enable/disable persists in PostgreSQL, applied as a registry override
+
+**Context.** Milestone 4's toggle cannot be environment-variable-only (a browser cannot
+restart the gateway) and cannot be in-memory-only (the assignment requires documenting
+restart persistence). Upstream *URLs* remain configuration (C4: clients never choose
+where a connection points), but the on/off bit is an operational state that belongs to
+the admin API.
+
+**Decision.** Fixed table `upstream_overrides (upstream_id PK CHECK ∈
+{woocommerce, inventory, support}, enabled, updated_at, updated_by → users)`. The toggle
+endpoint (`POST /api/upstreams/<id>:enable|disable`) runs a strict sequence:
+
+1. admin gate (`requireAdmin` → `access_denied` audit row on refusal),
+2. validation: well-formed spec (400) → id in the fixed `UPSTREAM_IDS` set (400
+   `unknown_upstream` — never an arbitrary URL/connection target) → upstream actually
+   configured in this deployment (409 `upstream_not_configured`),
+3. idempotent no-op if already at the target state (`changed: false`, no audit row),
+4. **persist first** — if the `upstream_overrides` write fails, the registry is untouched
+   (500 + audit row with `outcome: error`, `error_code: persist_failed`),
+5. apply `registry.setEnabled(id, enabled)` second (failure → 500 + `apply_failed`),
+6. exactly one `upstream_enabled`/`upstream_disabled` audit row (D22's additive actions).
+
+On boot, `index.ts` reads all overrides and applies them **before** the first
+`registry.refresh()`; a failed override read is fatal at startup (fail closed — the
+gateway never starts in a state that contradicts its own audit trail).
+
+**Alternatives.** (a) SIGHUP-style env reload — impossible for a browser-driven action
+without a file the pod does not have. (b) In-memory only — simpler, but a restart would
+silently re-enable a disabled upstream while the audit log says otherwise; rejected. (c)
+Persisting the URL itself or letting the API accept a URL — rejected outright (C4 SSRF:
+clients select *which configured upstream*, never *where it points*).
+
+**Trade-offs.** Two sources of truth exist (env vars seed the registry, DB overrides
+refine it) — resolved by a documented precedence: DB override wins when present. Disable
+does not stop an in-flight call (no cancellation race introduced); it changes discovery
+(`tools/list` shrinks) and rejects subsequent `tools/call`. Because `enabledOverride` is
+a distinct field from `state.config.enabled`, unset-env and admin-disabled remain
+distinguishable (`configured` vs `enabled` in `GET /api/upstreams`), and a disabled-via-
+DB upstream still reports honestly if its URL is missing.

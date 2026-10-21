@@ -3,7 +3,7 @@ import { loadConfig, safeConfigSummary } from "./config.ts";
 import { ConfigurationError } from "./errors.ts";
 import { createDatabaseDeps } from "./db/index.ts";
 import { createLogger } from "./logger.ts";
-import { createUpstreamRegistry } from "./upstream-registry.ts";
+import { applyUpstreamOverrides, createUpstreamRegistry } from "./upstream-registry.ts";
 import { VERSION } from "./version.ts";
 
 async function main(): Promise<void> {
@@ -23,7 +23,7 @@ async function main(): Promise<void> {
   logger.info("config_loaded", { ...safeConfigSummary(config) });
 
   // Fail fast with a safe message: no credentials, no SQL, no stack traces.
-  const { pool, authRepo, auditRepo } = createDatabaseDeps(config);
+  const { pool, authRepo, auditRepo, sessionRepo, upstreamStateRepo } = createDatabaseDeps(config);
   try {
     await pool.query("SELECT 1");
     const { rows } = await pool.query(`SELECT to_regclass('public.users') AS t`);
@@ -50,11 +50,25 @@ async function main(): Promise<void> {
     clientInfo: { name: "urumi-mcp-gateway", version: VERSION },
   });
 
+  // D24: persisted dashboard toggles survive restarts. Applied before the
+  // first refresh so the initial tools/list already reflects them. A stored
+  // id that is no longer configured via env is ignored (with a warning).
+  try {
+    const overrides = await upstreamStateRepo.getOverrides();
+    const applied = applyUpstreamOverrides(registry, overrides, logger);
+    logger.info("upstream_overrides_applied", { count: applied });
+  } catch (error) {
+    logger.error("upstream_overrides_failed", { error: String(error) });
+    await pool.end().catch(() => undefined);
+    process.exitCode = 1;
+    return;
+  }
+
   void registry.refresh().catch((error: unknown) => {
     logger.warn("startup_refresh_failed", { error: String(error) });
   });
 
-  const { app, close } = createApp({ config, logger, registry, authRepo, auditRepo });
+  const { app, close } = createApp({ config, logger, registry, authRepo, auditRepo, sessionRepo, upstreamStateRepo });
   const server = app.listen(config.port, config.host, () => {
     logger.info("listening", { host: config.host, port: config.port, mcp_path: "/mcp" });
   });

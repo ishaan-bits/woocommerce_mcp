@@ -24,20 +24,23 @@ beginner-friendly language.
 ## Current status
 
 **Milestone 0 complete (scaffold), Milestone 1 complete (WooCommerce MCP server),
-Milestone 2 complete (gateway core) and Milestone 3 complete (authentication,
-authorization and audit logging against a real PostgreSQL).**
+Milestone 2 complete (gateway core), Milestone 3 complete (authentication,
+authorization and audit logging against a real PostgreSQL) and Milestone 4 complete
+(dashboard backend + React UI: sessions, tool/upstream/audit APIs, upstream toggles
+persisted in PostgreSQL).**
 
 | Area | Status |
 | --- | --- |
 | Repository layout + npm workspaces | ✅ `npm install` resolves all 6 workspaces |
 | `packages/shared` contract types | ✅ builds, type-checks, imports (5 WooCommerce tool names) |
 | `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 69 tests, no real store needed |
-| Documentation (`docs/`) | ✅ architecture, decisions, threat model, learning guide |
-| Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit, 77 unit tests + 5 real-PostgreSQL integration tests, no Docker needed for the unit suite |
-| Dashboard, inventory/support MCP servers | ⬜ **not implemented** — package manifests only, no source, no endpoints |
+| Documentation (`docs/`) | ✅ architecture, decisions (D1–D24), threat model, learning guide |
+| Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, tools, upstream toggles), 97 unit tests + 9 real-PostgreSQL integration tests, no Docker needed for the unit suite |
+| Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, labelled chat foundation; 14 tests + typecheck + production build |
+| Inventory/support MCP servers | ⬜ **not implemented** — package manifests only, no source, no endpoints |
 | Docker images / Kubernetes / Helm | ⬜ **not implemented** — `infra/*` contain explanatory READMEs only |
-| PostgreSQL schema, API keys, audit log | ✅ migrations, two seeded users, hashed revocable keys, append-only audit (`npm run migrate`; integration-tested against PostgreSQL 17) |
-| LLM / chat agent | ⬜ not implemented (no API key required or used) |
+| PostgreSQL schema, API keys, audit log | ✅ migrations (001–002), two seeded users, hashed revocable keys, append-only audit incl. upstream-toggle rows, session + override tables (`npm run migrate`; integration-tested against PostgreSQL 17) |
+| LLM / chat agent | ⬜ not implemented (no API key required or used; the dashboard chat page is an explicitly-labelled foundation) |
 
 No feature should be described as working unless `npm run check` proves it. Files in this repo
 are deliberately honest: empty workspaces have **no placeholder endpoints** that could be
@@ -46,10 +49,12 @@ WooCommerce REST API — it has **not** been verified against a real store (none
 on this machine); see [services/woocommerce-mcp/README.md](./services/woocommerce-mcp/README.md).
 The gateway is tested against **fake in-process MCP upstreams** — it has **not** been paired
 with the real WooCommerce MCP server process yet (that live pairing belongs to Milestones 6–7);
-see [apps/gateway/README.md](./apps/gateway/README.md). Authentication and audit logging are
+see [apps/gateway/README.md](./apps/gateway/README.md). Authentication, sessions, upstream
+toggles and audit logging are
 verified against a **real PostgreSQL 17** in a disposable container via `TEST_DATABASE_URL`
 (`test/integration/postgres.test.ts`); without that variable the integration suite skips with
-a printed reason, while the 146 unit tests (69 + 77) still run.
+a printed reason, while the 180 tests that need no database (69 + 97 + 14) still run —
+189 tests in total with the database.
 
 ---
 
@@ -77,7 +82,7 @@ Verification of these versions happened against the npm registry on 2026-10-21 �
 ```text
 mcp/
 ├── apps/
-│   ├── dashboard/              # React + Vite frontend        [manifest only]
+│   ├── dashboard/              # React + Vite frontend        [implemented]
 │   └── gateway/                # API + MCP gateway            [implemented]
 ├── services/
 │   ├── woocommerce-mcp/        # Our WooCommerce MCP server   [implemented]
@@ -165,6 +170,16 @@ endpoints, test strategy and known limitations, and
 [apps/gateway/README.md](./apps/gateway/README.md) for gateway endpoints, environment
 variables, routing rules and test strategy.
 
+With the gateway running, start the dashboard dev server (proxies `/api` to it):
+
+```bash
+cd apps/dashboard
+npm run dev    # http://127.0.0.1:5173 — log in with a umk_… API key
+```
+
+See [apps/dashboard/README.md](./apps/dashboard/README.md) for the browser-auth flow,
+features, deferred chat capabilities and test strategy.
+
 ---
 
 ## Roadmap
@@ -173,10 +188,10 @@ variables, routing rules and test strategy.
 | --- | --- | --- |
 | 0 | **Inspect, document, scaffold** | ✅ done |
 | 1 | WooCommerce MCP server | ✅ done: 5 tools over Streamable HTTP, tested against a mock store |
-| 2 | **Gateway core** | ← you are here: MCP server + client, discovery, aggregation, routing, timeouts |
+| 2 | **Gateway core** | ✅ done: MCP server + client, discovery, aggregation, routing, timeouts |
 | 3 | Auth + audit | ✅ done: 2 seeded users, hashed revocable keys, roles, append-only audit (Postgres) |
-| 4 | Dashboard | ← you are here: React UI: chat, tool list, upstream toggles, audit view |
-| 5 | Inventory + Support servers | prove "add an upstream without gateway code" |
+| 4 | Dashboard | ✅ done: sessions, React UI (overview/tools/upstreams/audit/chat foundation), persisted upstream toggles |
+| 5 | Inventory + Support servers | ← you are here: prove "add an upstream without gateway code" |
 | 6 | Docker images | one image per deployable |
 | 7 | Kubernetes + Helm | one chart, `values-local.yaml` + `values-prod.yaml` |
 | 8 | Security hardening | threat-model C1–C7 with tests |

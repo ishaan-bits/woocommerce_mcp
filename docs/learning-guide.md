@@ -146,22 +146,33 @@ when unset.*
 
 ---
 
-## Stage 5 — Dashboard (Milestone 4)
+## Stage 5 — Dashboard (Milestone 4) — implemented; use it to revise
 
 **Concepts**
 
 - React fundamentals: components, props, state, effects; controlled inputs.
 - Vite: dev server, proxying `/api` to the gateway, production build.
-- Streaming UI: rendering partial results from an SSE/fetch stream.
-- Never trusting the client: the UI's hidden buttons are cosmetic; the server enforces.
-- Basic UX for failure: distinguish loading / degraded upstream / denied / failed.
+- Never trusting the client: the UI's hidden buttons are cosmetic; the server enforces
+  (readers see disabled toggles *and* get 403 + an `access_denied` audit row —
+  `apps/gateway/src/api/routes.ts`, `test/api.test.ts`).
+- Basic UX for failure: distinguish loading / empty / error / 401 (re-login) / 403
+  (not permitted) / gateway-unreachable (`apps/dashboard/src/state.ts`).
+- Browser auth done right: key exchanged once in a JSON body → `HttpOnly; SameSite=Strict;
+  Secure` cookie with a random token, only its sha256 stored server-side (D23,
+  `apps/gateway/src/auth/sessions.ts`).
+- Keyset pagination and redacted rendering: the audit viewer never asks for an unbounded
+  page and projects rows through a whitelist before the DOM sees them.
 
-**Checkpoint:** toggle an upstream in the UI and watch `tools/list` shrink in a real MCP
-client.
+**Checkpoint (now runnable):** start Postgres + gateway + `npm run dev` in
+`apps/dashboard`, log in as `admin-demo`, disable WooCommerce, and watch `tools/list`
+shrink in any MCP client; then repeat as `reader-demo` and confirm the toggle is refused
+with 403 and an audit row.
 
 **Recruiter questions**
 - Where is "disable WooCommerce" actually enforced?
+- Where does your session token live, and why not localStorage?
 - How does the UI know an upstream is down without hammering the server?
+- What stops a reader from calling the toggle API directly?
 
 ---
 

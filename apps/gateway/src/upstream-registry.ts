@@ -26,8 +26,37 @@ export interface UpstreamRegistry {
   listAggregatedTools(): Promise<AggregatedTool[]>;
   callTool(qualifiedName: string, args: Record<string, unknown>): Promise<CallToolResult>;
   health(): UpstreamHealth[];
+  /**
+   * Dashboard toggle (D24): applies an enable/disable override live. Returns
+   * false when the id is not part of this registry (not configured via env).
+   * The override is process-local; persistence to PostgreSQL is the caller's
+   * job (the gateway re-applies stored overrides at startup).
+   */
+  setEnabled(upstreamId: string, enabled: boolean): boolean;
   refresh(): Promise<void>;
   close(): Promise<void>;
+}
+
+/**
+ * D24 startup path: re-apply the overrides persisted by the dashboard so a
+ * restart does not silently re-enable a disabled upstream. Unknown ids (rows
+ * for upstreams whose env URL was removed) are skipped with a warning.
+ * Returns the number of overrides applied.
+ */
+export function applyUpstreamOverrides(
+  registry: UpstreamRegistry,
+  overrides: Record<string, boolean>,
+  logger: Logger,
+): number {
+  let applied = 0;
+  for (const [upstreamId, enabled] of Object.entries(overrides)) {
+    if (registry.setEnabled(upstreamId, enabled)) {
+      applied += 1;
+    } else {
+      logger.warn("upstream_override_not_configured", { upstream_id: upstreamId, enabled });
+    }
+  }
+  return applied;
 }
 
 interface CachedTools {
@@ -37,6 +66,8 @@ interface CachedTools {
 
 interface UpstreamState {
   config: UpstreamConfig;
+  /** Runtime toggle from the dashboard (D24); null = follow config.enabled. */
+  enabledOverride: boolean | null;
   client: Client | null;
   cached: CachedTools | null;
   reachable: boolean;
@@ -66,6 +97,7 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
 
   const states: UpstreamState[] = options.configs.map((config) => ({
     config,
+    enabledOverride: null,
     client: null,
     cached: null,
     reachable: false,
@@ -76,6 +108,11 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
 
   function stateFor(upstreamId: string): UpstreamState | undefined {
     return states.find((state) => state.config.id === upstreamId);
+  }
+
+  /** Effective state: dashboard override (D24) wins over the env config. */
+  function enabledOf(state: UpstreamState): boolean {
+    return state.enabledOverride ?? state.config.enabled;
   }
 
   function markReachable(state: UpstreamState): void {
@@ -212,7 +249,7 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
     async listAggregatedTools(): Promise<AggregatedTool[]> {
       const aggregated: AggregatedTool[] = [];
       for (const state of states) {
-        if (!state.config.enabled) {
+        if (!enabledOf(state)) {
           continue;
         }
         let tools: ToolDescriptor[];
@@ -244,7 +281,7 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
       if (state === undefined) {
         throw new GatewayError("unknown_tool", `Unknown tool: ${qualifiedName}`);
       }
-      if (!state.config.enabled) {
+      if (!enabledOf(state)) {
         throw new GatewayError("upstream_disabled", `Upstream '${state.config.id}' is disabled`, {
           upstreamId: state.config.id,
         });
@@ -300,17 +337,27 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
     health(): UpstreamHealth[] {
       return states.map((state) => ({
         id: state.config.id,
-        enabled: state.config.enabled,
+        enabled: enabledOf(state),
         reachable: state.reachable,
         lastCheckedAt: state.lastCheckedAt,
         lastErrorMessage: state.lastErrorMessage,
       }));
     },
 
+    setEnabled(upstreamId, enabled): boolean {
+      const state = stateFor(upstreamId);
+      if (state === undefined) {
+        return false;
+      }
+      state.enabledOverride = enabled;
+      logger.info("upstream_toggled", { upstream_id: upstreamId, enabled });
+      return true;
+    },
+
     async refresh(): Promise<void> {
       const tools = await this.listAggregatedTools();
       logger.info("tool_registry_refreshed", {
-        upstreams: states.filter((state) => state.config.enabled).length,
+        upstreams: states.filter((state) => enabledOf(state)).length,
         tools: tools.length,
       });
     },

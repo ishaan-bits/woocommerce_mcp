@@ -74,6 +74,18 @@ export function createPostgresAuthRepository(pool: Pool): AuthRepository {
       return result.rows.map(toStoredApiKey);
     },
 
+    async findKeyById(keyId: string): Promise<StoredApiKey | null> {
+      const result = await pool.query<KeyRow>(
+        `SELECT ${KEY_COLUMNS}
+           FROM api_keys k
+           JOIN users u ON u.id = k.user_id
+          WHERE k.id = $1`,
+        [keyId],
+      );
+      const row = result.rows[0];
+      return row === undefined ? null : toStoredApiKey(row);
+    },
+
     async createKey(userId: string, keyPrefix: string, keyHash: string): Promise<CreateKeyResult> {
       const result = await pool.query<{ id: string; created_at: Date }>(
         `INSERT INTO api_keys (user_id, key_prefix, key_hash)

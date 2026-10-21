@@ -64,7 +64,9 @@ export type AuditAction =
   | "auth_failed"
   | "access_denied"
   | "key_created"
-  | "key_revoked";
+  | "key_revoked"
+  | "upstream_enabled"
+  | "upstream_disabled";
 
 export interface AuditLogEntry {
   readonly id: string;

@@ -5,11 +5,17 @@ import type { AuthRepository } from "./auth-repository.ts";
 import { createPool, type Pool } from "./pool.ts";
 import { createPostgresAuditRepository } from "./postgres-audit-repository.ts";
 import { createPostgresAuthRepository } from "./postgres-auth-repository.ts";
+import { createPostgresSessionRepository } from "./postgres-session-repository.ts";
+import { createPostgresUpstreamStateRepository } from "./postgres-upstream-state-repository.ts";
+import type { SessionRepository } from "./session-repository.ts";
+import type { UpstreamStateRepository } from "./upstream-state-repository.ts";
 
 export interface DatabaseDeps {
   pool: Pool;
   authRepo: AuthRepository;
   auditRepo: AuditRepository;
+  sessionRepo: SessionRepository;
+  upstreamStateRepo: UpstreamStateRepository;
 }
 
 /** Production wiring: PostgreSQL only (D7) — unit tests inject fakes instead. */
@@ -19,5 +25,7 @@ export function createDatabaseDeps(config: AppConfig): DatabaseDeps {
     pool,
     authRepo: createPostgresAuthRepository(pool),
     auditRepo: createPostgresAuditRepository(pool),
+    sessionRepo: createPostgresSessionRepository(pool),
+    upstreamStateRepo: createPostgresUpstreamStateRepository(pool),
   };
 }

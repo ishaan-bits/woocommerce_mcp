@@ -11,7 +11,11 @@ import pg from "pg";
  * When MCP_APP_DB_PASSWORD is set, it also creates/refreshes `mcp_gateway_app`,
  * the least-privilege runtime role: INSERT+SELECT on audit_log (append-only,
  * C6), SELECT on users, and column-limited UPDATE (revoked_at only) on
- * api_keys so keys can be revoked but never rewritten (C1).
+ * api_keys so keys can be revoked but never rewritten (C1). Dashboard
+ * additions (Milestone 4): SELECT+INSERT+DELETE on web_sessions (ephemeral
+ * session rows — logout and expiry cleanup; audit_log/users/api_keys still
+ * have no DELETE grant anywhere) and SELECT+INSERT+UPDATE on
+ * upstream_overrides (config state, updated in place, never deleted).
  */
 
 const APP_ROLE = "mcp_gateway_app";
@@ -91,8 +95,10 @@ export async function runMigrations(options: RunMigrationsOptions): Promise<void
       await client.query(`GRANT SELECT ON users, api_keys, audit_log TO ${APP_ROLE}`);
       await client.query(`GRANT INSERT, SELECT ON audit_log TO ${APP_ROLE}`);
       await client.query(`GRANT INSERT, SELECT, UPDATE (revoked_at) ON api_keys TO ${APP_ROLE}`);
+      await client.query(`GRANT SELECT, INSERT, DELETE ON web_sessions TO ${APP_ROLE}`);
+      await client.query(`GRANT SELECT, INSERT, UPDATE ON upstream_overrides TO ${APP_ROLE}`);
       await client.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${APP_ROLE}`);
-      log(`runtime role ${APP_ROLE} ready (append-only audit grants)`);
+      log(`runtime role ${APP_ROLE} ready (append-only audit grants; ephemeral session grants)`);
     } else {
       log(`MCP_APP_DB_PASSWORD not set - skipping ${APP_ROLE} role setup (dev-only single-user mode)`);
     }

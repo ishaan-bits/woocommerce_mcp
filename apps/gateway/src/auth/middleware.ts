@@ -1,9 +1,11 @@
 import type { ApiKeyPrincipal } from "@mcp/shared";
 import type { NextFunction, Request, Response } from "express";
 import type { AuditWriter } from "../audit.ts";
-import type { AuthRepository, StoredApiKey } from "../db/auth-repository.ts";
-import { dummyCompare, hashApiKey, hashesMatch, keyPrefixOf, looksLikeApiKey } from "./keys.ts";
+import type { AuthRepository } from "../db/auth-repository.ts";
+import type { SessionRepository } from "../db/session-repository.ts";
 import type { Logger } from "../logger.ts";
+import { hashSessionToken, readCookie, SESSION_COOKIE_NAME } from "./sessions.ts";
+import { verifyApiKey, verifySession } from "./verify.ts";
 
 export interface AuthedRequest extends Request {
   principal?: ApiKeyPrincipal;
@@ -11,14 +13,16 @@ export interface AuthedRequest extends Request {
 
 export interface AuthMiddlewareDeps {
   repo: AuthRepository;
+  /** Dashboard cookie sessions (D23). When absent, only Bearer keys are honoured. */
+  sessions?: SessionRepository;
   pepper: string;
   audit: AuditWriter;
   logger: Logger;
-  /** Operational probes stay unauthenticated (D21): aggregate status only. */
+  /** Operational probes and the login endpoint stay unauthenticated (D21/D23). */
   publicPaths?: readonly string[];
 }
 
-const DEFAULT_PUBLIC_PATHS = ["/healthz", "/readyz"];
+const DEFAULT_PUBLIC_PATHS = ["/healthz", "/readyz", "/api/auth/login"];
 
 interface AuthFailure {
   readonly errorCode: string;
@@ -41,11 +45,16 @@ function parseBearer(header: string | undefined): { ok: true; key: string } | { 
 
 /**
  * Boundary B2: every request except the operational probes must present a
- * valid, unrevoked API key. Fail-closed on every path — missing, malformed,
- * structurally invalid, unknown, revoked or unverifiable credentials all deny
- * with the *same* 401 body (no oracle for which check failed; the audit row
- * records the exact reason). A database outage denies with 503 because
- * credentials could not be evaluated at all.
+ * valid, unrevoked credential — either a Bearer API key (the only credential
+ * /mcp accepts, unchanged since Milestone 3) or, for /api paths only, the
+ * dashboard session cookie (D23: opaque HttpOnly token → session row → bound
+ * key re-checked on every request).
+ *
+ * Fail-closed on every path — missing, malformed, structurally invalid,
+ * unknown, expired, revoked or unverifiable credentials all deny with the
+ * *same* 401 body (no oracle for which check failed; the audit row records
+ * the exact reason). A database outage denies with 503 because credentials
+ * could not be evaluated at all.
  */
 export function createAuthMiddleware(deps: AuthMiddlewareDeps): (req: Request, res: Response, next: NextFunction) => Promise<void> {
   const publicPaths = deps.publicPaths ?? DEFAULT_PUBLIC_PATHS;
@@ -76,71 +85,63 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps): (req: Request, r
       }
     };
 
-    const parsed = parseBearer(req.headers.authorization);
-    if (!parsed.ok) {
-      await deny({
-        errorCode: parsed.reason === "missing" ? "missing_credentials" : "malformed_credentials",
-        keyId: null,
-        status: 401,
-        body: { error: "unauthorized" },
-      });
-      return;
-    }
-
-    if (!looksLikeApiKey(parsed.key)) {
-      await deny({ errorCode: "invalid_format", keyId: null, status: 401, body: { error: "unauthorized" } });
-      return;
-    }
-
-    const prefix = keyPrefixOf(parsed.key);
-    const expectedHash = hashApiKey(parsed.key, deps.pepper);
-
-    let rows: StoredApiKey[];
-    try {
-      rows = await deps.repo.findByPrefix(prefix);
-    } catch (error) {
+    const dbError = (error: unknown, where: string): void => {
       // Fail closed: credentials could not be evaluated. The audit store is
       // the same database that just failed, so only a diagnostic is possible.
-      deps.logger.error("auth_lookup_failed", { error: String(error) });
+      deps.logger.error(where, { error: String(error) });
       if (!res.headersSent) {
         res.status(503).json({ error: "service_unavailable" });
       }
-      return;
-    }
-
-    if (rows.length === 0) {
-      dummyCompare(expectedHash);
-      await deny({ errorCode: "unknown_key", keyId: prefix, status: 401, body: { error: "unauthorized" } });
-      return;
-    }
-
-    let matched: StoredApiKey | null = null;
-    for (const row of rows) {
-      if (hashesMatch(expectedHash, row.keyHash)) {
-        matched = row;
-        break;
-      }
-    }
-
-    if (matched === null) {
-      await deny({ errorCode: "invalid_key", keyId: prefix, status: 401, body: { error: "unauthorized" } });
-      return;
-    }
-
-    if (matched.revokedAt !== null) {
-      await deny({ errorCode: "revoked_key", keyId: matched.id, status: 401, body: { error: "unauthorized" } });
-      return;
-    }
-
-    const principal: ApiKeyPrincipal = {
-      userId: matched.user.id,
-      displayName: matched.user.displayName,
-      role: matched.user.role,
-      allowedUpstreams: matched.user.allowedUpstreams,
-      allowedTools: matched.user.allowedTools,
-      keyId: matched.id,
     };
-    (req as AuthedRequest).principal = principal;
+
+    const parsed = parseBearer(req.headers.authorization);
+
+    if (!parsed.ok && parsed.reason === "missing") {
+      // No Authorization header at all: try the dashboard session cookie, but
+      // only for the REST surface. /mcp never accepts a cookie, so its
+      // contract from Milestone 3 is byte-for-byte unchanged. A *malformed*
+      // Authorization header below denies outright — it never falls back to
+      // the cookie.
+      const cookieToken = readCookie(req.headers.cookie, SESSION_COOKIE_NAME);
+      if (cookieToken === null || !req.path.startsWith("/api") || deps.sessions === undefined) {
+        await deny({
+          errorCode: "missing_credentials",
+          keyId: null,
+          status: 401,
+          body: { error: "unauthorized" },
+        });
+        return;
+      }
+
+      const result = await verifySession(deps.repo, deps.sessions, hashSessionToken(cookieToken), Date.now());
+      if (result.kind === "db_error") {
+        dbError(result.error, "auth_session_lookup_failed");
+        return;
+      }
+      if (result.kind === "denied") {
+        await deny({ errorCode: result.errorCode, keyId: result.keyId, status: 401, body: { error: "unauthorized" } });
+        return;
+      }
+      (req as AuthedRequest).principal = result.principal;
+      next();
+      return;
+    }
+
+    if (!parsed.ok) {
+      await deny({ errorCode: "malformed_credentials", keyId: null, status: 401, body: { error: "unauthorized" } });
+      return;
+    }
+
+    const result = await verifyApiKey(deps.repo, deps.pepper, parsed.key);
+    if (result.kind === "db_error") {
+      dbError(result.error, "auth_lookup_failed");
+      return;
+    }
+    if (result.kind === "denied") {
+      await deny({ errorCode: result.errorCode, keyId: result.keyId, status: 401, body: { error: "unauthorized" } });
+      return;
+    }
+    (req as AuthedRequest).principal = result.principal;
     next();
   };
 }

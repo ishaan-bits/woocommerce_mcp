@@ -40,6 +40,8 @@ export interface CreateKeyResult {
 export interface AuthRepository {
   /** All keys sharing this non-secret prefix (normally exactly one). */
   findByPrefix(keyPrefix: string): Promise<StoredApiKey[]>;
+  /** Key lookup by id — used by dashboard session verification (D23). */
+  findKeyById(keyId: string): Promise<StoredApiKey | null>;
   createKey(userId: string, keyPrefix: string, keyHash: string): Promise<CreateKeyResult>;
   /** Flips revoked_at only when it is still NULL; row is kept (C1). */
   revokeKey(keyId: string): Promise<{ found: boolean; revokedNow: boolean; revokedAt: string | null }>;

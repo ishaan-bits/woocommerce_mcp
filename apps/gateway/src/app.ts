@@ -11,6 +11,8 @@ import { authorizeToolCall } from "./auth/authorization.ts";
 import type { AppConfig } from "./config.ts";
 import type { AuditRepository } from "./db/audit-repository.ts";
 import type { AuthRepository } from "./db/auth-repository.ts";
+import type { SessionRepository } from "./db/session-repository.ts";
+import type { UpstreamStateRepository } from "./db/upstream-state-repository.ts";
 import type { Logger } from "./logger.ts";
 import { createGatewayMcpServer, PERMISSION_DENIED } from "./mcp-server.ts";
 import type { UpstreamRegistry } from "./upstream-registry.ts";
@@ -24,6 +26,9 @@ export interface CreateAppOptions {
   registry: UpstreamRegistry;
   authRepo: AuthRepository;
   auditRepo: AuditRepository;
+  /** Dashboard sessions (D23) and persisted upstream toggles (D24). */
+  sessionRepo: SessionRepository;
+  upstreamStateRepo: UpstreamStateRepository;
   maxSessions?: number;
   sessionIdleMs?: number;
   sweepIntervalMs?: number;
@@ -53,7 +58,7 @@ function jsonRpcError(res: Response, status: number, code: number, message: stri
 }
 
 export function createApp(options: CreateAppOptions): McpApp {
-  const { config, logger, registry, authRepo, auditRepo } = options;
+  const { config, logger, registry, authRepo, auditRepo, sessionRepo, upstreamStateRepo } = options;
   const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const sessionIdleMs = options.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
   const sweepIntervalMs = options.sweepIntervalMs ?? Math.max(1_000, Math.floor(sessionIdleMs / 3));
@@ -67,10 +72,12 @@ export function createApp(options: CreateAppOptions): McpApp {
   const audit = createAuditWriter(auditRepo, logger);
 
   // Boundary B2: every request except the operational probes needs a valid,
-  // unrevoked API key (fail-closed; D21 keeps /healthz and /readyz open).
+  // unrevoked credential — a Bearer key, or (for /api only) the dashboard
+  // session cookie (D21/D23). Fail-closed.
   app.use(
     createAuthMiddleware({
       repo: authRepo,
+      sessions: sessionRepo,
       pepper: config.apiKeyPepper,
       audit,
       logger,
@@ -85,6 +92,10 @@ export function createApp(options: CreateAppOptions): McpApp {
       authRepo,
       auditRepo,
       audit,
+      sessions: sessionRepo,
+      upstreamState: upstreamStateRepo,
+      registry,
+      logger,
       pepper: config.apiKeyPepper,
       now,
     }),
