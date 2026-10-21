@@ -5,6 +5,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { API_PREFIX } from "@mcp/shared";
 import type { Express, NextFunction, Request, Response } from "express";
+import { createChatAgent } from "./agent/agent.ts";
+import { OpenAiCompatProvider, type ChatProvider } from "./agent/provider.ts";
 import { createApiRouter } from "./api/routes.ts";
 import { createAuditWriter } from "./audit.ts";
 import { createAuthMiddleware, principalOf } from "./auth/middleware.ts";
@@ -35,6 +37,11 @@ export interface CreateAppOptions {
   sessionIdleMs?: number;
   sweepIntervalMs?: number;
   now?: () => number;
+  /**
+   * Milestone 9: inject a scripted provider for tests. Production leaves it
+   * undefined and the OpenAI-compatible client is built from config.llm.
+   */
+  provider?: ChatProvider;
 }
 
 export interface McpApp {
@@ -122,7 +129,24 @@ export function createApp(options: CreateAppOptions): McpApp {
   );
 
   // D6: the REST surface shares the same authentication, authorization and
-  // audit writer as /mcp. Tools are only ever executed on /mcp.
+  // audit writer as /mcp. Tools only ever execute through the shared
+  // executeToolCall pipeline — on /mcp and, for the chat agent, via /api/chat.
+  //
+  // Milestone 9 (D29): the agent exists only when a provider is configured
+  // (GROQ_API_KEY or LLM_BASE_URL). Tests inject a scripted provider; the
+  // production path builds the OpenAI-compatible client from config. Either
+  // way it runs with the *same* rate limiter and audit writer as /mcp.
+  const chatAgent =
+    config.llm !== null
+      ? createChatAgent({
+          provider: options.provider ?? new OpenAiCompatProvider(config.llm),
+          registry,
+          logger,
+          audit,
+          rateLimiter: toolCallRateLimiter,
+        })
+      : null;
+
   app.use(
     API_PREFIX,
     createApiRouter({
@@ -135,6 +159,7 @@ export function createApp(options: CreateAppOptions): McpApp {
       logger,
       pepper: config.apiKeyPepper,
       loginLimiter: loginRateLimiter,
+      agent: chatAgent,
       now,
     }),
   );

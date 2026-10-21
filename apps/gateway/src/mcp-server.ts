@@ -9,10 +9,9 @@ import {
 import type { ApiKeyPrincipal } from "@mcp/shared";
 import type { AuditWriter } from "./audit.ts";
 import type { AuthzDecision } from "./auth/authorization.ts";
-import { ArgumentValidationError, isGatewayError } from "./errors.ts";
 import type { TokenBucketLimiter } from "./limits.ts";
 import type { Logger } from "./logger.ts";
-import { parseToolName } from "./routing.ts";
+import { executeToolCall } from "./tool-executor.ts";
 import type { UpstreamRegistry } from "./upstream-registry.ts";
 import { VERSION } from "./version.ts";
 
@@ -69,86 +68,25 @@ export function createGatewayMcpServer(options: GatewayMcpServerOptions): Server
     return { tools };
   });
 
+  // Execution is the shared pipeline (D30) — the dashboard agent runs the
+  // same function with the same principal, so /mcp behavior is unchanged.
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const qualifiedName = request.params.name;
     const args = request.params.arguments ?? {};
-    const startedAt = Date.now();
-    const parsed = parseToolName(qualifiedName);
-
-    // C6 / §5.4: exactly one audit row per tools/call, written (awaited)
-    // before the response leaves the handler.
-    const record = async (
-      outcome: "success" | "error" | "timeout" | "denied",
-      errorCode: string | null,
-    ): Promise<void> => {
-      await audit.recordToolCall({
-        principalKey: principal.keyId,
-        userId: principal.userId,
-        role: principal.role,
-        upstreamId: parsed?.upstreamId ?? null,
-        toolName: parsed?.localName ?? null,
-        qualifiedName,
-        outcome,
-        durationMs: Date.now() - startedAt,
-        errorCode,
-      });
-      const level = outcome === "success" ? "info" : "warn";
-      logger[level]("tool_call", {
-        tool_name: qualifiedName,
-        outcome,
-        duration_ms: Date.now() - startedAt,
-        ...(errorCode !== null ? { error_code: errorCode } : {}),
-        ...(parsed !== null ? { upstream_id: parsed.upstreamId } : {}),
-        user_id: principal.userId,
-      });
-    };
-
-    // C7: per-API-key throttle, checked before authorization so a flood of
-    // denied probes is rate-limited too. Audited like any other denial.
-    if (rateLimiter != null && !rateLimiter.tryTake(principal.keyId)) {
-      await record("denied", "rate_limited");
-      throw new McpError(RATE_LIMIT_EXCEEDED, "Rate limit exceeded for this API key; retry shortly");
-    }
-
-    // C5 order: authorization (role → grants) runs before validation and routing.
-    const decision = authorize(qualifiedName);
-    if (!decision.allowed) {
-      await record("denied", decision.errorCode);
-      throw new McpError(
-        PERMISSION_DENIED,
-        decision.reason ?? `tool '${qualifiedName}' is not permitted for this principal`,
-      );
-    }
-
-    try {
-      const result = await registry.callTool(qualifiedName, args);
-      await record(result.isError === true ? "error" : "success", null);
-      return result;
-    } catch (error) {
-      if (error instanceof ArgumentValidationError) {
-        await record("error", "invalid_arguments");
-        throw new McpError(ErrorCode.InvalidParams, error.message);
-      }
-      if (isGatewayError(error)) {
-        if (error.code === "unknown_tool") {
-          await record("error", "unknown_tool");
-          throw new McpError(ErrorCode.InvalidParams, error.message);
-        }
-        const outcome = error.code === "timeout" || error.code === "connect_timeout" ? "timeout" : "error";
-        await record(outcome, error.code);
-        return {
-          content: [{ type: "text", text: error.message }],
-          isError: true,
-        };
-      }
-      await record("error", "internal_error");
-      logger.error("tool_call", {
-        tool_name: qualifiedName,
-        outcome: "error",
-        duration_ms: Date.now() - startedAt,
-        error: String(error),
-      });
-      throw error;
+    const outcome = await executeToolCall(
+      { registry, logger, audit, principal, authorize, rateLimiter },
+      qualifiedName,
+      args,
+    );
+    switch (outcome.kind) {
+      case "result":
+        return outcome.result;
+      case "rate_limited":
+        throw new McpError(RATE_LIMIT_EXCEEDED, "Rate limit exceeded for this API key; retry shortly");
+      case "denied":
+        throw new McpError(PERMISSION_DENIED, outcome.reason);
+      case "invalid":
+        throw new McpError(ErrorCode.InvalidParams, outcome.message);
     }
   });
 

@@ -5,6 +5,7 @@ import { UPSTREAM_IDS, WOOCOMMERCE_TOOLS, type UpstreamId } from "@mcp/shared";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createApp, type McpApp } from "../../src/app.ts";
+import type { ChatProvider } from "../../src/agent/provider.ts";
 import type { AppConfig } from "../../src/config.ts";
 import { createLogger, type Logger } from "../../src/logger.ts";
 import type { UpstreamRegistry } from "../../src/upstream-registry.ts";
@@ -36,6 +37,8 @@ export interface StartGatewayOptions {
   now?: () => number;
   logger?: Logger;
   config?: Partial<AppConfig>;
+  /** Milestone 9: scripted chat provider (with config.llm set) for /api/chat tests. */
+  provider?: ChatProvider;
   /** Key the harness client authenticates with; defaults to a fresh admin key. */
   clientKey?: string;
   pepper?: string;
@@ -247,6 +250,7 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
     auditRepo,
     sessionRepo: new FakeSessionRepository(),
     upstreamStateRepo: new FakeUpstreamStateRepository(),
+    provider: options.provider,
   });
 
   const httpServer: HttpServer = mcpApp.app.listen(0, "127.0.0.1");

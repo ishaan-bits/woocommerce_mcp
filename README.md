@@ -43,13 +43,13 @@ documenting every operator-supplied production input).**
 | `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 69 tests, no real store needed |
 | Documentation (`docs/`) | ✅ architecture, decisions (D1–D27), threat model, learning guide |
 | Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, tools, upstream toggles), 108 unit tests + 9 real-PostgreSQL integration tests, no Docker needed for the unit suite |
-| Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, labelled chat foundation; 14 tests + typecheck + production build |
+| Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, working chat (server-side agent, gateway-audited tool calls); 16 tests + typecheck + production build |
 | Inventory MCP server | ✅ `list_products` + `adjust_stock` over Streamable HTTP, deterministic 12-item seeded store, 39 tests, registered via `INVENTORY_MCP_URL` (no gateway code changes) |
 | Support MCP server | ✅ `list_tickets` + `create_ticket` over Streamable HTTP, deterministic 8-ticket seeded store, 38 tests, registered via `SUPPORT_MCP_URL` (no gateway code changes) |
 | Docker images | ✅ five multi-stage images (`urumi/<name>:0.1.0`: gateway, three MCP servers, dashboard), non-root, runtime-config only, built and container-tested — see [infra/docker/README.md](./infra/docker/README.md) |
 | Kubernetes / Helm | ✅ one chart (`infra/helm/mcp-gateway`) with `values-local.yaml` + `values-prod.yaml`, installed and e2e-validated on kind `urumi-local` (7 workloads, PVC-backed PostgreSQL, chart/external secrets, port-forward access) — see [infra/helm/README.md](./infra/helm/README.md) |
 | PostgreSQL schema, API keys, audit log | ✅ migrations (001–002), two seeded users, hashed revocable keys, append-only audit incl. upstream-toggle rows, session + override tables (`npm run migrate`; integration-tested against PostgreSQL 17) |
-| LLM / chat agent | ⬜ not implemented (no API key required or used; the dashboard chat page is an explicitly-labelled foundation) |
+| LLM / chat agent | ✅ `POST /api/chat` agent loop: Groq (free tier) or local OpenAI-compatible server via `LLM_BASE_URL`; tools from the gateway registry, executed through the shared authz/audit pipeline; disabled cleanly (503) with no key — see [docs/decisions.md D29/D30](./docs/decisions.md) |
 
 No feature should be described as working unless `npm run check` proves it. Files in this repo
 are deliberately honest: empty workspaces have **no placeholder endpoints** that could be
@@ -139,7 +139,7 @@ mcp/
 
 | Tool | Needed from | Install when (all free) |
 | --- | --- | --- |
-| Ollama | optional local LLM (Milestone 9) | optional; Groq free tier is the default plan |
+| Ollama | optional local LLM (Milestone 9) | optional; Groq free tier is the default plan — configure via `LLM_BASE_URL` |
 
 Also not present: a WooCommerce store. Milestone 1 shipped against a **mock** WooCommerce REST
 API (no store, Docker or network needed); verifying against a real store — a free local
@@ -263,11 +263,11 @@ tool call — exact commands in [infra/helm/README.md](./infra/helm/README.md).
 | 1 | WooCommerce MCP server | ✅ done: 5 tools over Streamable HTTP, tested against a mock store |
 | 2 | **Gateway core** | ✅ done: MCP server + client, discovery, aggregation, routing, timeouts |
 | 3 | Auth + audit | ✅ done: 2 seeded users, hashed revocable keys, roles, append-only audit (Postgres) |
-| 4 | Dashboard | ✅ done: sessions, React UI (overview/tools/upstreams/audit/chat foundation), persisted upstream toggles |
+| 4 | Dashboard | ✅ done: sessions, React UI (overview/tools/upstreams/audit/chat), persisted upstream toggles |
 | 5 | Inventory + Support servers | ✅ done: two seeded servers, config-only registration, process-to-process gateway tests |
 | 6 | Docker images | ✅ done: five multi-stage images built and container-tested (no registry push) |
 | 7 | Kubernetes + Helm | ✅ done: one chart, `values-local.yaml` + `values-prod.yaml`, installed and e2e-validated on kind |
 | 8 | Security hardening | ✅ done: threat-model C1–C8 + B1 hardening implemented and test-verified (SSRF guard, rate/concurrency/limit controls, log scrubbing, ServiceAccounts, host allow-listing) |
-| 9 | Chat agent + LLM | Groq free tier or local Ollama, through the same gateway path |
+| 9 | Chat agent + LLM | ✅ done: Groq-compatible agent loop through the same gateway path (shared authz/audit pipeline); optional — 503 without a key |
 
 Details and the *why* for each ordering: [docs/architecture.md § 11](./docs/architecture.md).

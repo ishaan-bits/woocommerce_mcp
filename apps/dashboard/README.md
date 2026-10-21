@@ -1,8 +1,9 @@
 # Urumi Dashboard
 
 The React UI for the gateway: login, overview, tool list, upstream enable/disable, audit
-viewer and a labelled chat foundation. It is a **client** of the gateway's REST API — it
-never speaks MCP itself, never executes tools, and never holds credentials.
+viewer and a working chat page (Milestone 9). It is a **client** of the gateway's REST
+API — it never speaks MCP itself, never executes tools, and never holds credentials
+(including the LLM provider key, which exists only inside the gateway process).
 
 ## Quick start
 
@@ -46,18 +47,27 @@ feature flag — credentials never come from build-time configuration.
 | **Tools** | aggregated tool list with degraded-upstream banners | `GET /api/tools` (mirror of the registry behind `tools/list`) |
 | **Upstreams** | per-upstream status; **admin-only** enable/disable with per-row busy state | `GET /api/upstreams`, `POST /api/upstreams/<id>:enable|disable` |
 | **Audit** | read-only viewer, keyset pagination, page-size selector 10/25/50/100 | `GET /api/audit?limit=…&before=…` (admin only) |
-| **Chat** | clearly-labelled **foundation** — composer disabled, no responses generated | none (no agent endpoint exists until Milestone 9) |
+| **Chat** | composer, conversation, per-call tool chips (success / failed / denied), loading and error states, configuration banner when no provider is set | `POST /api/chat` (session cookie) → server-side agent; 503 `agent_not_configured` when the gateway has no `GROQ_API_KEY`/`LLM_BASE_URL` |
 
 Every list page distinguishes **loading / empty / error** states, retries are explicit, and
 401 vs 403 are shown differently (re-login vs "not permitted").
 
+### Chat (Milestone 9)
+
+The browser sends `{message, history}` to `POST /api/chat` with the session cookie. The
+LLM runs **inside the gateway**; every tool call it makes is authorized against *your*
+principal and audited exactly once (the same pipeline as `/mcp`). Tool chips under each
+answer are **gateway-computed** outcomes — model prose cannot relabel a failed call as a
+success. No provider key ever reaches the bundle: if the gateway is unconfigured, the page
+shows a setup banner instead of generating anything. The live-provider smoke test
+(`scripts/llm-smoke.sh`) is opt-in and never part of `npm run check`.
+
 ### What is deliberately NOT here
 
-- **No chat/agent answers.** The gateway has no agent endpoint (Milestone 9); the chat page
-  renders a labelled placeholder rather than fabricating a conversation.
 - **No key management UI.** Key issuance/revocation stays on the API (`/api/keys`) — the
   dashboard only displays non-secret key metadata via `/api/me`.
-- **No tool execution.** Tool calls happen exclusively at `/mcp`; this UI mirrors the list.
+- **No tool execution.** Tool calls happen exclusively inside the gateway (`/mcp` or the
+  agent's shared pipeline); this UI mirrors the list and reports chat outcomes.
 - **No direct upstream URLs.** Toggles target fixed registry ids only; configuring an
   upstream's URL remains an environment concern (`*_MCP_URL`).
 
@@ -109,4 +119,6 @@ pushing logic into `src/state.ts` and `src/api/client.ts`.
   shows the 403 the server returned rather than predicting permissions.
 - Polling is deliberately avoided: status pages refresh via explicit buttons, so the
   dashboard does not hammer the gateway (threat-model C7).
-- The chat page is a foundation only; see [docs/architecture.md §9.3](../../docs/architecture.md).
+- Chat depends on the gateway's optional LLM configuration: without a provider the page
+  shows a setup banner; see [docs/architecture.md §9.3](../../docs/architecture.md) and
+  decisions D29/D30.

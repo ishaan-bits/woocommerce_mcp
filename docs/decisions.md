@@ -741,3 +741,65 @@ The `$(POD_IP)` trick couples the chart to Kubernetes env expansion (documented 
 template). The `express.json` wrap touches a module export for two synchronous statements —
 contained, commented, and covered by the 413 tests; the alternative (forking the SDK app
 assembly) costs more than it protects.
+
+---
+
+## D29 — Chat agent provider: Groq-compatible OpenAI adapter, optional and off-by-default
+
+**Context.** Milestone 9 needs a real LLM behind `POST /api/chat`. Budget is ₹0, so no
+paid provider; the repo's existing plan (README components, D11) names the **Groq free
+tier** as the default. Local models must stay possible for contributors without a key.
+
+**Decision.**
+- One provider implementation: `OpenAiCompatProvider` (apps/gateway/src/agent/provider.ts)
+  speaks the OpenAI chat-completions shape with an injected `fetch`, so Groq works out of
+  the box (`LLM_BASE_URL` defaults to `https://api.groq.com/openai/v1`, model
+  `llama-3.3-70b-versatile`) and any local OpenAI-compatible server (e.g. Ollama) works by
+  overriding `LLM_BASE_URL` alone — no API key required for local.
+- Server-side env only: `GROQ_API_KEY`, `GROQ_MODEL`, `LLM_BASE_URL`,
+  `LLM_REQUEST_TIMEOUT_MS` (45s). The key never reaches the dashboard bundle, API
+  responses, audit rows, or logs (`safeConfigSummary` records presence only).
+- The agent is **optional**: with no key and no base URL, `buildLlmConfig()` returns
+  `null`, the app boots normally, and `/api/chat` answers `503 agent_not_configured`.
+  Nothing is stubbed or fabricated (same policy as the empty-workspace rule).
+- Provider failures map to coarse kinds (`rate_limited`/`timeout`/`unavailable`/
+  `rejected`/`malformed`) → HTTP 429/504/502 with generic messages; provider bodies are
+  never echoed to clients (L4). No automatic retries — free-tier limits would amplify them.
+- The live-provider smoke test is the opt-in `scripts/llm-smoke.sh` (skips cleanly with
+  exit 0 when `GROQ_API_KEY` is unset); it is deliberately **not** part of
+  `scripts/check.sh`, so the automated suite never depends on a third party.
+
+**Trade-offs.** Chat-completions (not responses/streaming) keeps the client tiny and the
+test suite fully mockable via `ScriptedProvider`, at the cost of no streaming — text
+appears only after the bounded loop finishes. Pinning a default model name can break if
+Groq retires the model; the env override and honest 502 mapping are the chosen mitigation
+rather than a hardcoded fallback list.
+
+---
+
+## D30 — One tool-execution pipeline for `/mcp` and the chat agent
+
+**Context.** The agent must call gateway tools, but a second execution path would double
+the authorization, audit and SSRF surface — and a loopback HTTP self-call would defeat the
+C4 allow-list (the gateway's own host is not on it) while failing to reuse the caller's
+principal.
+
+**Decision.**
+- Extract `executeToolCall()` (apps/gateway/src/tool-executor.ts): C7 per-key rate
+  limiting → C5 authorization (role ceiling + grants) → registry lookup + zod validation →
+  SSRF/caps/timeouts → exactly **one** audit row per attempt → bounded result. Both the
+  `/mcp` transport handler and the chat agent loop call this function.
+- The agent executes as the **authenticated dashboard principal** (session cookie →
+  keyId/role/grants), and the tool list offered to the model is pre-filtered through the
+  same `authorize()` used at execution time. Outcome labels in the API response
+  (`success`/`error`/`denied`/`invalid`) are computed server-side, never taken from the
+  model's prose.
+- `/mcp` request semantics are unchanged (shared-pipeline refactor covered by the full
+  pre-existing gateway suite); MCP framing, session auth and error envelopes stay where
+  they were.
+
+**Trade-offs.** The agent cannot run "as itself" with a dedicated key (an earlier shape in
+§9.3) — using the caller's principal is simpler, attribution is natural (audit rows name
+the user), and revocation is one key revocation. The cost: chat availability is coupled to
+the caller's session, and a future autonomous agent would need a service principal added
+deliberately.

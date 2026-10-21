@@ -160,4 +160,32 @@ describe("dashboard API client", () => {
     const result = await api.setUpstream("woocommerce", false);
     assert.deepEqual(result, { id: "woocommerce", enabled: false, changed: true });
   });
+
+  test("chat posts message + bounded history to relative /api/chat with no credentials in the body", async () => {
+    const { fetchImpl, calls } = recordingFetch(() =>
+      jsonResponse({ reply: "ok", tool_calls: [{ name: "woocommerce_list_products", outcome: "success" }], rounds: 2 }),
+    );
+    const api = createApiClient(fetchImpl);
+    const result = await api.chat("list products", [{ role: "user", content: "hi" }]);
+
+    assert.equal(calls[0]?.url, "/api/chat");
+    assert.equal(calls[0]?.init?.method, "POST");
+    assert.equal((calls[0]?.init?.headers as Record<string, string>)["content-type"], "application/json");
+    const body = bodyOf(calls[0]!);
+    assert.deepEqual(body, { message: "list products", history: [{ role: "user", content: "hi" }] });
+    // The browser never holds or sends an LLM key.
+    assert.ok(!JSON.stringify(body).includes("gsk_"));
+    assert.deepEqual(result.tool_calls, [{ name: "woocommerce_list_products", outcome: "success" }]);
+  });
+
+  test("503 agent_not_configured surfaces its code so the UI can show the setup hint", async () => {
+    const { fetchImpl } = recordingFetch(() =>
+      jsonResponse({ error: "agent_not_configured", message: "Set GROQ_API_KEY" }, 503),
+    );
+    const api = createApiClient(fetchImpl);
+    await assert.rejects(
+      () => api.chat("hi"),
+      (error: unknown) => error instanceof ApiError && error.status === 503 && error.code === "agent_not_configured",
+    );
+  });
 });

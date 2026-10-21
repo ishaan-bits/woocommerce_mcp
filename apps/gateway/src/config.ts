@@ -35,6 +35,23 @@ export interface AppConfig {
   jsonBodyLimit: string;
   /** Trusted proxy hops for client-IP extraction (0 = trust none). */
   trustProxy: number;
+  /**
+   * Milestone 9 chat agent (D29): null disables the agent entirely (the
+   * gateway and dashboard work normally; POST /api/chat returns 503). The
+   * API key is server-side only and never appears in logs or responses.
+   */
+  llm: LlmConfig | null;
+}
+
+/** Server-side LLM provider settings for the chat agent (Milestone 9). */
+export interface LlmConfig {
+  /** OpenAI-compatible chat-completions base URL (Groq by default). */
+  baseUrl: string;
+  /** Provider API key; empty string for local providers that need none (e.g. Ollama). */
+  apiKey: string;
+  model: string;
+  /** Per provider-call timeout. */
+  requestTimeoutMs: number;
 }
 
 export const DEFAULT_HOST = "127.0.0.1";
@@ -168,6 +185,32 @@ const envSchema = z.object({
     .min(0, "TRUST_PROXY must be between 0 and 10")
     .max(10, "TRUST_PROXY must be between 0 and 10")
     .default(0),
+  // Milestone 9 chat agent (optional — absent config disables the agent).
+  groqApiKey: z.string().optional(),
+  groqModel: z
+    .string({ error: "GROQ_MODEL must be a non-empty model name" })
+    .min(1, "GROQ_MODEL must be a non-empty model name")
+    .default("llama-3.3-70b-versatile"),
+  llmBaseUrl: z
+    .string()
+    .refine(
+      (value) => {
+        try {
+          const url = new URL(value);
+          return url.protocol === "http:" || url.protocol === "https:";
+        } catch {
+          return false;
+        }
+      },
+      "LLM_BASE_URL must be an absolute http:// or https:// URL",
+    )
+    .optional(),
+  llmRequestTimeoutMs: z.coerce
+    .number({ error: "LLM_REQUEST_TIMEOUT_MS must be an integer number of milliseconds" })
+    .int("LLM_REQUEST_TIMEOUT_MS must be an integer number of milliseconds")
+    .min(1_000, "LLM_REQUEST_TIMEOUT_MS must be between 1000 and 120000")
+    .max(120_000, "LLM_REQUEST_TIMEOUT_MS must be between 1000 and 120000")
+    .default(45_000),
   apiKeyPepper: z
     .string({
       error: "API_KEY_PEPPER is required and must be at least 16 characters",
@@ -214,6 +257,10 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     upstreamMaxResponseBytes: trimmed(env, "UPSTREAM_MAX_RESPONSE_BYTES"),
     jsonBodyLimit: trimmed(env, "JSON_BODY_LIMIT"),
     trustProxy: trimmed(env, "TRUST_PROXY"),
+    groqApiKey: env.GROQ_API_KEY === undefined ? undefined : env.GROQ_API_KEY.trim(),
+    groqModel: trimmed(env, "GROQ_MODEL"),
+    llmBaseUrl: trimmed(env, "LLM_BASE_URL"),
+    llmRequestTimeoutMs: trimmed(env, "LLM_REQUEST_TIMEOUT_MS"),
     apiKeyPepper: trimmed(env, "API_KEY_PEPPER"),
     databaseUrl: trimmed(env, "DATABASE_URL"),
   });
@@ -242,6 +289,10 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     upstreamMaxResponseBytes: 10 * 1024 * 1024,
     jsonBodyLimit: "100kb",
     trustProxy: 0,
+    groqModel: "llama-3.3-70b-versatile",
+    llmRequestTimeoutMs: 45_000,
+    groqApiKey: undefined as string | undefined,
+    llmBaseUrl: undefined as string | undefined,
   };
   const data = parsed.success ? parsed.data : fallback;
   const allowedPrivateHosts = data.upstreamAllowedPrivateHosts;
@@ -308,6 +359,34 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     upstreamMaxResponseBytes: data.upstreamMaxResponseBytes,
     jsonBodyLimit: data.jsonBodyLimit,
     trustProxy: data.trustProxy,
+    llm: buildLlmConfig(data.groqApiKey, data.llmBaseUrl, data.groqModel, data.llmRequestTimeoutMs),
+  };
+}
+
+/** Default OpenAI-compatible endpoint: Groq's free-tier API (D29). */
+export const DEFAULT_LLM_BASE_URL = "https://api.groq.com/openai/v1";
+
+/**
+ * The chat agent is configured only when a provider credential or an explicit
+ * base URL is present. With a key but no base URL we target Groq; a local
+ * OpenAI-compatible server (Ollama) is selected via LLM_BASE_URL and needs no
+ * key. Returns null (agent disabled) otherwise — the gateway still boots.
+ */
+function buildLlmConfig(
+  apiKey: string | undefined,
+  baseUrl: string | undefined,
+  model: string,
+  requestTimeoutMs: number,
+): LlmConfig | null {
+  const key = apiKey ?? "";
+  if (key === "" && baseUrl === undefined) {
+    return null;
+  }
+  return {
+    baseUrl: baseUrl ?? DEFAULT_LLM_BASE_URL,
+    apiKey: key,
+    model,
+    requestTimeoutMs,
   };
 }
 
@@ -317,6 +396,8 @@ export interface SafeConfigSummary {
   tool_cache_ttl_ms: number;
   log_level: LogLevel;
   upstreams: Array<{ id: UpstreamId; origin: string }>;
+  /** Milestone 9: presence only — the key itself is never logged (D29). */
+  llm: { configured: boolean; model: string | null; key_present: boolean; base_url: string | null };
 }
 
 export function safeConfigSummary(config: AppConfig): SafeConfigSummary {
@@ -329,5 +410,11 @@ export function safeConfigSummary(config: AppConfig): SafeConfigSummary {
       id: upstream.id,
       origin: new URL(upstream.baseUrl).origin,
     })),
+    llm: {
+      configured: config.llm !== null,
+      model: config.llm?.model ?? null,
+      key_present: (config.llm?.apiKey.length ?? 0) > 0,
+      base_url: config.llm === null ? null : new URL(config.llm.baseUrl).origin,
+    },
   };
 }

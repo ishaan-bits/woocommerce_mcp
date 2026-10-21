@@ -241,3 +241,70 @@ describe("gateway configuration (C4 SSRF + C7 limits)", () => {
     );
   });
 });
+
+describe("gateway configuration (Milestone 9 chat agent)", () => {
+  test("agent is disabled when no LLM env is set — gateway still boots", () => {
+    const config = loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL });
+    assert.equal(config.llm, null);
+  });
+
+  test("GROQ_API_KEY enables the agent with Groq defaults", () => {
+    const config = loadConfig({
+      ...REQUIRED_ENV,
+      WOOCOMMERCE_MCP_URL: VALID_URL,
+      GROQ_API_KEY: "gsk_test_fake_key_config_test",
+    });
+    assert.ok(config.llm !== null);
+    assert.equal(config.llm?.baseUrl, "https://api.groq.com/openai/v1");
+    assert.equal(config.llm?.model, "llama-3.3-70b-versatile");
+    assert.equal(config.llm?.apiKey, "gsk_test_fake_key_config_test");
+    assert.equal(config.llm?.requestTimeoutMs, 45_000);
+  });
+
+  test("LLM_BASE_URL selects a local provider without any key", () => {
+    const config = loadConfig({
+      ...REQUIRED_ENV,
+      WOOCOMMERCE_MCP_URL: VALID_URL,
+      LLM_BASE_URL: "http://127.0.0.1:11434/v1",
+    });
+    assert.ok(config.llm !== null);
+    assert.equal(config.llm?.baseUrl, "http://127.0.0.1:11434/v1");
+    assert.equal(config.llm?.apiKey, "");
+  });
+
+  test("GROQ_MODEL and LLM_REQUEST_TIMEOUT_MS are honored; malformed base URL rejected", () => {
+    const config = loadConfig({
+      ...REQUIRED_ENV,
+      WOOCOMMERCE_MCP_URL: VALID_URL,
+      GROQ_API_KEY: "gsk_test_fake_key",
+      GROQ_MODEL: "test-model-1",
+      LLM_REQUEST_TIMEOUT_MS: "12000",
+    });
+    assert.equal(config.llm?.model, "test-model-1");
+    assert.equal(config.llm?.requestTimeoutMs, 12_000);
+
+    assert.throws(
+      () =>
+        loadConfig({
+          ...REQUIRED_ENV,
+          WOOCOMMERCE_MCP_URL: VALID_URL,
+          LLM_BASE_URL: "not a url",
+        }),
+      /LLM_BASE_URL must be an absolute/,
+    );
+  });
+
+  test("safeConfigSummary reports presence only — never the key", () => {
+    const key = "gsk_test_fake_key_summary";
+    const config = loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL, GROQ_API_KEY: key });
+    const summary = safeConfigSummary(config);
+    assert.equal(summary.llm.configured, true);
+    assert.equal(summary.llm.key_present, true);
+    assert.equal(summary.llm.model, "llama-3.3-70b-versatile");
+    assert.ok(!JSON.stringify(summary).includes(key));
+
+    const off = safeConfigSummary(loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL }));
+    assert.equal(off.llm.configured, false);
+    assert.equal(off.llm.key_present, false);
+  });
+});

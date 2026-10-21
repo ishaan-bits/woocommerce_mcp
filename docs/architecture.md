@@ -384,35 +384,43 @@ The gateway pod is never restarted because an upstream failed. A crashed *gatewa
 different matter — that is what the Deployment's restart policy and (later) readiness probes
 are for.
 
-### 9.3 The dashboard chat agent (future)
+### 9.3 The dashboard chat agent (Milestone 9)
 
-The chat agent is **not a second integration**. It is an MCP client that happens to live next
-to the gateway:
+The chat agent is **not a second integration**. The LLM runs inside the gateway process and
+its tool calls funnel through the *same* execution pipeline as `/mcp`:
 
 ```text
- Browser ── React UI ──POST /api/chat──► Gateway
+ Browser ── React UI ──POST /api/chat──► Gateway (session cookie auth)
                                             │
                        ┌────────────────────┤
-                       │ chat module: LLM   │  (Groq free tier later, or local Ollama)
-                       │ decides: call      │
+                       │ agent loop (D29)   │  Groq free tier, or LLM_BASE_URL
+                       │ LLM decides: call  │  (local OpenAI-compatible, e.g. Ollama)
                        │ woocommerce_list_  │
                        │ products ?         │
                        └─────────┬──────────┘
                                  ▼
-                 SAME tool registry → SAME authz → SAME routing → SAME audit log
+        SAME executeToolCall pipeline (D30): C7 rate limit → C5 authz
+        (the *signed-in user's* principal) → registry (schema, SSRF, caps)
+        → exactly-one audit row
                                  ▼
                         upstream MCP servers → WooCommerce
 ```
 
 Key points for the interview:
 
-- The agent's tool calls traverse the **same** registry, permission checks and audit writer as
-  any external MCP client. There is no privileged back door.
-- The agent authenticates as its own principal (its own API key / internal identity), so its
-  calls are attributable and revocable like anyone else's.
+- The agent's tool calls traverse the **same** registry, permission checks, rate limiter and
+  audit writer as any external MCP client — one shared `executeToolCall`, no privileged back
+  door, and the MCP transport's behavior is unchanged.
+- The agent executes as the **authenticated dashboard principal** (session → keyId/role/
+  grants), so its calls are attributable and revocable like anyone else's. Tool definitions
+  offered to the model are filtered by that principal, and authorization is re-checked at
+  execution time.
 - The LLM only *chooses* arguments; the gateway still validates them. A prompt-injected model
-  cannot bypass schema validation, role checks or upstream allow-lists.
-- No LLM is wired up in this milestone — this is the intended shape only.
+  cannot bypass schema validation, role checks or upstream allow-lists; tool outputs are fed
+  back only as untrusted `tool` messages, and the response's `tool_calls[]` outcomes are
+  gateway-computed so a failed call can never be relabelled as a success.
+- Missing provider config is a first-class state: the gateway boots without any LLM env,
+  everything else works, and `POST /api/chat` answers `503 agent_not_configured`.
 
 ---
 
@@ -610,9 +618,8 @@ the complete validation log are in [infra/docker/README.md](../infra/docker/READ
 
 - Kubernetes manifests and Helm charts (`infra/helm` contains an explanatory README
   only; `infra/docker` now holds the five built images' Dockerfiles).
-- A real WooCommerce store's credentials, LLM integration / chat agent (the dashboard's chat
-  page is a labelled foundation only), rate limiting / bounded per-upstream concurrency
-  (threat-model C7).
+- A real WooCommerce store's credentials; the chat agent's live-provider smoke test
+  (`scripts/llm-smoke.sh`) requires an operator-supplied `GROQ_API_KEY` and is opt-in.
 
 Nothing in this repository should be described as "working" unless a check in
 `scripts/check.sh` proves it.
@@ -627,12 +634,12 @@ Nothing in this repository should be described as "working" unless a check in
 | 1 | **WooCommerce MCP server** | Smallest end-to-end unit: one server, one real external API, no gateway. Proves Streamable HTTP works before anything depends on it. |
 | 2 | **Gateway core** (MCP server + client, registry, routing, timeouts) | Now there are exactly two moving parts to debug. |
 | 3 | **Postgres + auth** (two users, hashed API keys, roles, audit log) | Auth without a data store is theatre; data store without a call path has nothing to protect. |
-| 4 | **Dashboard backend + React UI** | ✅ done: login/session, tools/upstreams/audit APIs, React SPA (chat foundation) |
+| 4 | **Dashboard backend + React UI** | ✅ done: login/session, tools/upstreams/audit APIs, React SPA (incl. working chat in Milestone 9) |
 | 5 | **Inventory + Support MCP servers** | ✅ done: two seeded servers, config-only registration, process-to-process proof that no gateway code changed |
 | 6 | **Docker images** | ✅ done: five images built and container-tested — wrap each unit once its runtime deps are final |
 | 7 | **Kubernetes + Helm (local, then prod values)** | ✅ done: one chart, two value files, installed and e2e-validated on kind |
 | 8 | **Security hardening + threat-model review** | ✅ done: every threat-model control implemented and verified against tests + the running kind cluster (see `docs/threat-model.md` §3 for the per-control test names). |
-| 9 | **Chat agent + LLM (Groq free tier / Ollama)** | Optional intelligence layer on top of a correct, audited gateway. |
+| 9 | **Chat agent + LLM (Groq free tier / Ollama)** | ✅ done: optional intelligence layer on top of a correct, audited gateway — same `executeToolCall` pipeline as `/mcp` (D29/D30); boots cleanly with no key. |
 
 Each stage ends with a reviewable demo; none of them starts before the previous one is
 explained back in your own words.

@@ -89,6 +89,24 @@ export interface AuditResponse {
   entries: AuditEntryRaw[];
 }
 
+/** Milestone 9: gateway-computed tool outcomes — the model cannot override them. */
+export interface ChatToolCall {
+  name: string;
+  outcome: "success" | "error" | "denied" | "invalid";
+  error?: string;
+}
+
+export interface ChatResponse {
+  reply: string;
+  tool_calls: ChatToolCall[];
+  rounds: number;
+}
+
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 async function parseError(response: Response): Promise<ApiError> {
   let code = "error";
   try {
@@ -160,6 +178,14 @@ export function createApiClient(fetchImpl: FetchLike = (...args) => fetch(...arg
         params.set("before", before);
       }
       return request<AuditResponse>("GET", `/audit?${params.toString()}`);
+    },
+    /**
+     * Milestone 9: chat with the server-side agent. The LLM key never touches
+     * the browser; tool calls are executed by the gateway with *your* session
+     * principal. 503 `agent_not_configured` means no provider is set up.
+     */
+    chat(message: string, history: ChatTurn[] = []): Promise<ChatResponse> {
+      return request<ChatResponse>("POST", "/chat", { message, history });
     },
   };
 }

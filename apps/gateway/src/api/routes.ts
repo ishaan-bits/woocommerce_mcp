@@ -1,5 +1,7 @@
 import { API_PREFIX, UPSTREAM_IDS, type ApiKeyPrincipal, type AuditAction } from "@mcp/shared";
 import { Router, type Request, type Response } from "express";
+import { AgentInputError, type ChatAgent } from "../agent/agent.ts";
+import { ProviderError } from "../agent/provider.ts";
 import type { AuditWriter } from "../audit.ts";
 import { authorizeAdminApi } from "../auth/authorization.ts";
 import { generateApiKey } from "../auth/keys.ts";
@@ -36,6 +38,11 @@ export interface ApiRouterDeps {
   pepper: string;
   /** C7/B1: failed-logins-per-IP throttle; null/undefined disables. */
   loginLimiter?: TokenBucketLimiter | null;
+  /**
+   * Milestone 9 chat agent (D29): null/undefined = not configured — the
+   * route answers 503 with a configuration hint and everything else works.
+   */
+  agent?: ChatAgent | null;
   now?: () => number;
 }
 
@@ -225,7 +232,72 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
     }
   });
 
-  /** Status for every configured *and* unconfigured upstream id (fast: no connections). */
+  /**
+   * Milestone 9 chat agent (D29/D30): authenticated natural-language chat.
+   * The loop runs server-side; every model-requested tool call goes through
+   * the shared executeToolCall pipeline (same authorization, rate limit and
+   * exactly-one audit row as /mcp). The provider key never leaves the server;
+   * provider failures map to coarse codes with generic messages.
+   */
+  router.post("/chat", async (req, res) => {
+    const principal = principalOf(req);
+    if (principal === null) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    const agent = deps.agent ?? null;
+    if (agent === null) {
+      res.status(503).json({
+        error: "agent_not_configured",
+        message:
+          "The chat agent is not configured. Set GROQ_API_KEY (or LLM_BASE_URL for a local OpenAI-compatible server) in the gateway environment and restart it.",
+      });
+      return;
+    }
+
+    const body = req.body as { message?: unknown; history?: unknown } | undefined;
+    try {
+      // Type-level only: the agent validates shape/length and answers 400.
+      const result = await agent.run(
+        { message: body?.message as string, history: body?.history as never },
+        principal,
+      );
+      res.json({
+        reply: result.reply,
+        tool_calls: result.toolCalls,
+        rounds: result.rounds,
+      });
+    } catch (error) {
+      if (error instanceof AgentInputError) {
+        res.status(400).json({ error: error.code, message: error.message });
+        return;
+      }
+      if (error instanceof ProviderError) {
+        // Log the coarse kind + HTTP status server-side; never the body or key.
+        deps.logger.error("chat_provider_failed", {
+          kind: error.kind,
+          ...(error.status !== undefined ? { status: error.status } : {}),
+        });
+        switch (error.kind) {
+          case "rate_limited":
+            res.status(429).json({ error: "provider_rate_limited", message: "The LLM provider is rate limiting requests; try again shortly." });
+            return;
+          case "timeout":
+            res.status(504).json({ error: "provider_timeout", message: "The LLM provider did not respond in time; try again." });
+            return;
+          default:
+            res.status(502).json({ error: "provider_error", message: "The LLM provider could not complete the request; try again." });
+            return;
+        }
+      }
+      deps.logger.error("chat_failed", { error: String(error) });
+      res.status(500).json({ error: "internal_error" });
+    }
+  });
+
+  /**
+   * Status for every configured *and* unconfigured upstream id (fast: no connections).
+   */
   router.get("/upstreams", (req, res) => {
     const principal = principalOf(req);
     if (principal === null) {

@@ -158,7 +158,7 @@ export function App({ api }: { api: ApiClient }) {
           {route === "tools" && <ToolsPage key="tools" api={api} />}
           {route === "upstreams" && <UpstreamsPage key="upstreams" api={api} me={me} />}
           {route === "audit" && <AuditPage key="audit" api={api} me={me} />}
-          {route === "chat" && <ChatPage key="chat" />}
+          {route === "chat" && <ChatPage key="chat" api={api} />}
         </main>
       </div>
     </div>

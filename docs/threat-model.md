@@ -1,14 +1,17 @@
 # Threat Model — MCP Gateway
 
-**Status (updated after Milestone 8):** C1–C8 and the B1 boundary hardening are
-**implemented and test-verified** — every control below names its verifying test.
-C1/C2/C6 were verified in Milestones 3–4; Milestone 8 added the C4 SSRF guard
-(allow-list + private-address classifier + response-size cap), the C7 limits
-(per-key rate limit, per-IP login throttle, per-upstream concurrency cap, JSON
-body limit), the C3/C8 log-scrubbing extensions (postgres URLs, session cookies,
-authorization values; gateway and woocommerce-mcp parity), the C8 ServiceAccounts
+**Status (updated after Milestone 9):** C1–C8, the B1 boundary hardening, and the
+L1–L4 chat-agent controls are **implemented and test-verified** — every control
+below names its verifying test. C1/C2/C6 were verified in Milestones 3–4;
+Milestone 8 added the C4 SSRF guard (allow-list + private-address classifier +
+response-size cap), the C7 limits (per-key rate limit, per-IP login throttle,
+per-upstream concurrency cap, JSON body limit), the C3/C8 log-scrubbing
+extensions (postgres URLs, session cookies, authorization values; gateway and
+woocommerce-mcp parity), the C8 ServiceAccounts
 (`automountServiceAccountToken: false`), the B1 host-header allow-listing on the
-internal MCP servers, and B3 upstream error-message sanitization.
+internal MCP servers, and B3 upstream error-message sanitization. Milestone 9
+added the agent controls L1–L4 (shared execution pipeline, bounded loop,
+prompt-injection containment, provider-key isolation).
 
 Method: identify assets → draw trust boundaries → list threats → attach controls → record what
 is explicitly out of scope. Loosely STRIDE-flavoured, kept plain-English.
@@ -295,6 +298,28 @@ the production render).
 
 ---
 
+## 3b. Chat-agent controls (Milestone 9)
+
+The dashboard chat agent (D29/D30) lets an LLM choose gateway tools. It introduces
+no new execution path: model output is *input* to the existing controls, plus four
+agent-specific ones.
+
+| Control | Notes |
+| --- | --- |
+| L1 — Single execution pipeline | The agent and the `/mcp` transport both call `executeToolCall` (D30): same C7 per-key bucket, same C5 authorization against the *signed-in principal*, same registry validation/SSRF/caps, exactly one audit row per attempt. Tool definitions offered to the model are pre-filtered by that principal, and authorization is re-checked at execution time — the model cannot name a tool the principal may not call. |
+| L2 — Bounded loop and inputs | Message ≤ 4 000 chars, history ≤ 20 messages / 24 000 chars (400 on violation), ≤ 4 tool rounds and ≤ 4 calls per round per request, 60 s total budget, per-call provider timeout, tool results truncated before they re-enter the model. |
+| L3 — Prompt-injection containment | Tool outputs are untrusted data: they reach the model only as `tool`-role messages; the system prompt is fixed and never rewritten from tool data; the response's `tool_calls[]` chips are gateway-computed, so injected text cannot authorize a call, hide a denial, or relabel a failure as success. |
+| L4 — Provider-key isolation | `GROQ_API_KEY` is read server-side only: never in the browser bundle, API responses, audit rows, or logs (config summary records presence only). Provider errors map to coarse codes (`provider_rate_limited`/`provider_timeout`/`provider_error`) with generic messages; provider bodies are never echoed. Without any LLM env the gateway boots normally and `/api/chat` answers 503 `agent_not_configured` — nothing is fabricated. |
+
+**Status: implemented. Verified by:** `test/agent/agent.test.ts` (grounding, denied
+writes, unknown/malformed tools, disabled/unreachable upstreams, injection
+containment, round/history bounds, exactly-one audit rows, no `gsk_` in outputs),
+`test/agent/provider.test.ts` (status mapping, key never in errors),
+`test/chat-api.test.ts` (401/503/400/429/504 mapping, shared C7 bucket with
+`/mcp`), `test/config.test.ts` (agent off by default; summary logs presence only).
+
+---
+
 ## 4. Threat → control map
 
 | Threat | STRIDE | Control |
@@ -308,7 +333,7 @@ the production render).
 | Malicious tool arguments → crafted WooCommerce query | Tampering | C5 schema validation |
 | Compromised upstream forges responses | Tampering | B3 treating upstreams as untrusted input, response validation |
 | Secret committed to git | Information disclosure | C8 policy + `.gitignore` |
-| Chat agent tricked by prompt injection into a write | Elevation of privilege | agent uses ordinary path: C2 + C5 + schema validation still apply |
+| Chat agent tricked by prompt injection into a write | Elevation of privilege | L1–L3 (shared pipeline against the signed-in principal, bounded loop, untrusted tool data, gateway-computed outcomes) — C2 + C5 + schema validation still apply on the execution path |
 
 ---
 

@@ -298,16 +298,23 @@ against the running cluster.
 **Concepts**
 
 - Function/tool calling loop: model → tool_call → tool result → model → final answer.
-- Why the agent uses the *same* gateway path and its own principal.
-- Free/local options: Groq free tier, or local Ollama (not installed on this machine today).
-- Token budgets, timeouts, and refusing to stream a tool result that failed.
+- Why the agent uses the *same* `executeToolCall` pipeline (D30) and the *signed-in*
+  principal's authorization — no privileged back door.
+- Free/local options: Groq free tier (default), or local Ollama via `LLM_BASE_URL`
+  (not installed on this machine today). With no key the gateway boots normally and
+  the chat API answers 503 `agent_not_configured`.
+- Token budgets, round caps, timeouts, and never re-injecting an untrusted tool result
+  as if it were instructions.
 
 **Checkpoint:** ask a question in the dashboard, watch an audited tool call appear, get a
-grounded answer; then revoke the agent's key and watch it fail closed.
+grounded answer with gateway-computed tool chips; then revoke the calling key and watch
+every subsequent call fail closed (`denied`, one audit row per attempt). With no provider
+configured, confirm the banner path (503) instead.
 
 **Recruiter questions**
 - Who validates the arguments the model produced?
 - How would you prevent an infinite tool-call loop?
+- Could a prompt-injected model write to WooCommerce if the *user* lacks the grant?
 
 ---
 
