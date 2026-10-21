@@ -60,6 +60,16 @@ Note for gateway grants: the gateway test harness's static grant set includes
 (migration 001) grants the demo users WooCommerce tools only; adding `tools:support_*`
 grants for real deployments stays ops SQL.
 
+Container (Milestone 6):
+
+```bash
+docker build -f infra/docker/support-mcp/Dockerfile -t urumi/support-mcp:0.1.0 .      # from the repo root
+docker run --rm -p 8084:8084 -e HOST=0.0.0.0 urumi/support-mcp:0.1.0        # HOST=0.0.0.0 is required in containers
+```
+
+No other configuration; the image contract and validation log live in
+[infra/docker/README.md](../../infra/docker/README.md).
+
 ## Testing (no Docker, no network, no real data source)
 
 ```bash

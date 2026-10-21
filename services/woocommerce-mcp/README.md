@@ -54,6 +54,18 @@ curl -sS http://127.0.0.1:8081/mcp \
 
 The response carries an `mcp-session-id` header; send it on subsequent `POST`s.
 
+Container (Milestone 6):
+
+```bash
+docker build -f infra/docker/woocommerce-mcp/Dockerfile -t urumi/woocommerce-mcp:0.1.0 .  # from the repo root
+docker run --rm -p 8081:8081 -e HOST=0.0.0.0 \        # HOST=0.0.0.0 is required in containers
+  -e WOOCOMMERCE_STORE_URL=… -e WOOCOMMERCE_CONSUMER_KEY=… -e WOOCOMMERCE_CONSUMER_SECRET=… \
+  urumi/woocommerce-mcp:0.1.0
+```
+
+Unconfigured containers exit 1 listing the three missing `WOOCOMMERCE_*` variables;
+the image contract and validation log live in [infra/docker/README.md](../../infra/docker/README.md).
+
 ## Testing (no store, no Docker, no network)
 
 ```bash

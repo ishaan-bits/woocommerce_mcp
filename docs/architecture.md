@@ -60,7 +60,7 @@ manifests yet (those are later milestones).
 | **Inventory MCP** | `services/inventory-mcp` | Independent server. Proves the gateway is generic: registering it must require no gateway code changes. |
 | **Support MCP** | `services/support-mcp` | Independent server, same reasoning as inventory. |
 | **Shared** | `packages/shared` | Contract types only — tool names, roles, audit-log shape, upstream config shape. One definition imported everywhere so the pieces cannot silently drift apart. |
-| **Infra** | `infra/docker`, `infra/helm` | Container images and Helm charts (later milestone). |
+| **Infra** | `infra/docker`, `infra/helm` | Container images (built and validated in Milestone 6) and Helm charts (Milestone 7). |
 | **Docs** | `docs` | This file, plus decisions, threat model, learning guide. |
 
 **Why a monorepo?** One `npm install`, one `git clone`, one place to see the whole system.
@@ -304,7 +304,7 @@ different client tomorrow.
 
 ## 8. Kubernetes, Docker, Helm — who does what
 
-*None of this exists yet; it is planned for a later milestone. This section defines the words.*
+*The Docker images exist and are validated (Milestone 6); the Kubernetes/Helm objects below are defined here now and built in Milestone 7. This section defines the words.*
 
 | Concept | One-line responsibility | In our project |
 | --- | --- | --- |
@@ -323,8 +323,9 @@ environments" a config diff instead of two drifting copies of YAML.
 
 **Environment status (updated 2026-10-21):** Colima (Docker engine), Docker CLI, kubectl, kind
 and Helm **are installed**, and a local kind cluster `urumi-local` is running (created with
-explicit approval for Milestones 6–7). No image has been built and no chart exists yet, so the
-deployment milestones still have nothing real to describe — see the README prerequisites
+explicit approval for Milestones 6–7). Five Docker images (`urumi/<name>:0.1.0`) are now
+built and container-validated locally (Milestone 6), but no chart exists yet, so the
+deployment milestone still has nothing real to describe — see the README prerequisites
 section.
 
 ---
@@ -567,9 +568,46 @@ the new tools as a seeded user requires adding `tools:inventory_*`/`tools:suppor
 on purpose (ops SQL), exactly as migration 001 prescribes — registration and authorization
 are separate concerns, and the harness proves the authorization shape.
 
+### Implemented in Milestone 6 (verifiable now)
+
+Five multi-stage images under `infra/docker/` — full build commands, the env matrix and
+the complete validation log are in [infra/docker/README.md](../infra/docker/README.md):
+
+| Image | Tag / size (arm64) | Base | Notes |
+| --- | --- | --- | --- |
+| `urumi/gateway` | `0.1.0` / 286 MB | `node:26.7-alpine` | ships `migrations/`, applies them with `node dist/db/migrate.js` |
+| `urumi/woocommerce-mcp` | `0.1.0` / 285 MB | `node:26.7-alpine` | needs the three `WOOCOMMERCE_*` vars at runtime |
+| `urumi/inventory-mcp` | `0.1.0` / 285 MB | `node:26.7-alpine` | zero required config (seeded demo) |
+| `urumi/support-mcp` | `0.1.0` / 285 MB | `node:26.7-alpine` | zero required config (seeded demo) |
+| `urumi/dashboard` | `0.1.0` / 91 MB | `nginxinc/nginx-unprivileged:1.30-alpine` | static SPA + optional runtime `/api` proxy |
+
+- One repo-root build context trimmed by a single root `.dockerignore`; the four Node
+  Dockerfiles share a byte-identical `deps` stage so the builder caches one `npm ci`
+  layer across all images. Final stages re-install with
+  `npm ci --omit=dev --workspace=…` (~29 MB of production-only `node_modules`; the
+  build fails if the closure is incomplete) and run as `node`/`nginx`, never root.
+- **All configuration is runtime-only** (`docker run -e …`): images carry no `.env`,
+  no URLs, no secrets — verified by `docker history` + filesystem scans. Servers
+  default to `127.0.0.1`, so containers get `HOST=0.0.0.0`/`GATEWAY_HOST=0.0.0.0`
+  explicitly; missing config fails fast with the exact variable list.
+- Validated on one Docker network: migrations from inside the image, `tools/list`
+  over the **official MCP SDK client** returning exactly the 9 qualified names,
+  provenance-checked calls (mock Woo REST → *Mock Woo Lamp* via the WooCommerce
+  container; *Canvas Tote* from the inventory container; a support ticket written
+  end-to-end — refused for a `reader` by the role ceiling with `-32003`, allowed
+  for an `admin` with grants), 401 + `auth_failed` audit rows without a key,
+  `audit_log` rows for every call, `/healthz` → `healthy`, SIGTERM →
+  `shutdown_complete` + exit 0, dashboard static serving + both `/api` proxy modes.
+- **Honest gaps.** Tags are local — no registry push, no compose file (composition
+  is the Helm chart's job in M7). Docker `HEALTHCHECK` is ignored by Kubernetes —
+  probes live in the chart. The dashboard's optional nginx `/api` proxy resolves
+  its upstream at startup; in Kubernetes the Ingress owns `/api` and the proxy
+  stays unused (mode 1 in the Docker README).
+
 ### Planned — deliberately **not** present yet
 
-- Docker images, Kubernetes manifests, Helm charts (`infra/*` contain explanatory READMEs only).
+- Kubernetes manifests and Helm charts (`infra/helm` contains an explanatory README
+  only; `infra/docker` now holds the five built images' Dockerfiles).
 - A real WooCommerce store's credentials, LLM integration / chat agent (the dashboard's chat
   page is a labelled foundation only), rate limiting / bounded per-upstream concurrency
   (threat-model C7).
@@ -589,8 +627,8 @@ Nothing in this repository should be described as "working" unless a check in
 | 3 | **Postgres + auth** (two users, hashed API keys, roles, audit log) | Auth without a data store is theatre; data store without a call path has nothing to protect. |
 | 4 | **Dashboard backend + React UI** | ✅ done: login/session, tools/upstreams/audit APIs, React SPA (chat foundation) |
 | 5 | **Inventory + Support MCP servers** | ✅ done: two seeded servers, config-only registration, process-to-process proof that no gateway code changed |
-| 6 | **Docker images** ← you are here | Wrap each unit once its runtime deps are final. |
-| 7 | **Kubernetes + Helm (local, then prod values)** | Deployment last, so manifests describe reality instead of guesses. |
+| 6 | **Docker images** | ✅ done: five images built and container-tested — wrap each unit once its runtime deps are final |
+| 7 | **Kubernetes + Helm (local, then prod values)** | ← you are here: deployment last, so manifests describe reality instead of guesses. |
 | 8 | **Security hardening + threat-model review** | Controls verified against the running system. |
 | 9 | **Chat agent + LLM (Groq free tier / Ollama)** | Optional intelligence layer on top of a correct, audited gateway. |
 

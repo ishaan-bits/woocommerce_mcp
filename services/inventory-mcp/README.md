@@ -52,6 +52,16 @@ To reach it through the gateway, set the URL (this is the entire registration):
 INVENTORY_MCP_URL=http://127.0.0.1:8083/mcp   # gateway: inventory_list_products, inventory_adjust_stock
 ```
 
+Container (Milestone 6):
+
+```bash
+docker build -f infra/docker/inventory-mcp/Dockerfile -t urumi/inventory-mcp:0.1.0 .  # from the repo root
+docker run --rm -p 8083:8083 -e HOST=0.0.0.0 urumi/inventory-mcp:0.1.0    # HOST=0.0.0.0 is required in containers
+```
+
+No other configuration; the image contract and validation log live in
+[infra/docker/README.md](../../infra/docker/README.md).
+
 ## Testing (no Docker, no network, no real data source)
 
 ```bash

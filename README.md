@@ -27,21 +27,24 @@ beginner-friendly language.
 Milestone 2 complete (gateway core), Milestone 3 complete (authentication,
 authorization and audit logging against a real PostgreSQL), Milestone 4 complete
 (dashboard backend + React UI: sessions, tool/upstream/audit APIs, upstream toggles
-persisted in PostgreSQL) and Milestone 5 complete (independent Inventory and Support
+persisted in PostgreSQL), Milestone 5 complete (independent Inventory and Support
 MCP servers, registered with the gateway via configuration only, verified
-process-to-process with no gateway core changes).**
+process-to-process with no gateway core changes) and Milestone 6 complete (five
+production Docker images, multi-stage and non-root, built and container-validated
+locally — no registry push, no Kubernetes deployment yet).**
 
 | Area | Status |
 | --- | --- |
 | Repository layout + npm workspaces | ✅ `npm install` resolves all 6 workspaces |
 | `packages/shared` contract types | ✅ builds, type-checks, imports (5 WooCommerce tool names) |
 | `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 69 tests, no real store needed |
-| Documentation (`docs/`) | ✅ architecture, decisions (D1–D25), threat model, learning guide |
+| Documentation (`docs/`) | ✅ architecture, decisions (D1–D26), threat model, learning guide |
 | Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, tools, upstream toggles), 108 unit tests + 9 real-PostgreSQL integration tests, no Docker needed for the unit suite |
 | Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, labelled chat foundation; 14 tests + typecheck + production build |
 | Inventory MCP server | ✅ `list_products` + `adjust_stock` over Streamable HTTP, deterministic 12-item seeded store, 39 tests, registered via `INVENTORY_MCP_URL` (no gateway code changes) |
 | Support MCP server | ✅ `list_tickets` + `create_ticket` over Streamable HTTP, deterministic 8-ticket seeded store, 38 tests, registered via `SUPPORT_MCP_URL` (no gateway code changes) |
-| Docker images / Kubernetes / Helm | ⬜ **not implemented** — `infra/*` contain explanatory READMEs only |
+| Docker images | ✅ five multi-stage images (`urumi/<name>:0.1.0`: gateway, three MCP servers, dashboard), non-root, runtime-config only, built and container-tested — see [infra/docker/README.md](./infra/docker/README.md) |
+| Kubernetes / Helm | ⬜ **not implemented** — `infra/helm` contains an explanatory README only (Milestone 7) |
 | PostgreSQL schema, API keys, audit log | ✅ migrations (001–002), two seeded users, hashed revocable keys, append-only audit incl. upstream-toggle rows, session + override tables (`npm run migrate`; integration-tested against PostgreSQL 17) |
 | LLM / chat agent | ⬜ not implemented (no API key required or used; the dashboard chat page is an explicitly-labelled foundation) |
 
@@ -95,8 +98,8 @@ mcp/
 ├── packages/
 │   └── shared/                 # Shared contract types        [implemented]
 ├── infra/
-│   ├── docker/                 # Dockerfiles                  [README only]
-│   └── helm/                   # Helm charts                  [README only]
+│   ├── docker/                 # 5 multi-stage Dockerfiles      [implemented]
+│   └── helm/                   # Helm charts                    [README only]
 ├── docs/
 │   ├── architecture.md         # What and why, explained plainly
 │   ├── decisions.md            # ADR-style choices and trade-offs
@@ -196,6 +199,29 @@ npm run dev    # http://127.0.0.1:5173 — log in with a umk_… API key
 See [apps/dashboard/README.md](./apps/dashboard/README.md) for the browser-auth flow,
 features, deferred chat capabilities and test strategy.
 
+### Docker images (Milestone 6)
+
+```bash
+# build all five images — full list, sizes and the validation log:
+#   [infra/docker/README.md](./infra/docker/README.md)
+docker build -f infra/docker/gateway/Dockerfile -t urumi/gateway:0.1.0 .
+
+# run the gateway against a throwaway PostgreSQL (containers need HOST=0.0.0.0)
+docker run -d --name pg -e POSTGRES_USER=mcp -e POSTGRES_PASSWORD=local_pw -e POSTGRES_DB=mcp postgres:17-alpine
+docker run --rm -e DATABASE_URL=postgres://mcp:local_pw@pg:5432/mcp urumi/gateway:0.1.0 node dist/db/migrate.js
+docker run -d -p 8080:8080 -e GATEWAY_HOST=0.0.0.0 \
+  -e DATABASE_URL=postgres://mcp:local_pw@pg:5432/mcp \
+  -e API_KEY_PEPPER=change-me-to-a-long-random-string \
+  -e WOOCOMMERCE_MCP_URL=http://woocommerce-mcp:8081/mcp \
+  urumi/gateway:0.1.0
+```
+
+Every image is non-root, carries a `/healthz` Docker healthcheck and takes **all**
+configuration at `docker run -e` time (nothing is baked into layers). The image
+contract — required variables, `HOST=0.0.0.0`, network aliases, the dashboard's
+optional `/api` proxy, and exactly what was container-tested — lives in
+[infra/docker/README.md](./infra/docker/README.md).
+
 ---
 
 ## Roadmap
@@ -208,8 +234,8 @@ features, deferred chat capabilities and test strategy.
 | 3 | Auth + audit | ✅ done: 2 seeded users, hashed revocable keys, roles, append-only audit (Postgres) |
 | 4 | Dashboard | ✅ done: sessions, React UI (overview/tools/upstreams/audit/chat foundation), persisted upstream toggles |
 | 5 | Inventory + Support servers | ✅ done: two seeded servers, config-only registration, process-to-process gateway tests |
-| 6 | Docker images | ← you are here: one image per deployable |
-| 7 | Kubernetes + Helm | one chart, `values-local.yaml` + `values-prod.yaml` |
+| 6 | Docker images | ✅ done: five multi-stage images built and container-tested (no registry push) |
+| 7 | Kubernetes + Helm | ← you are here: one chart, `values-local.yaml` + `values-prod.yaml` |
 | 8 | Security hardening | threat-model C1–C7 with tests |
 | 9 | Chat agent + LLM | Groq free tier or local Ollama, through the same gateway path |
 

@@ -100,8 +100,10 @@ pushing logic into `src/state.ts` and `src/api/client.ts`.
 
 ## Known limitations
 
-- The production bundle is plain static files; serving them (nginx/Ingress) belongs to
-  Milestones 6–7. `npm run preview` only exercises the same proxy config.
+- The production bundle is plain static files; `urumi/dashboard` (Milestone 6) serves
+  them with nginx and proxies `/api` only when `GATEWAY_UPSTREAM` is set at runtime —
+  in Kubernetes the Ingress owns `/api` instead (Milestone 7). `npm run preview`
+  exercises the same proxy config during development.
 - No route guards beyond `#/audit` requiring an admin response from the server — the UI
   shows the 403 the server returned rather than predicting permissions.
 - Polling is deliberately avoided: status pages refresh via explicit buttons, so the

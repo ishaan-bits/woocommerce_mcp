@@ -587,3 +587,44 @@ cannot call them until grants are added on purpose — fail-closed by design, su
 READMEs and the milestone report rather than papered over. Process-to-process tests spawn
 three Node children, so the gateway suite costs a few hundred milliseconds more than fakes
 alone — negligible next to what they prove.
+
+---
+
+## D26 — Docker images: pinned alpine bases, repo-root context, runtime-only config
+
+**Context.** Milestone 6 wraps the five deployables in images without changing any
+service contract, and without pretending that a successful `docker build` proves
+deployment (that is Milestone 7's job).
+
+**Decision.**
+- `node:26.7-alpine` (minor-pinned; matches the Node 26 runtime the suites run on —
+  D13's "the lockfile is the real guarantee" covers npm dependencies, the tag pins the
+  OS/runtime layer) for the four Node services, and
+  `nginxinc/nginx-unprivileged:1.30-alpine` for the dashboard: the unprivileged
+  flavour runs as uid 101 out of the box, so non-root is the image's default rather
+  than a patched-afterthought.
+- One build context — the repository root, trimmed by a single root `.dockerignore`
+  (tests, docs, `.env*`, `node_modules`, `dist` never reach the context). npm
+  workspaces resolve exactly as on the host, and the four Node Dockerfiles share a
+  byte-identical `deps` stage so the builder caches a single `npm ci` layer across
+  all images.
+- Each final stage proves its own dependency closure: a fresh base runs
+  `npm ci --omit=dev --workspace=@mcp/<name>`, so a production import missing from
+  the lockfile breaks the *build* instead of the container. The final image holds
+  ~29 MB of production-only `node_modules` — no typescript, no vite.
+- Zero configuration baked in: hosts, ports, upstream URLs, pepper and database URL
+  arrive via `docker run -e …`; healthchecks read the same env vars the app does;
+  unconfigured runs exit 1 with the exact missing-variable list (fail-safe, not
+  fail-weird).
+- The dashboard's `/api` proxy is optional at runtime (`GATEWAY_UPSTREAM` unset ⇒
+  scripted 503), because architecture §8 gives `/api` to the Ingress in Kubernetes —
+  the proxy exists for plain-Docker use, and its startup-time DNS resolution is
+  documented as a limitation rather than hidden.
+
+**Trade-offs.** Local tags only (`urumi/<name>:0.1.0`): pushing to a registry has no
+consumer before M7 and would put distribution into the critical path of a building
+milestone. `npm ci` runs twice per image (full in `deps`, prod-only in `runtime`) in
+exchange for the shared cache layer and a minimal final layer — copying
+`node_modules` out of the builder instead would defer dependency errors to runtime.
+The legacy builder (Docker 29 deprecation warning) was used because the Dockerfiles
+avoid BuildKit-only syntax, so installing `docker buildx` later changes nothing.

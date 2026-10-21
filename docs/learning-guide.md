@@ -222,18 +222,27 @@ for one row per call with the right `upstreamId`.
 
 ---
 
-## Stage 6 — Packaging (Milestone 6) and Kubernetes + Helm (Milestone 7)
+## Stage 6 — Packaging (Milestone 6, **implemented**) and Kubernetes + Helm (Milestone 7)
 
 **Concepts (learn in this order)**
 
-1. Containers vs VMs; images, tags, layers; why build once, run anywhere.
-2. Dockerfile hygiene: multi-stage builds, non-root user, no secrets in layers.
+1. Containers vs VMs; images, tags, layers; why build once, run anywhere. — *M6: five
+   images under `infra/docker/`; build one and `docker history` it to see the layers.*
+2. Dockerfile hygiene: multi-stage builds, non-root user, no secrets in layers. — *M6:
+   `deps` → `builder` → `runtime`, `USER node`/`nginx`, runtime-only env; the validation
+   log in `infra/docker/README.md` shows how each property was checked.*
 3. Kubernetes objects: Pod, Deployment, Service, Ingress, ConfigMap, Secret, PVC, Namespace.
 4. Probes: liveness vs readiness — and why they differ for a gateway with an upstream.
 5. Helm: chart templates, `values.yaml`, `--set`, and why two value files beat two YAML trees.
 6. Local clusters: kind vs k3d vs minikube; loading local images into a cluster.
 
-**Checkpoint:** `helm template` renders sensible YAML for both value files; one
+**Checkpoint (M6 — reproduce it):** all five images build from the repo root; each
+starts with only documented env vars, reports `healthy`, answers `/healthz`, and the
+gateway answers `tools/list` with 9 qualified names through the official SDK client;
+unconfigured runs exit 1 with the missing-variable list; `docker stop` ends in exit 0
+with `shutdown_complete`.
+
+**Checkpoint (M7):** `helm template` renders sensible YAML for both value files; one
 `helm install` brings up the whole system on a local cluster; killing a Pod self-heals.
 
 **Recruiter questions**

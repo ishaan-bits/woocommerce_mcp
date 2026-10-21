@@ -44,6 +44,23 @@ curl -s -X POST localhost:8080/api/keys -H 'authorization: Bearer <admin-key>' \
 # the plaintext key is in the response and is never shown again
 ```
 
+## Docker
+
+```bash
+docker build -f infra/docker/gateway/Dockerfile -t urumi/gateway:0.1.0 .   # from the repo root
+docker run --rm --network <net> -e DATABASE_URL=postgres://… \
+  urumi/gateway:0.1.0 node dist/db/migrate.js                              # migrations, no toolchain needed
+docker run -d -p 8080:8080 --network <net> -e GATEWAY_HOST=0.0.0.0 \
+  -e DATABASE_URL=postgres://… -e API_KEY_PEPPER=… \
+  -e WOOCOMMERCE_MCP_URL=http://woocommerce-mcp:8081/mcp \
+  urumi/gateway:0.1.0
+```
+
+`GATEWAY_HOST=0.0.0.0` is required in containers (the default `127.0.0.1` makes
+published ports unreachable). Without configuration the container exits 1 listing the
+missing variables. Full image contract, healthcheck/`docker stop` behavior and the
+Milestone 6 validation log: [infra/docker/README.md](../../infra/docker/README.md).
+
 ## Endpoints
 
 | Path | Purpose |
