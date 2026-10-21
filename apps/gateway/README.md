@@ -15,18 +15,24 @@ referenced below (D5, D14, D15, D18, D20, D21, D22, D23, D24) are in
 ## Quick start
 
 ```bash
-# terminal 1 — a real upstream (optional for first contact; tests need none)
+# terminal 1 — the real upstream servers (tests need none of this)
 cd services/woocommerce-mcp
 WOOCOMMERCE_STORE_URL=... WOOCOMMERCE_CONSUMER_KEY=... WOOCOMMERCE_CONSUMER_SECRET=... npm run dev
+# terminals 2 and 3 — the seeded servers need no configuration at all
+cd services/inventory-mcp && npm run dev    # :8083
+cd services/support-mcp && npm run dev      # :8084
 
-# terminal 2 — the gateway (at least one *_MCP_URL is required)
+# terminal 4 — the gateway (at least one *_MCP_URL is required)
 cd apps/gateway
 # once: apply the schema (users/api_keys/audit_log + two seeded demo users,
 #        then web_sessions/upstream_overrides from 002_dashboard.sql)
 DATABASE_URL=postgresql://mcp:mcp_local_password@localhost:5432/mcp_gateway npm run migrate
 API_KEY_PEPPER=dev-only-pepper-change-me-0123456789 \
 DATABASE_URL=postgresql://mcp:mcp_local_password@localhost:5432/mcp_gateway \
-WOOCOMMERCE_MCP_URL=http://127.0.0.1:8081/mcp npm run dev
+WOOCOMMERCE_MCP_URL=http://127.0.0.1:8081/mcp \
+INVENTORY_MCP_URL=http://127.0.0.1:8083/mcp \
+SUPPORT_MCP_URL=http://127.0.0.1:8084/mcp \
+npm run dev
 ```
 
 Connect any MCP client to `http://127.0.0.1:8080/mcp`, sending
@@ -77,7 +83,7 @@ deleted before the cookie is cleared).
 | `GATEWAY_HOST` | `127.0.0.1` | bind address |
 | `GATEWAY_PORT` | `8080` | bind port (1–65535) |
 | `WOOCOMMERCE_MCP_URL` | — | upstream URL; setting it **enables** that upstream |
-| `INVENTORY_MCP_URL`, `SUPPORT_MCP_URL` | unset | optional upstreams (Milestone 5); unset = not published |
+| `INVENTORY_MCP_URL`, `SUPPORT_MCP_URL` | unset | optional upstreams (implemented in Milestone 5); unset = not published |
 | `UPSTREAM_TIMEOUT_MS` | `10000` | per-call budget toward an upstream |
 | `UPSTREAM_CONNECT_TIMEOUT_MS` | `3000` | budget for the initial MCP handshake |
 | `TOOL_CACHE_TTL_MS` | `60000` | how long a discovered tool list stays fresh |
@@ -158,15 +164,16 @@ D18).
 
 ```bash
 # unit suite (part of npm run check): fakes only at the upstream/database edges
-npm test -w @mcp/gateway          # 97 tests, no Docker or network needed
+npm test -w @mcp/gateway          # 108 tests, no Docker or network needed
                                    # (auth, cookies/sessions, API, audit, registry,
-                                   #  failure isolation, test/registry-toggle.test.ts)
+                                   #  failure isolation, registry toggles,
+                                   #  three-upstreams routing, real-process routing)
 
 # + real PostgreSQL integration (9 tests): needs a DISPOSABLE database
 docker run -d --name pg-test -e POSTGRES_USER=mcp -e POSTGRES_PASSWORD=pw \
   -e POSTGRES_DB=mcp_gateway_test -p 127.0.0.1:5433:5432 postgres:17-alpine
 TEST_DATABASE_URL=postgresql://mcp:pw@127.0.0.1:5433/mcp_gateway_test \
-  npm test -w @mcp/gateway        # 106 tests, real migrations/roles/audit rows/sessions/overrides
+  npm test -w @mcp/gateway        # 117 tests, real migrations/roles/audit rows/sessions/overrides
 docker rm -f pg-test              # keep the image, throw the container away
 ```
 
@@ -180,6 +187,17 @@ never skipped silently.
   timeout, one that never accepts connections, one disabled via config. That is how failure
   isolation (learning-guide Stage 3 checkpoint) is proven without Docker, network or a real
   WooCommerce store.
+- **All three upstreams as fakes** — `test/three-upstreams.test.ts` proves aggregation with
+  unique qualified names, per-upstream provenance (`served_by`), exactly one audit row per
+  call with the right `upstreamId`, runtime disable isolating only that upstream, and the
+  reader ceiling over support tools (read allowed, `support_create_ticket` denied with
+  `role_forbidden`).
+- **Real server processes** — `test/real-upstreams.test.ts` spawns the actual
+  `services/inventory-mcp`, `services/support-mcp` and `services/woocommerce-mcp` servers as
+  child processes (plus a mock WooCommerce REST store), so nothing in the tool path is a
+  fake: it asserts all nine aggregated tools, per-server payload provenance, audit
+  attribution, runtime disable, and that SIGKILLing one child fails only its own tools with
+  no host/port/URL in the error.
 - Contract drift: discovery warns (`woocommerce_tool_contract_drift`) if any of the five D14
   contract tools disappears upstream (D14 promise, tested both ways).
 - **Sessions and toggles** are covered end-to-end: cookie grants access under `/api` only,
@@ -197,11 +215,15 @@ never skipped silently.
 - **No rate limiting / bounded per-upstream concurrency** — threat-model C7, Milestone 8.
 - **Sessions are database rows** — no session-listing/revocation UI (a row expires or the
   key is revoked); login failures are audited, successful logins are only logged.
-- **Two seeded users, no self-service signup** — provisioning stays ops work.
-- **Never paired with the real `services/woocommerce-mcp` process** — tests use fake
-  upstreams; the live pairing belongs to Milestones 6–7 (Docker/kind). The wiring was smoke-
-  tested once against a real gateway process (health probes, initialize handshake, graceful
-  `SIGTERM`).
+- **Two seeded users, no self-service signup** — provisioning stays ops work. Their seed
+  grants (migration 001) cover the **WooCommerce tools only**: new upstreams fail closed
+  for the demo users until `tools:inventory_*` / `tools:support_*` grants are added on
+  purpose via SQL. The test harness grants them statically so the suites can verify the
+  full authorization shape (including the denials).
+- **The live pairing with real server processes is proven in tests, not in Docker** —
+  `test/real-upstreams.test.ts` spawns the three real MCP server processes on loopback;
+  running the whole set under Docker/kind still belongs to Milestones 6–7. The paid
+  WooCommerce REST API still has a mock standing in for it.
 - Per-upstream concurrency is not yet bounded: one upstream under load does not degrade
   others (isolation), but within one upstream there is no queue or rate limit yet.
 

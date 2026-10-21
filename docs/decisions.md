@@ -529,3 +529,61 @@ does not stop an in-flight call (no cancellation race introduced); it changes di
 a distinct field from `state.config.enabled`, unset-env and admin-disabled remain
 distinguishable (`configured` vs `enabled` in `GET /api/upstreams`), and a disabled-via-
 DB upstream still reports honestly if its URL is missing.
+
+## D25 — Inventory and Support ship as independent seeded-demo MCP servers; registration stays config-only
+
+**Context.** Milestone 5 must prove the architecture's central claim — *adding an upstream
+requires no gateway code changes* — under the assignment's fixed constraints: ₹0 budget, no
+paid or unreliable third-party APIs, and an explicit rule against faking a live integration.
+No real inventory system or helpdesk is available on this machine (the same honest position
+as the missing WooCommerce store), and the four new tool names
+(`inventory_list_products`, `inventory_adjust_stock`, `support_list_tickets`,
+`support_create_ticket`) are already pinned by docs §5.3 and gateway tests.
+
+**Decision.** Two new *processes*, not modules:
+
+1. `services/inventory-mcp` and `services/support-mcp` mirror the shape proven by the
+   WooCommerce server (official SDK, Streamable HTTP at `/mcp`, per-session servers,
+   probes, draining, redacting logger, fail-fast env) and change only their domain: a
+   deterministic seeded store behind an injectable seam (`InventoryDataSource` /
+   `SupportDataSource`, plus an injectable clock for ticket timestamps) and exactly two
+   tools each. Ports 8083/8084 match the `.env.example` placeholders.
+2. **Seeded demo data is labelled as such, everywhere** — tool descriptions, server
+   instructions and every payload carry `source: "seeded-demo"`; nothing in the repo may
+   read as a real warehouse or ticketing integration. State lives in memory and resets on
+   restart, which is honest for a demo and documented as a limitation.
+3. Registration is strictly configuration: `INVENTORY_MCP_URL` / `SUPPORT_MCP_URL` flow
+   through the existing `UPSTREAM_URL_ENV` map; discovery, prefix routing, timeouts,
+   failure isolation, authorization and audit are reused untouched (the milestone's diff
+   under `apps/gateway/src` is empty).
+4. Grants (C5) are treated as a *separate layer* from registration: the test harness's
+   static grants cover the new tools so both allowances and denials are verified, while
+   migration 001's fail-closed seed ("unknown tools fail closed until a grant is added on
+   purpose") is left unchanged — no migration was edited or added in M5, because seed
+   grants are per-principal ops SQL, not routing, and `test/integration/postgres.test.ts`
+   pins the seed as shipped.
+5. Verification happens at two altitudes: fake upstreams (fast, controllable) for routing
+   semantics, and **spawned real server processes** (`test/real-upstreams.test.ts`, with a
+   mock WooCommerce REST store standing in for the paid API) for the full path — payload
+   provenance, one audit row per call, runtime disable, and SIGKILL isolation with no
+   host/port/URL leakage.
+
+**Alternatives.** (a) One combined "demo sources" server exposing all four tools — rejected:
+it would prove nothing about multi-upstream routing and would couple two upstreams into one
+failure domain. (b) Backing the stores with a real free-tier inventory/helpdesk API —
+rejected: it violates the spirit of "no paid APIs", adds network flakiness, and still could
+not honestly be called *your* inventory system. (c) Copying `@mcp/shared` into the servers
+or sharing domain code with the WooCommerce server — rejected: the servers stay independent
+processes that share only the SDK/zod/express stack, which is what makes the "new upstream"
+claim meaningful. (d) Extending the migration seed with inventory/support grants in the
+same milestone — rejected as scope creep across a pinned contract (see Decision 4 above);
+recorded as a remaining requirement instead.
+
+**Trade-offs.** Duplicated server scaffolding across three services (accepted: process
+isolation and independent deployability are the point; the duplication is small and each
+copy is fully tested). In-memory state means writes evaporate on restart (documented). The
+seed-grant deferral means a fresh deployment publishes the new tools but the demo users
+cannot call them until grants are added on purpose — fail-closed by design, surfaced in the
+READMEs and the milestone report rather than papered over. Process-to-process tests spawn
+three Node children, so the gateway suite costs a few hundred milliseconds more than fakes
+alone — negligible next to what they prove.

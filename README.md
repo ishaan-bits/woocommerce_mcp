@@ -25,19 +25,22 @@ beginner-friendly language.
 
 **Milestone 0 complete (scaffold), Milestone 1 complete (WooCommerce MCP server),
 Milestone 2 complete (gateway core), Milestone 3 complete (authentication,
-authorization and audit logging against a real PostgreSQL) and Milestone 4 complete
+authorization and audit logging against a real PostgreSQL), Milestone 4 complete
 (dashboard backend + React UI: sessions, tool/upstream/audit APIs, upstream toggles
-persisted in PostgreSQL).**
+persisted in PostgreSQL) and Milestone 5 complete (independent Inventory and Support
+MCP servers, registered with the gateway via configuration only, verified
+process-to-process with no gateway core changes).**
 
 | Area | Status |
 | --- | --- |
 | Repository layout + npm workspaces | ✅ `npm install` resolves all 6 workspaces |
 | `packages/shared` contract types | ✅ builds, type-checks, imports (5 WooCommerce tool names) |
 | `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 69 tests, no real store needed |
-| Documentation (`docs/`) | ✅ architecture, decisions (D1–D24), threat model, learning guide |
-| Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, tools, upstream toggles), 97 unit tests + 9 real-PostgreSQL integration tests, no Docker needed for the unit suite |
+| Documentation (`docs/`) | ✅ architecture, decisions (D1–D25), threat model, learning guide |
+| Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, tools, upstream toggles), 108 unit tests + 9 real-PostgreSQL integration tests, no Docker needed for the unit suite |
 | Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, labelled chat foundation; 14 tests + typecheck + production build |
-| Inventory/support MCP servers | ⬜ **not implemented** — package manifests only, no source, no endpoints |
+| Inventory MCP server | ✅ `list_products` + `adjust_stock` over Streamable HTTP, deterministic 12-item seeded store, 39 tests, registered via `INVENTORY_MCP_URL` (no gateway code changes) |
+| Support MCP server | ✅ `list_tickets` + `create_ticket` over Streamable HTTP, deterministic 8-ticket seeded store, 38 tests, registered via `SUPPORT_MCP_URL` (no gateway code changes) |
 | Docker images / Kubernetes / Helm | ⬜ **not implemented** — `infra/*` contain explanatory READMEs only |
 | PostgreSQL schema, API keys, audit log | ✅ migrations (001–002), two seeded users, hashed revocable keys, append-only audit incl. upstream-toggle rows, session + override tables (`npm run migrate`; integration-tested against PostgreSQL 17) |
 | LLM / chat agent | ⬜ not implemented (no API key required or used; the dashboard chat page is an explicitly-labelled foundation) |
@@ -47,14 +50,15 @@ are deliberately honest: empty workspaces have **no placeholder endpoints** that
 mistaken for finished features. The WooCommerce MCP server is tested against a **mock**
 WooCommerce REST API — it has **not** been verified against a real store (none is available
 on this machine); see [services/woocommerce-mcp/README.md](./services/woocommerce-mcp/README.md).
-The gateway is tested against **fake in-process MCP upstreams** — it has **not** been paired
-with the real WooCommerce MCP server process yet (that live pairing belongs to Milestones 6–7);
-see [apps/gateway/README.md](./apps/gateway/README.md). Authentication, sessions, upstream
-toggles and audit logging are
+The gateway is verified both against **fake in-process MCP upstreams** and — since Milestone 5 —
+against the **real Inventory, Support and WooCommerce MCP server processes** over Streamable
+HTTP (`test/real-upstreams.test.ts`), with the mock REST store still standing in for the paid
+WooCommerce API; see [apps/gateway/README.md](./apps/gateway/README.md). Authentication,
+sessions, upstream toggles and audit logging are
 verified against a **real PostgreSQL 17** in a disposable container via `TEST_DATABASE_URL`
 (`test/integration/postgres.test.ts`); without that variable the integration suite skips with
-a printed reason, while the 180 tests that need no database (69 + 97 + 14) still run —
-189 tests in total with the database.
+a printed reason, while the 268 tests that need no database (69 + 108 + 14 + 39 + 38) still
+run — 277 tests in total with the database.
 
 ---
 
@@ -86,8 +90,8 @@ mcp/
 │   └── gateway/                # API + MCP gateway            [implemented]
 ├── services/
 │   ├── woocommerce-mcp/        # Our WooCommerce MCP server   [implemented]
-│   ├── inventory-mcp/          # Independent inventory server [manifest only]
-│   └── support-mcp/            # Independent support server   [manifest only]
+│   ├── inventory-mcp/          # Independent inventory server [implemented]
+│   └── support-mcp/            # Independent support server   [implemented]
 ├── packages/
 │   └── shared/                 # Shared contract types        [implemented]
 ├── infra/
@@ -158,15 +162,27 @@ cd services/woocommerce-mcp
 WOOCOMMERCE_STORE_URL=... WOOCOMMERCE_CONSUMER_KEY=... WOOCOMMERCE_CONSUMER_SECRET=... npm run dev
 ```
 
-To run the gateway locally (it needs at least one upstream URL):
+The Inventory and Support servers need no configuration at all (seeded demo data):
+
+```bash
+cd services/inventory-mcp && npm run dev   # http://127.0.0.1:8083/mcp (12 seeded items)
+cd services/support-mcp && npm run dev     # http://127.0.0.1:8084/mcp (8 seeded tickets)
+```
+
+To run the gateway locally (it needs at least one upstream URL; all three together):
 
 ```bash
 cd apps/gateway
-WOOCOMMERCE_MCP_URL=http://127.0.0.1:8081/mcp npm run dev
+WOOCOMMERCE_MCP_URL=http://127.0.0.1:8081/mcp \
+INVENTORY_MCP_URL=http://127.0.0.1:8083/mcp \
+SUPPORT_MCP_URL=http://127.0.0.1:8084/mcp \
+npm run dev
 ```
 
-See [services/woocommerce-mcp/README.md](./services/woocommerce-mcp/README.md) for the tools,
-endpoints, test strategy and known limitations, and
+See [services/woocommerce-mcp/README.md](./services/woocommerce-mcp/README.md),
+[services/inventory-mcp/README.md](./services/inventory-mcp/README.md) and
+[services/support-mcp/README.md](./services/support-mcp/README.md) for the tools,
+endpoints, test strategy and known limitations of each server, and
 [apps/gateway/README.md](./apps/gateway/README.md) for gateway endpoints, environment
 variables, routing rules and test strategy.
 
@@ -191,8 +207,8 @@ features, deferred chat capabilities and test strategy.
 | 2 | **Gateway core** | ✅ done: MCP server + client, discovery, aggregation, routing, timeouts |
 | 3 | Auth + audit | ✅ done: 2 seeded users, hashed revocable keys, roles, append-only audit (Postgres) |
 | 4 | Dashboard | ✅ done: sessions, React UI (overview/tools/upstreams/audit/chat foundation), persisted upstream toggles |
-| 5 | Inventory + Support servers | ← you are here: prove "add an upstream without gateway code" |
-| 6 | Docker images | one image per deployable |
+| 5 | Inventory + Support servers | ✅ done: two seeded servers, config-only registration, process-to-process gateway tests |
+| 6 | Docker images | ← you are here: one image per deployable |
 | 7 | Kubernetes + Helm | one chart, `values-local.yaml` + `values-prod.yaml` |
 | 8 | Security hardening | threat-model C1–C7 with tests |
 | 9 | Chat agent + LLM | Groq free tier or local Ollama, through the same gateway path |

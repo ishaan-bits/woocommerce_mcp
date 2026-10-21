@@ -1,8 +1,9 @@
 # Learning Guide — staged roadmap
 
 A sequence of what to understand **before** each implementation phase, how to prove you
-understood it, and questions a recruiter/interviewer could reasonably ask. Stages 0–3 now have
-implementations in this repo (scaffold, `services/woocommerce-mcp`, then `apps/gateway`); the
+understood it, and questions a recruiter/interviewer could reasonably ask. Stages 0–5B now
+have implementations in this repo (scaffold, `services/woocommerce-mcp`, `apps/gateway`,
+Postgres auth/audit, the dashboard, and the Inventory/Support servers of Milestone 5); the
 checkpoints say what is proven today and what is still open.
 
 Suggested rhythm: for each stage, learn → build (in its milestone) → explain it back in one
@@ -173,6 +174,51 @@ with 403 and an audit row.
 - Where does your session token live, and why not localStorage?
 - How does the UI know an upstream is down without hammering the server?
 - What stops a reader from calling the toggle API directly?
+
+---
+
+## Stage 5B — Adding an upstream without touching the gateway (Milestone 5) — implemented
+
+**Concepts**
+
+- What makes registration *configuration only*: upstream ids are a fixed set
+  (`UPSTREAM_IDS`), URLs arrive through `UPSTREAM_URL_ENV` (`INVENTORY_MCP_URL`,
+  `SUPPORT_MCP_URL`), and routing splits a qualified name on the **first known prefix** —
+  so there is no per-tool or per-server branch anywhere to add (`apps/gateway/src/routing.ts`).
+- Server reuse: the Inventory and Support servers copy the shape proven by the WooCommerce
+  server (Streamable HTTP sessions, probes, draining, redacting logger, fail-fast env) and
+  change only their domain — a seeded store plus `tools/schemas/handlers`.
+- Seeded-demo honesty: deterministic offline data (12 SKUs, 8 tickets), `source:
+  "seeded-demo"` in every payload, tool descriptions and server instructions that state no
+  real system is connected — demo data must never masquerade as a live integration.
+- Static vs derived grants: the test harness's static set covers `inventory_*` and
+  `support_create_ticket` so the suites can exercise both allowances and denials;
+  `support_list_tickets` is deliberately outside it (the `grant_forbidden` case in
+  `test/authz-e2e.test.ts`), and the production seed in migration 001 grants the demo
+  users WooCommerce tools only — fail closed until a grant is added on purpose. Grants and
+  registration are different layers: M5 changed neither.
+- Process-to-process testing: spawn the real servers as child processes, poll `/healthz`,
+  point the gateway's registry at real URLs, and assert provenance in payloads
+  (`served_by` from fakes; `source`/shape from real servers) plus exactly one audit row per
+  call with the right `upstreamId`.
+- Isolation under real failure: SIGKILL one child and disable one upstream at runtime —
+  only that upstream's tools fail, the error is structural (`upstream '<id>' is
+  unreachable…`) with no host, port or URL leaked.
+
+**Checkpoint (now runnable):** start the three servers (`:8081`, `:8083`, `:8084`) and the
+gateway with all three `*_MCP_URL`s; call `inventory_list_products`, `support_create_ticket`
+and `woocommerce_list_products` through one MCP client; then `kill -9` the inventory process
+and show the other two still answer while inventory fails cleanly; check `GET /api/audit`
+for one row per call with the right `upstreamId`.
+
+**Recruiter questions**
+- You need to add a fourth upstream tomorrow — which files change, and why is that the
+  whole list?
+- Why can two upstreams both expose `list_products` without colliding?
+- What is the difference between a grant and a route, and which one did you *not* have to
+  touch for Milestone 5?
+- How do you prove failure isolation rather than just claiming it?
+- Why is `support_list_tickets` missing from the grant list if the tool exists?
 
 ---
 

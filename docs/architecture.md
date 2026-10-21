@@ -474,8 +474,9 @@ with **no Docker, no network and no real upstream process**.
 variables; the on/off bit gained a server-side toggle in Milestone 4 (`/api/upstreams`,
 persisted — see below).
 Rate limiting and bounded per-upstream concurrency (threat-model C7) are not enforced yet.
-The gateway has **not** been run against the real `services/woocommerce-mcp` process — tests
-use fake upstreams, and the live pairing belongs to Milestones 6–7.
+Until Milestone 5 the gateway only talked to fakes; it has since been paired with the real
+server processes (`test/real-upstreams.test.ts`), but never against a real store — the
+paid WooCommerce API still has a mock standing in for it.
 
 ### Implemented in Milestone 3 (verifiable now)
 
@@ -532,10 +533,42 @@ typecheck + production build rather than a DOM test framework (logic lives in te
 modules); no server-rendered session for the SPA beyond the cookie; no logout-everywhere /
 session listing UI.
 
+### Implemented in Milestone 5 (verifiable now)
+
+Two independent MCP servers, and the proof that registering them with the gateway needs
+**no gateway code changes**:
+
+| Piece | Implementation |
+| --- | --- |
+| `services/inventory-mcp` | Official-SDK MCP server (same proven shape as the WooCommerce server: Streamable HTTP `/mcp`, per-session server, capacity + idle sweep + draining, `/healthz` + `/readyz`, redacting JSON logger, fail-fast env config) exposing `list_products` (read) and `adjust_stock` (non-idempotent write) over a deterministic **12-item seeded store** (6 per warehouse) |
+| `services/support-mcp` | Same shape on port 8084, exposing `list_tickets` (read) and `create_ticket` (non-idempotent write) over a deterministic **8-ticket seeded store** (ids 1001–1008, statuses open/pending/resolved, priorities low/normal/high, injectable clock) |
+| Honest demo framing | Both tools' descriptions and server instructions state the data is a seeded demo — no real warehouse or helpdesk is connected; payloads carry `source: "seeded-demo"`; results are bounded (`per_page` 1–100) |
+| Registration = config only | `INVENTORY_MCP_URL` / `SUPPORT_MCP_URL` flow through the existing `UPSTREAM_URL_ENV` map; discovery, `inventory_…`/`support_…` prefix routing, timeouts, failure isolation, authz and audit are reused untouched — the M5 diff under `apps/gateway/src` is empty |
+| Grants (C5) | The test harness's static grants cover `inventory_list_products`, `inventory_adjust_stock` and `support_create_ticket`; everything else fails closed — notably `support_list_tickets`, which is the `grant_forbidden` case in `authz-e2e.test.ts`. A fresh migration seed still grants the demo users only the WooCommerce tools: 001's rule is "grants list qualified names, so unknown tools fail closed until a grant is added on purpose", and no grant-management API exists yet (provisioning stays ops SQL — the documented M3 gap) |
+| Failure isolation | A down data source returns a fixed sentence (never internals); a dead server answers `upstream '<id>' is unreachable …` with no host/port/URL; a disabled upstream answers `Upstream '<id>' is disabled`; the other upstreams keep serving |
+
+Verified by a **39-test inventory suite** and a **38-test support suite** (schemas, seeded
+store, MCP protocol over Streamable HTTP, failure paths, raw HTTP surface, logger redaction —
+all offline), a **108-test gateway unit suite** that gained `test/three-upstreams.test.ts`
+(all three upstreams as fakes: aggregation, per-upstream provenance, exactly-one audit row,
+runtime disable, reader ceiling on support tools), and `test/real-upstreams.test.ts` —
+**process-to-process**: it spawns the real inventory, support and WooCommerce server
+processes (plus a mock WooCommerce REST store), asserts all nine aggregated tools,
+per-server payloads, audit attribution, runtime disable, and that SIGKILLing one child fails
+only its own tools with no internal detail leaking. With `TEST_DATABASE_URL` the gateway
+suite runs 117 tests (108 + the 9 PostgreSQL integration tests).
+
+**Honest gaps.** The seeded data is demo data — nothing here is a real inventory or
+ticketing system, and in-memory state resets when a process restarts (by design for the
+demo; persistence belongs to a real integration). The mock WooCommerce REST store still
+stands in for the paid API, so the "real store" follow-up from Milestone 1 remains open.
+The demo users' seed grants were deliberately **not** extended in this milestone: calling
+the new tools as a seeded user requires adding `tools:inventory_*`/`tools:support_*` grants
+on purpose (ops SQL), exactly as migration 001 prescribes — registration and authorization
+are separate concerns, and the harness proves the authorization shape.
+
 ### Planned — deliberately **not** present yet
 
-- Any source in `services/inventory-mcp` or `services/support-mcp` (package manifests only
-  — no placeholder endpoints, so nothing can be mistaken for a working feature).
 - Docker images, Kubernetes manifests, Helm charts (`infra/*` contain explanatory READMEs only).
 - A real WooCommerce store's credentials, LLM integration / chat agent (the dashboard's chat
   page is a labelled foundation only), rate limiting / bounded per-upstream concurrency
@@ -555,8 +588,8 @@ Nothing in this repository should be described as "working" unless a check in
 | 2 | **Gateway core** (MCP server + client, registry, routing, timeouts) | Now there are exactly two moving parts to debug. |
 | 3 | **Postgres + auth** (two users, hashed API keys, roles, audit log) | Auth without a data store is theatre; data store without a call path has nothing to protect. |
 | 4 | **Dashboard backend + React UI** | ✅ done: login/session, tools/upstreams/audit APIs, React SPA (chat foundation) |
-| 5 | **Inventory + Support MCP servers** ← you are here | Proves the "add an upstream without touching gateway code" claim. |
-| 6 | **Docker images** | Wrap each unit once its runtime deps are final. |
+| 5 | **Inventory + Support MCP servers** | ✅ done: two seeded servers, config-only registration, process-to-process proof that no gateway code changed |
+| 6 | **Docker images** ← you are here | Wrap each unit once its runtime deps are final. |
 | 7 | **Kubernetes + Helm (local, then prod values)** | Deployment last, so manifests describe reality instead of guesses. |
 | 8 | **Security hardening + threat-model review** | Controls verified against the running system. |
 | 9 | **Chat agent + LLM (Groq free tier / Ollama)** | Optional intelligence layer on top of a correct, audited gateway. |
