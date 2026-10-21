@@ -1,0 +1,298 @@
+{{/*
+mock-woo-store — clearly-labelled mock WooCommerce REST store for local demos
+(no real credentials, no external traffic). Disabled by values-prod.yaml,
+which points woocommerce-mcp at a real store instead. The script is
+self-contained (no repo imports) and only ever logs method + path — never
+headers, which carry credentials.
+*/}}
+{{- if .Values.mockStore.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mock-woo-store
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-woo-store
+data:
+  store.js: |
+    // MOCK WooCommerce store (Milestone 7 local demo). Implements the small
+    // slice of the WooCommerce REST API the gateway tools use, with the same
+    // response shapes as services/woocommerce-mcp/test/helpers/mock-store.ts.
+    const http = require("node:http");
+
+    const PORT = Number(process.env.PORT || 8090);
+    const KEY = process.env.WOOCOMMERCE_CONSUMER_KEY || "";
+    const SECRET = process.env.WOOCOMMERCE_CONSUMER_SECRET || "";
+    const expectedAuth = "Basic " + Buffer.from(KEY + ":" + SECRET, "utf8").toString("base64");
+
+    const products = [
+      { id: 55, name: "Mock Woo Lamp", regular_price: "49.00", status: "publish", sku: "mock-lamp" },
+      { id: 56, name: "Mock Woo Desk", regular_price: "129.00", status: "publish", sku: "mock-desk" },
+    ];
+    const orders = [{ id: 9001, status: "processing", date_created: "2026-10-01T10:00:00", total: "49.00" }];
+    let nextProductId = 1000;
+
+    const ORDER_WRITE_STATUSES = new Set([
+      "pending", "processing", "completed", "on-hold", "cancelled", "refunded", "failed",
+    ]);
+
+    function sendJson(res, status, data, headers) {
+      const out = Object.assign({ "content-type": "application/json" }, headers || {});
+      res.writeHead(status, out);
+      res.end(JSON.stringify(data));
+    }
+
+    function positiveInt(value, fallback) {
+      const parsed = Number(value);
+      return Number.isInteger(parsed) && parsed >= 1 ? parsed : fallback;
+    }
+
+    function pageSlice(items, page, perPage) {
+      const start = (page - 1) * perPage;
+      return {
+        slice: items.slice(start, start + perPage),
+        total: items.length,
+        totalPages: Math.max(1, Math.ceil(items.length / perPage)),
+      };
+    }
+
+    function readBody(req) {
+      return new Promise((resolve) => {
+        const chunks = [];
+        req.on("data", (chunk) => chunks.push(chunk));
+        req.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          if (raw.length === 0) {
+            resolve({});
+            return;
+          }
+          try {
+            resolve(JSON.parse(raw));
+          } catch {
+            resolve(raw);
+          }
+        });
+      });
+    }
+
+    const server = http.createServer(async (req, res) => {
+      // Log method + path only: headers carry the consumer credentials.
+      console.log(req.method + " " + req.url);
+
+      if (req.headers.authorization !== expectedAuth) {
+        sendJson(res, 401, {
+          code: "woocommerce_rest_authentication_error",
+          message: "Consumer secret is invalid.",
+        });
+        return;
+      }
+
+      const url = new URL(req.url, "http://mock.local");
+      const basePath = "/wp-json/wc/v3";
+      if (!url.pathname.startsWith(basePath)) {
+        sendJson(res, 404, {
+          code: "woocommerce_rest_no_route",
+          message: "No route was found matching the URL and request method.",
+        });
+        return;
+      }
+
+      const resourcePath = url.pathname.slice(basePath.length);
+      const method = (req.method || "GET").toUpperCase();
+      const orderMatch = /^\/orders\/(\d+)$/.exec(resourcePath);
+
+      if (method === "GET" && resourcePath === "/products") {
+        let filtered = products.slice();
+        const search = url.searchParams.get("search");
+        if (search !== null) {
+          filtered = filtered.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()));
+        }
+        const status = url.searchParams.get("status");
+        if (status !== null && status !== "any") {
+          filtered = filtered.filter((p) => (p.status || "publish") === status);
+        }
+        const page = positiveInt(url.searchParams.get("page"), 1);
+        const perPage = positiveInt(url.searchParams.get("per_page"), 10);
+        const paged = pageSlice(filtered, page, perPage);
+        sendJson(res, 200, paged.slice, {
+          "x-wp-total": String(paged.total),
+          "x-wp-totalpages": String(paged.totalPages),
+        });
+        return;
+      }
+
+      if (method === "POST" && resourcePath === "/products") {
+        const input = await readBody(req);
+        if (typeof input !== "object" || typeof input.name !== "string" || typeof input.regular_price !== "string") {
+          sendJson(res, 400, {
+            code: "woocommerce_rest_missing_required_param",
+            message: "Missing parameter(s): name, regular_price",
+          });
+          return;
+        }
+        const product = {
+          id: nextProductId++,
+          name: input.name,
+          regular_price: input.regular_price,
+          status: typeof input.status === "string" ? input.status : "publish",
+        };
+        if (typeof input.sku === "string") product.sku = input.sku;
+        if (typeof input.description === "string") product.description = input.description;
+        if (typeof input.stock_quantity === "number") product.stock_quantity = input.stock_quantity;
+        products.push(product);
+        sendJson(res, 201, product);
+        return;
+      }
+
+      if (method === "GET" && resourcePath === "/orders") {
+        let filtered = orders.slice();
+        const status = url.searchParams.get("status");
+        if (status !== null && status !== "any") {
+          filtered = filtered.filter((o) => o.status === status);
+        }
+        const page = positiveInt(url.searchParams.get("page"), 1);
+        const perPage = positiveInt(url.searchParams.get("per_page"), 10);
+        const paged = pageSlice(filtered, page, perPage);
+        sendJson(res, 200, paged.slice, {
+          "x-wp-total": String(paged.total),
+          "x-wp-totalpages": String(paged.totalPages),
+        });
+        return;
+      }
+
+      if (orderMatch !== null) {
+        const orderId = Number(orderMatch[1]);
+        const order = orders.find((candidate) => candidate.id === orderId);
+        if (order === undefined) {
+          sendJson(res, 404, {
+            code: "woocommerce_rest_shop_order_invalid_id",
+            message: "Invalid ID.",
+          });
+          return;
+        }
+        if (method === "GET") {
+          sendJson(res, 200, order);
+          return;
+        }
+        if (method === "PUT") {
+          const input = await readBody(req);
+          if (typeof input !== "object" || typeof input.status !== "string" || !ORDER_WRITE_STATUSES.has(input.status)) {
+            sendJson(res, 400, {
+              code: "woocommerce_rest_shop_order_invalid_status",
+              message: "Invalid order status.",
+            });
+            return;
+          }
+          order.status = input.status;
+          sendJson(res, 200, order);
+          return;
+        }
+      }
+
+      sendJson(res, 404, {
+        code: "woocommerce_rest_no_route",
+        message: "No route was found matching the URL and request method.",
+      });
+    });
+
+    server.listen(PORT, "0.0.0.0", () => {
+      console.log("mock woo store listening on " + PORT);
+    });
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: woocommerce-store-mock
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-woo-store
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mcp.selectorLabels" (dict "root" . "name" "woocommerce-store-mock") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.mockStore.port }}
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woocommerce-store-mock
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-woo-store
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mcp.selectorLabels" (dict "root" . "name" "woocommerce-store-mock") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcp.labels" . | nindent 8 }}
+        {{- include "mcp.selectorLabels" (dict "root" . "name" "woocommerce-store-mock") | nindent 8 }}
+        app.kubernetes.io/component: mock-woo-store
+    spec:
+      securityContext:
+        # The stock node image defaults to root; the mock runs as the image's
+        # unprivileged `node` user instead.
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mock-woo-store
+          image: {{ printf "%s:%s" .Values.mockStore.image.repository .Values.mockStore.image.tag | quote }}
+          imagePullPolicy: {{ .Values.mockStore.image.pullPolicy }}
+          command: ["node", "/mock/store.js"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.mockStore.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.mockStore.port | quote }}
+            # Same secret keys as woocommerce-mcp: the mock accepts exactly
+            # the credentials the server was configured with.
+            - name: WOOCOMMERCE_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WOOCOMMERCE_CONSUMER_KEY
+            - name: WOOCOMMERCE_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WOOCOMMERCE_CONSUMER_SECRET
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.mockStore.resources | nindent 12 }}
+          volumeMounts:
+            - name: script
+              mountPath: /mock
+              readOnly: true
+      volumes:
+        - name: script
+          configMap:
+            name: mock-woo-store
+{{- end }}

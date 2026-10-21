@@ -1,0 +1,90 @@
+{{/*
+inventory-mcp — ClusterIP only: internal MCP servers are never exposed
+outside the namespace (docs/architecture.md §8, threat-model.md B-boundary).
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inventory-mcp-config
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inventory-mcp
+data:
+  HOST: "0.0.0.0"
+  PORT: {{ .Values.inventoryMcp.port | quote }}
+  LOG_LEVEL: {{ .Values.logLevel | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-mcp
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inventory-mcp
+spec:
+  # Hardcoded: internal MCP servers must not be reachable outside the cluster.
+  type: ClusterIP
+  selector:
+    {{- include "mcp.selectorLabels" (dict "root" . "name" "inventory-mcp") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.inventoryMcp.port }}
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-mcp
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inventory-mcp
+spec:
+  replicas: {{ .Values.inventoryMcp.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mcp.selectorLabels" (dict "root" . "name" "inventory-mcp") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcp.labels" . | nindent 8 }}
+        {{- include "mcp.selectorLabels" (dict "root" . "name" "inventory-mcp") | nindent 8 }}
+        app.kubernetes.io/component: inventory-mcp
+    spec:
+      securityContext:
+        {{- include "mcp.podSecurityContext" . | nindent 8 }}
+        # Numeric IDs matching the image's `USER node` — kubelet refuses named
+        # users when runAsNonRoot is set.
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: inventory-mcp
+          image: {{ printf "%s:%s" .Values.inventoryMcp.image.repository .Values.inventoryMcp.image.tag | quote }}
+          imagePullPolicy: {{ .Values.inventoryMcp.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.inventoryMcp.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: inventory-mcp-config
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            {{- include "mcp.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.inventoryMcp.resources | nindent 12 }}

@@ -273,8 +273,10 @@ within the deadline.
 - **Full WAF / DDoS protection** — no paid services allowed.
 - **Formal cryptographic review** — we use standard library primitives (SHA-256, CSPRNG,
   `timingSafeEqual`) and standard constructions only.
-- **Non-HTTP lateral movement inside the cluster** — deferred until NetworkPolicy in the
-  production values milestone.
+- **Non-HTTP lateral movement inside the cluster** — the chart now ships a
+  namespace-internal NetworkPolicy (`networkPolicy.enabled`, on in production values),
+  but enforcement depends on the CNI and egress/per-workload policies remain part of the
+  security-hardening milestone.
 
 ---
 

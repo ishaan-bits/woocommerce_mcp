@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "mcp-gateway chart values",
+  "type": "object",
+  "properties": {
+    "logLevel": {
+      "type": "string",
+      "enum": ["debug", "info", "warn", "error"]
+    },
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "image": { "$ref": "#/definitions/image" },
+        "service": { "$ref": "#/definitions/httpService" },
+        "toolCacheTtlMs": { "type": "integer", "minimum": 1000 },
+        "migrate": {
+          "type": "object",
+          "properties": {
+            "maxAttempts": { "type": "integer", "minimum": 1 },
+            "sleepSeconds": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "required": ["replicas", "image", "service"]
+    },
+    "woocommerceMcp": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "image": { "$ref": "#/definitions/image" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "storeUrl": { "type": "string" },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "required": ["replicas", "image", "port"]
+    },
+    "inventoryMcp": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "image": { "$ref": "#/definitions/image" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "required": ["replicas", "image", "port"]
+    },
+    "supportMcp": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "image": { "$ref": "#/definitions/image" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "required": ["replicas", "image", "port"]
+    },
+    "dashboard": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "image": { "$ref": "#/definitions/image" },
+        "service": { "$ref": "#/definitions/httpService" },
+        "gatewayUpstream": { "type": "string" },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "required": ["replicas", "image", "service"]
+    },
+    "postgres": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1, "maximum": 1 },
+        "image": { "$ref": "#/definitions/image" },
+        "user": { "type": "string", "minLength": 1 },
+        "database": { "type": "string", "minLength": 1 },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "size": { "type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$" },
+            "storageClass": { "type": "string" }
+          },
+          "required": ["size"]
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "required": ["image", "user", "database", "persistence"]
+    },
+    "mockStore": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "required": ["enabled", "image", "port"]
+    },
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "existingSecret": { "type": "string" },
+        "data": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "required": ["create", "existingSecret", "data"]
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "host": { "type": "string" },
+        "annotations": { "type": "object" },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "secretName": { "type": "string" }
+          },
+          "required": ["enabled", "secretName"]
+        }
+      },
+      "required": ["enabled", "className", "host", "tls"]
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      },
+      "required": ["enabled"]
+    }
+  },
+  "definitions": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [{ "not": { "enum": ["latest"] } }]
+        },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      },
+      "required": ["repository", "tag", "pullPolicy"]
+    },
+    "httpService": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "nodePort": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 30000, "maximum": 32767 }
+          ]
+        }
+      },
+      "required": ["type", "port"]
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "object",
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

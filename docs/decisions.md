@@ -628,3 +628,65 @@ exchange for the shared cache layer and a minimal final layer — copying
 `node_modules` out of the builder instead would defer dependency errors to runtime.
 The legacy builder (Docker 29 deprecation warning) was used because the Dockerfiles
 avoid BuildKit-only syntax, so installing `docker buildx` later changes nothing.
+
+## D27 — Helm chart: bare service names, Recreate+PVC Postgres, init-container migrations, secrets split by environment
+
+**Context.** Milestone 7 deploys the six Milestone 6 images (plus PostgreSQL and a labelled
+mock store) onto the existing kind cluster. The chart has to express startup ordering without
+`depends_on`, keep database state across pod and node restarts, keep every credential out of
+git, and stay honest about what a production operator must still supply.
+
+**Decision.**
+- **Bare resource names** (`gateway`, `woocommerce-mcp`, `postgres`, …) exactly as
+  architecture §8 maps them, so every URL in the system is plain service DNS
+  (`http://woocommerce-mcp:8081/mcp`, `postgres:5432`); release identity lives in labels,
+  and the documented contract is one release per namespace. A config-only registration
+  model (D25) extends naturally: adding an upstream is a Service + a URL, never a code change.
+- **PostgreSQL = Deployment + PVC + `strategy: Recreate`.** One `ReadWriteOnce` volume must
+  never back two servers (a rolling update would briefly do exactly that), and Recreate is
+  the smallest honest way to say so. The official image's entrypoint starts as root to
+  initialise the data directory and then drops the server process to `postgres` — the chart
+  therefore does *not* set `runAsNonRoot` on that one pod, and says why, instead of shipping
+  a setting that breaks the deploy.
+- **Migrations run in the gateway's init container**, not as Helm hooks. The runner tracks
+  applied files in `schema_migrations` (already idempotent), so every pod start re-runs it
+  safely and upgrades apply new files automatically; hooks would run only at install/upgrade
+  and would need delete-policy ceremony. The init container also receives
+  `MCP_APP_DB_PASSWORD`, so the same pass creates the least-privilege `mcp_gateway_app` role
+  (D7) that the runtime then uses via `DATABASE_URL` — the admin URL exists only in the init
+  container.
+- **No blocking wait for MCP upstreams.** The gateway's startup refresh already tolerates
+  unreachable upstreams (`/readyz` reports them per-upstream) and `toolsFor()` re-fetches on
+  TTL expiry, so the first `tools/list` after a start race self-heals. An init/wait container
+  would have made the *gateway* depend on *every* upstream — the opposite of D25's isolation.
+- **One Secret, seven keys named after the env vars they feed.** Local values render it from
+  obvious `local-dev-only-…` placeholders; production sets `secrets.create=false` and points
+  `existingSecret` at a Secret created outside the chart. Key material is generated inside
+  the gateway pod (`generateApiKey` + the pepper from the Secret) and inserted via the admin
+  connection — the pepper never appears in values, git, or pod logs.
+- **Numeric `runAsUser`/`runAsGroup` pinned in the chart** (1000 for the `node` images, 101
+  for nginx). The kubelet refuses `runAsNonRoot` when the image declares a *named* `USER`,
+  which the first install proved; pinning the IDs the images already use makes the
+  non-root posture explicit instead of implicit.
+- **The mock store is a first-class, clearly-labelled workload** (ConfigMap script on
+  `node:26.7-alpine`, ClusterIP, disabled in production values), configured with the *same*
+  Secret keys as `woocommerce-mcp` so it can only accept exactly the credentials the server
+  was given. Production points `woocommerceMcp.storeUrl` at the real store instead.
+- **Access and exposure follow the cluster we actually have.** kind was created without
+  extra port mappings and must not be recreated, so the documented demo path is
+  `kubectl port-forward`; local values still create the NodePorts the pinned plan called
+  for (reachable inside the VM network). The three MCP servers, PostgreSQL and the mock get
+  hardcoded ClusterIP services — not a value an operator can flip to `LoadBalancer`. The
+  dashboard's `GATEWAY_UPSTREAM` proxy is on locally (one port-forward serves UI + API) and
+  off in production values, where the Ingress owns `/api` per §8. Ingress TLS and
+  NetworkPolicy ship as *integration points* (TLS off until a real certificate exists;
+  NetworkPolicy on in production values with a documented "requires an enforcing CNI" note,
+  because Kind's kindnet does not enforce).
+
+**Trade-offs.** Bare names forfeit side-by-side releases in one namespace (labels keep Helm's
+bookkeeping intact; namespaces are the isolation boundary anyway). `Recreate` means a
+brief database outage on upgrade — the correct trade for a single-RWO Postgres that must not
+run twice. The chart carries no Helm `test` pods or hook-based smoke tests: the verification
+walkthrough in `infra/helm/README.md` (lint, template review, server dry-run, live e2e,
+restarts) is the source of truth, because it exercises real authz and persistence rather than
+a pod that only proves HTTP 200.

@@ -1,0 +1,12 @@
+apiVersion: v2
+name: mcp-gateway
+description: Urumi MCP Gateway — gateway, three MCP servers, dashboard, PostgreSQL and an optional mock WooCommerce store
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - mcp
+  - gateway
+  - woocommerce
+home: https://github.com/ishaan-bits/woocommerce_mcp

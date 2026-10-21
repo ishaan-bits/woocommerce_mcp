@@ -1,0 +1,42 @@
+# kind / k3d development values.
+#
+#   kind load docker-image urumi/gateway:0.1.0 urumi/woocommerce-mcp:0.1.0 \
+#     urumi/inventory-mcp:0.1.0 urumi/support-mcp:0.1.0 urumi/dashboard:0.1.0 \
+#     postgres:17-alpine node:26.7-alpine --name urumi-local
+#   helm upgrade --install urumi infra/helm/mcp-gateway \
+#     -n urumi --create-namespace \
+#     -f infra/helm/mcp-gateway/values-local.yaml
+#
+# Everything here is development-only. The values below are placeholders, not
+# credentials; real credentials never live in git (see values-prod.yaml for
+# how production supplies them).
+
+gateway:
+  service:
+    type: NodePort
+    nodePort: 30081
+
+dashboard:
+  service:
+    type: NodePort
+    nodePort: 30080
+  # In-cluster proxy so a single port-forward to the dashboard serves /api too.
+  gatewayUpstream: "http://gateway:8080"
+
+postgres:
+  persistence:
+    size: 1Gi
+
+secrets:
+  create: true
+  data:
+    POSTGRES_PASSWORD: "local-dev-only-postgres-password"
+    MCP_APP_DB_PASSWORD: "local-dev-only-app-role-password"
+    MIGRATE_DATABASE_URL: "postgresql://postgres:local-dev-only-postgres-password@postgres:5432/mcp_gateway"
+    DATABASE_URL: "postgresql://mcp_gateway_app:local-dev-only-app-role-password@postgres:5432/mcp_gateway"
+    API_KEY_PEPPER: "local-dev-only-pepper-not-a-real-secret"
+    WOOCOMMERCE_CONSUMER_KEY: "ck_local_dev_placeholder"
+    WOOCOMMERCE_CONSUMER_SECRET: "cs_local_dev_placeholder"
+
+mockStore:
+  enabled: true

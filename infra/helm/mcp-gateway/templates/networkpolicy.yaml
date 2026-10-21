@@ -1,0 +1,26 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/*
+Namespace-internal ingress (threat-model.md C8): pods in this release accept
+HTTP only from other pods in the same namespace; everything else — other
+namespaces, LoadBalancers, node traffic — is denied on CNIs that enforce
+NetworkPolicy.
+
+Requires an enforcing CNI. Kind's kindnet does not enforce policies, so
+values-local.yaml keeps this disabled; verify probe health after enabling on
+your CNI (kubelet probes originate from the node and are subject to the CNI's
+own node-traffic handling).
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-gateway-allow-in-namespace
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+{{- end }}

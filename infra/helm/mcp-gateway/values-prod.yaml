@@ -1,0 +1,136 @@
+# Production values template.
+#
+# This file deliberately contains NO credentials. An operator must:
+#   1. push the five urumi images (immutable tags, e.g. 0.1.0) to their
+#      registry and replace registry.example.com below,
+#   2. create the Secret named in secrets.existingSecret with the seven keys
+#      listed in values.yaml (kubectl create secret generic …),
+#   3. set ingress.host to a real hostname and, for TLS, supply a certificate
+#      before enabling ingress.tls,
+#   4. confirm the cluster's default StorageClass (or set
+#      postgres.persistence.storageClass) provides ReadWriteOnce volumes,
+#   5. enable networkPolicy only on a CNI that enforces it.
+# See infra/helm/README.md for exact commands.
+
+logLevel: info
+
+gateway:
+  replicas: 2
+  image:
+    repository: registry.example.com/urumi/gateway
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+woocommerceMcp:
+  replicas: 1
+  image:
+    repository: registry.example.com/urumi/woocommerce-mcp
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  # Real store URL (not a credential) — used because the mock store is off.
+  storeUrl: "https://shop.example.com"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+inventoryMcp:
+  image:
+    repository: registry.example.com/urumi/inventory-mcp
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+supportMcp:
+  image:
+    repository: registry.example.com/urumi/support-mcp
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+dashboard:
+  replicas: 2
+  image:
+    repository: registry.example.com/urumi/dashboard
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+  # "" = the Ingress below owns /api and the dashboard serves its documented
+  # 503 fallback instead of proxying (docs/architecture.md §8).
+  gatewayUpstream: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 300m
+      memory: 128Mi
+
+postgres:
+  replicas: 1
+  image:
+    repository: postgres
+    tag: "17-alpine"
+    pullPolicy: IfNotPresent
+  persistence:
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+mockStore:
+  enabled: false
+
+secrets:
+  create: false
+  # Required: an externally created Secret containing all seven keys.
+  existingSecret: "urumi-gateway-secrets"
+
+ingress:
+  enabled: true
+  className: nginx
+  # Placeholder hostname — replace with a real DNS name pointing at the
+  # cluster's ingress controller.
+  host: "mcp.example.com"
+  # cert-manager (or your ACME tooling) can be wired here, e.g.
+  #   cert-manager.io/cluster-issuer: letsencrypt-prod
+  annotations: {}
+  tls:
+    # TLS is off until an operator supplies a real certificate: this project
+    # does not provision public VPS certificates.
+    enabled: false
+    secretName: ""
+
+networkPolicy:
+  # Requires a CNI that enforces NetworkPolicy (Kind's kindnet does not).
+  enabled: true

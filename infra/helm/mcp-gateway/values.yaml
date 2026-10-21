@@ -1,0 +1,170 @@
+# Shared defaults for the mcp-gateway chart.
+#
+# Environment separation lives entirely in values-local.yaml (kind/k3d) and
+# values-prod.yaml (production). No real credentials are stored in this file
+# or in any committed values file: sensitive values are read from a Kubernetes
+# Secret (see the `secrets` block). Resource names are bare (gateway,
+# postgres, …) exactly as docs/architecture.md §8 maps them, so upstream URLs
+# are plain service DNS. Deploy one release per namespace.
+
+logLevel: info
+
+gateway:
+  replicas: 1
+  image:
+    repository: urumi/gateway
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8080
+    nodePort: null
+  toolCacheTtlMs: 60000
+  # The init container runs `node dist/db/migrate.js` until PostgreSQL accepts
+  # connections; migrations are tracked in schema_migrations and re-runs skip.
+  migrate:
+    maxAttempts: 90
+    sleepSeconds: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+woocommerceMcp:
+  replicas: 1
+  image:
+    repository: urumi/woocommerce-mcp
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  port: 8081
+  # Used only when mockStore.enabled=false: URL of the real WooCommerce store
+  # (a URL, not a credential; the consumer key/secret come from the Secret).
+  storeUrl: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 300m
+      memory: 384Mi
+
+inventoryMcp:
+  replicas: 1
+  image:
+    repository: urumi/inventory-mcp
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  port: 8083
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 300m
+      memory: 384Mi
+
+supportMcp:
+  replicas: 1
+  image:
+    repository: urumi/support-mcp
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  port: 8084
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 300m
+      memory: 384Mi
+
+dashboard:
+  replicas: 1
+  image:
+    repository: urumi/dashboard
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8080
+    nodePort: null
+  # In-cluster gateway URL for the dashboard's /api nginx proxy (plain runtime
+  # mode). Set to "" when an Ingress owns /api — nginx then serves the
+  # documented 503 fallback instead of proxying.
+  gatewayUpstream: "http://gateway:8080"
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+postgres:
+  image:
+    repository: postgres
+    tag: "17-alpine"
+    pullPolicy: IfNotPresent
+  user: postgres
+  database: mcp_gateway
+  persistence:
+    size: 1Gi
+    # "" uses the cluster's default StorageClass; set a class name to pin one.
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Clearly-labelled mock WooCommerce store (services/woocommerce-mcp pattern)
+# used for local demos. Disabled in values-prod.yaml — production injects a
+# real store URL + credentials through the Secret.
+mockStore:
+  enabled: true
+  image:
+    repository: node
+    tag: "26.7-alpine"
+    pullPolicy: IfNotPresent
+  port: 8090
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# One Secret holds every sensitive value. With create=true the chart renders
+# it from `data` (development placeholders only — see values-local.yaml).
+# Production sets create=false and points existingSecret at a Secret created
+# outside the chart (kubectl create secret …, external-secrets, SOPS, …).
+# Required keys: POSTGRES_PASSWORD, MCP_APP_DB_PASSWORD, MIGRATE_DATABASE_URL,
+# DATABASE_URL, API_KEY_PEPPER, WOOCOMMERCE_CONSUMER_KEY,
+# WOOCOMMERCE_CONSUMER_SECRET.
+secrets:
+  create: false
+  existingSecret: ""
+  data: {}
+
+# Ingress: routes one host — /mcp and /api → gateway, / → dashboard
+# (docs/architecture.md §8). TLS is an integration point only: supply a real
+# certificate (e.g. cert-manager) before enabling it.
+ingress:
+  enabled: false
+  className: nginx
+  host: ""
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+
+# Namespace-internal ingress rules (threat-model.md C8). Enable only on a CNI
+# that enforces NetworkPolicy — Kind's kindnet does not.
+networkPolicy:
+  enabled: false

@@ -304,7 +304,7 @@ different client tomorrow.
 
 ## 8. Kubernetes, Docker, Helm — who does what
 
-*The Docker images exist and are validated (Milestone 6); the Kubernetes/Helm objects below are defined here now and built in Milestone 7. This section defines the words.*
+*The Docker images exist and are validated (Milestone 6); the Kubernetes/Helm objects below are defined here and were built in Milestone 7 — the chart at `infra/helm/mcp-gateway` deploys this exact map. This section defines the words.*
 
 | Concept | One-line responsibility | In our project |
 | --- | --- | --- |
@@ -323,10 +323,12 @@ environments" a config diff instead of two drifting copies of YAML.
 
 **Environment status (updated 2026-10-21):** Colima (Docker engine), Docker CLI, kubectl, kind
 and Helm **are installed**, and a local kind cluster `urumi-local` is running (created with
-explicit approval for Milestones 6–7). Five Docker images (`urumi/<name>:0.1.0`) are now
-built and container-validated locally (Milestone 6), but no chart exists yet, so the
-deployment milestone still has nothing real to describe — see the README prerequisites
-section.
+explicit approval for Milestones 6–7). Five Docker images (`urumi/<name>:0.1.0`) were built
+and container-validated in Milestone 6, and the chart at `infra/helm/mcp-gateway` is now
+installed on the cluster (release `urumi`, namespace `urumi`): every service name in the
+table above exists as a real Kubernetes Service. Operational detail — install commands,
+secrets bootstrap, verification results, local-vs-prod differences and cleanup — lives in
+[infra/helm/README.md](../infra/helm/README.md).
 
 ---
 
@@ -628,8 +630,8 @@ Nothing in this repository should be described as "working" unless a check in
 | 4 | **Dashboard backend + React UI** | ✅ done: login/session, tools/upstreams/audit APIs, React SPA (chat foundation) |
 | 5 | **Inventory + Support MCP servers** | ✅ done: two seeded servers, config-only registration, process-to-process proof that no gateway code changed |
 | 6 | **Docker images** | ✅ done: five images built and container-tested — wrap each unit once its runtime deps are final |
-| 7 | **Kubernetes + Helm (local, then prod values)** | ← you are here: deployment last, so manifests describe reality instead of guesses. |
-| 8 | **Security hardening + threat-model review** | Controls verified against the running system. |
+| 7 | **Kubernetes + Helm (local, then prod values)** | ✅ done: one chart, two value files, installed and e2e-validated on kind |
+| 8 | **Security hardening + threat-model review** | ← you are here: controls verified against the running system. |
 | 9 | **Chat agent + LLM (Groq free tier / Ollama)** | Optional intelligence layer on top of a correct, audited gateway. |
 
 Each stage ends with a reviewable demo; none of them starts before the previous one is

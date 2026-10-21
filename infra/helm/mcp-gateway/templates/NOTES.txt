@@ -1,0 +1,31 @@
+Urumi MCP Gateway {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}"
+in namespace "{{ .Release.Namespace }}".
+
+1) Wait for everything to become ready:
+
+   kubectl -n {{ .Release.Namespace }} get pods,pvc
+
+   The gateway's init container applies database migrations first; a few
+   seconds after all pods are Ready the tool registry discovers the upstream
+   MCP servers (up to TOOL_CACHE_TTL_MS = {{ .Values.gateway.toolCacheTtlMs }}ms).
+
+2) Access the dashboard and gateway with port-forwarding (local clusters):
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/dashboard 8088:{{ .Values.dashboard.service.port }}
+   # dashboard: http://127.0.0.1:8088
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/gateway 8080:{{ .Values.gateway.service.port }}
+   # gateway MCP endpoint: http://127.0.0.1:8080/mcp
+
+{{- if .Values.ingress.enabled }}
+
+   Ingress host: http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+{{- end }}
+
+3) Bootstrap an API key (see infra/helm/README.md for the SQL to insert it):
+
+   kubectl -n {{ .Release.Namespace }} exec deploy/gateway -- node -e \
+     "import('./dist/auth/keys.js').then(m => console.log(JSON.stringify(m.generateApiKey(process.env.API_KEY_PEPPER))))"
+
+Full verification commands, secrets management, local-vs-production notes and
+cleanup (which preserves data by default) live in infra/helm/README.md.

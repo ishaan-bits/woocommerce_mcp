@@ -222,7 +222,7 @@ for one row per call with the right `upstreamId`.
 
 ---
 
-## Stage 6 — Packaging (Milestone 6, **implemented**) and Kubernetes + Helm (Milestone 7)
+## Stage 6 — Packaging (Milestone 6) and Kubernetes + Helm (Milestone 7), **both implemented**
 
 **Concepts (learn in this order)**
 
@@ -232,9 +232,20 @@ for one row per call with the right `upstreamId`.
    `deps` → `builder` → `runtime`, `USER node`/`nginx`, runtime-only env; the validation
    log in `infra/docker/README.md` shows how each property was checked.*
 3. Kubernetes objects: Pod, Deployment, Service, Ingress, ConfigMap, Secret, PVC, Namespace.
+   — *M7: `infra/helm/mcp-gateway/templates/` contains one real example of each (the
+   Ingress only renders in production values).*
 4. Probes: liveness vs readiness — and why they differ for a gateway with an upstream.
+   — *M7: `/readyz` on the gateway stays green while an upstream is down and reports
+   `reachable` per upstream; the MCP servers' probes are plain `/healthz`.*
 5. Helm: chart templates, `values.yaml`, `--set`, and why two value files beat two YAML trees.
+   — *M7: `values-local.yaml` vs `values-prod.yaml` is a pure config diff: replicas,
+   resources, secrets source, mock on/off, ingress on/off.*
 6. Local clusters: kind vs k3d vs minikube; loading local images into a cluster.
+   — *M7: `ctr images import` round-trip documented in `infra/helm/README.md` (and why
+   `kind load` trips on multi-platform indexes).*
+7. Startup ordering without `depends_on`: init containers, idempotent migrations, and
+   self-healing discovery (TTL refresh). — *M7: the gateway's `migrate` init container;
+   no container waits on an upstream.*
 
 **Checkpoint (M6 — reproduce it):** all five images build from the repo root; each
 starts with only documented env vars, reports `healthy`, answers `/healthz`, and the
@@ -242,8 +253,14 @@ gateway answers `tools/list` with 9 qualified names through the official SDK cli
 unconfigured runs exit 1 with the missing-variable list; `docker stop` ends in exit 0
 with `shutdown_complete`.
 
-**Checkpoint (M7):** `helm template` renders sensible YAML for both value files; one
-`helm install` brings up the whole system on a local cluster; killing a Pod self-heals.
+**Checkpoint (M7 — reproduced on 2026-10-21, commands in `infra/helm/README.md`):**
+`helm lint` + `helm template` pass for both value files; one `helm install` brings up
+7 workloads (gateway, 3 MCP servers, dashboard, PostgreSQL + bound PVC, labelled mock);
+migrations apply once and skip on re-run; a bootstrapped reader key can call
+`woocommerce_list_products` (mock data) and is refused `inventory_list_products` with
+`-32003 grant_forbidden` (audit row written); dashboard login + `/api/audit` work through
+the port-forwarded nginx proxy; deleting the gateway Pod or the PostgreSQL Pod heals with
+data intact; the three MCP servers have no external Service at all.
 
 **Recruiter questions**
 - Pod IP changed — why doesn't your config break?

@@ -1,0 +1,108 @@
+{{/*
+woocommerce-mcp — ClusterIP only: internal MCP servers are never exposed
+outside the namespace (docs/architecture.md §8, threat-model.md B-boundary).
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: woocommerce-mcp-config
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: woocommerce-mcp
+data:
+  HOST: "0.0.0.0"
+  PORT: {{ .Values.woocommerceMcp.port | quote }}
+  LOG_LEVEL: {{ .Values.logLevel | quote }}
+  # Clearly-labelled local mock store, or the operator-supplied real store
+  # URL (credentials always come from the Secret, never from values).
+  {{- if .Values.mockStore.enabled }}
+  WOOCOMMERCE_STORE_URL: "http://woocommerce-store-mock:{{ .Values.mockStore.port }}"
+  {{- else }}
+  WOOCOMMERCE_STORE_URL: {{ required "woocommerceMcp.storeUrl is required when mockStore.enabled=false" .Values.woocommerceMcp.storeUrl | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: woocommerce-mcp
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: woocommerce-mcp
+spec:
+  # Hardcoded: internal MCP servers must not be reachable outside the cluster.
+  type: ClusterIP
+  selector:
+    {{- include "mcp.selectorLabels" (dict "root" . "name" "woocommerce-mcp") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.woocommerceMcp.port }}
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woocommerce-mcp
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: woocommerce-mcp
+spec:
+  replicas: {{ .Values.woocommerceMcp.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mcp.selectorLabels" (dict "root" . "name" "woocommerce-mcp") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcp.labels" . | nindent 8 }}
+        {{- include "mcp.selectorLabels" (dict "root" . "name" "woocommerce-mcp") | nindent 8 }}
+        app.kubernetes.io/component: woocommerce-mcp
+    spec:
+      securityContext:
+        {{- include "mcp.podSecurityContext" . | nindent 8 }}
+        # Numeric IDs matching the image's `USER node` — kubelet refuses named
+        # users when runAsNonRoot is set.
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: woocommerce-mcp
+          image: {{ printf "%s:%s" .Values.woocommerceMcp.image.repository .Values.woocommerceMcp.image.tag | quote }}
+          imagePullPolicy: {{ .Values.woocommerceMcp.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.woocommerceMcp.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: woocommerce-mcp-config
+          env:
+            - name: WOOCOMMERCE_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WOOCOMMERCE_CONSUMER_KEY
+            - name: WOOCOMMERCE_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WOOCOMMERCE_CONSUMER_SECRET
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            {{- include "mcp.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.woocommerceMcp.resources | nindent 12 }}

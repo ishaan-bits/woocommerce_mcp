@@ -29,22 +29,25 @@ authorization and audit logging against a real PostgreSQL), Milestone 4 complete
 (dashboard backend + React UI: sessions, tool/upstream/audit APIs, upstream toggles
 persisted in PostgreSQL), Milestone 5 complete (independent Inventory and Support
 MCP servers, registered with the gateway via configuration only, verified
-process-to-process with no gateway core changes) and Milestone 6 complete (five
+process-to-process with no gateway core changes), Milestone 6 complete (five
 production Docker images, multi-stage and non-root, built and container-validated
-locally — no registry push, no Kubernetes deployment yet).**
+locally) and Milestone 7 complete (one Helm chart — gateway, three MCP servers,
+dashboard, PostgreSQL with a PVC and a labelled local mock store — installed and
+end-to-end validated on the kind cluster `urumi-local`, with `values-prod.yaml`
+documenting every operator-supplied production input).**
 
 | Area | Status |
 | --- | --- |
 | Repository layout + npm workspaces | ✅ `npm install` resolves all 6 workspaces |
 | `packages/shared` contract types | ✅ builds, type-checks, imports (5 WooCommerce tool names) |
 | `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 69 tests, no real store needed |
-| Documentation (`docs/`) | ✅ architecture, decisions (D1–D26), threat model, learning guide |
+| Documentation (`docs/`) | ✅ architecture, decisions (D1–D27), threat model, learning guide |
 | Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, tools, upstream toggles), 108 unit tests + 9 real-PostgreSQL integration tests, no Docker needed for the unit suite |
 | Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, labelled chat foundation; 14 tests + typecheck + production build |
 | Inventory MCP server | ✅ `list_products` + `adjust_stock` over Streamable HTTP, deterministic 12-item seeded store, 39 tests, registered via `INVENTORY_MCP_URL` (no gateway code changes) |
 | Support MCP server | ✅ `list_tickets` + `create_ticket` over Streamable HTTP, deterministic 8-ticket seeded store, 38 tests, registered via `SUPPORT_MCP_URL` (no gateway code changes) |
 | Docker images | ✅ five multi-stage images (`urumi/<name>:0.1.0`: gateway, three MCP servers, dashboard), non-root, runtime-config only, built and container-tested — see [infra/docker/README.md](./infra/docker/README.md) |
-| Kubernetes / Helm | ⬜ **not implemented** — `infra/helm` contains an explanatory README only (Milestone 7) |
+| Kubernetes / Helm | ✅ one chart (`infra/helm/mcp-gateway`) with `values-local.yaml` + `values-prod.yaml`, installed and e2e-validated on kind `urumi-local` (7 workloads, PVC-backed PostgreSQL, chart/external secrets, port-forward access) — see [infra/helm/README.md](./infra/helm/README.md) |
 | PostgreSQL schema, API keys, audit log | ✅ migrations (001–002), two seeded users, hashed revocable keys, append-only audit incl. upstream-toggle rows, session + override tables (`npm run migrate`; integration-tested against PostgreSQL 17) |
 | LLM / chat agent | ⬜ not implemented (no API key required or used; the dashboard chat page is an explicitly-labelled foundation) |
 
@@ -143,10 +146,11 @@ API (no store, Docker or network needed); verifying against a real store — a f
 container or trial store — remains an open follow-up.
 
 **Environment status (updated 2026-10-21):** Docker (via Colima), kubectl, kind and Helm are
-installed, and a local kind cluster `urumi-local` is running (created for Milestones 6–7 with
-explicit approval). No container or Kubernetes artifact exists yet — the Dockerfiles and the
-Helm chart still belong to Milestones 6–7, so `npm run check` runs **no container/Kubernetes
-check** until then. That does not block the application milestones (3–5, pure Node/TypeScript).
+installed, the kind cluster `urumi-local` is running, and the Helm chart is deployed there
+(release `urumi`, namespace `urumi` — see [infra/helm/README.md](./infra/helm/README.md)).
+`npm run check` still runs **no container/Kubernetes check** by design: the application
+milestones are validated by Node/TypeScript tests, and deployment validation is the chart's
+own documented procedure (`helm lint`/`template` + the cluster walkthrough).
 
 ---
 
@@ -222,6 +226,33 @@ contract — required variables, `HOST=0.0.0.0`, network aliases, the dashboard'
 optional `/api` proxy, and exactly what was container-tested — lives in
 [infra/docker/README.md](./infra/docker/README.md).
 
+### Kubernetes + Helm (Milestone 7)
+
+```bash
+# import the images into the kind node (kind load can choke on multi-platform
+# indexes; the ctr round-trip is the reliable equivalent)
+for img in urumi/gateway:0.1.0 urumi/woocommerce-mcp:0.1.0 \
+           urumi/inventory-mcp:0.1.0 urumi/support-mcp:0.1.0 \
+           urumi/dashboard:0.1.0 postgres:17-alpine node:26.7-alpine; do
+  docker save "$img" | docker exec -i urumi-local-control-plane ctr -n k8s.io images import -
+done
+
+# install the whole stack (gateway, 3 MCP servers, dashboard, PostgreSQL + PVC,
+# labelled mock store) — full walkthrough, verification results, secrets
+# bootstrap, production values and cleanup: infra/helm/README.md
+helm upgrade --install urumi infra/helm/mcp-gateway -n urumi --create-namespace \
+  -f infra/helm/mcp-gateway/values-local.yaml
+
+# access (local kind has no ingress controller; port-forward is the demo path)
+kubectl -n urumi port-forward svc/dashboard 8088:8080   # http://127.0.0.1:8088
+```
+
+The chart keeps the three MCP servers, PostgreSQL and the mock store on
+ClusterIP-only services, stores database state in a PersistentVolumeClaim, and
+reads every credential from a Kubernetes Secret (dev placeholders locally,
+operator-created in production). An API key must be bootstrapped before any
+tool call — exact commands in [infra/helm/README.md](./infra/helm/README.md).
+
 ---
 
 ## Roadmap
@@ -235,8 +266,8 @@ optional `/api` proxy, and exactly what was container-tested — lives in
 | 4 | Dashboard | ✅ done: sessions, React UI (overview/tools/upstreams/audit/chat foundation), persisted upstream toggles |
 | 5 | Inventory + Support servers | ✅ done: two seeded servers, config-only registration, process-to-process gateway tests |
 | 6 | Docker images | ✅ done: five multi-stage images built and container-tested (no registry push) |
-| 7 | Kubernetes + Helm | ← you are here: one chart, `values-local.yaml` + `values-prod.yaml` |
-| 8 | Security hardening | threat-model C1–C7 with tests |
+| 7 | Kubernetes + Helm | ✅ done: one chart, `values-local.yaml` + `values-prod.yaml`, installed and e2e-validated on kind |
+| 8 | Security hardening | ← you are here: threat-model C1–C7 with tests |
 | 9 | Chat agent + LLM | Groq free tier or local Ollama, through the same gateway path |
 
 Details and the *why* for each ordering: [docs/architecture.md § 11](./docs/architecture.md).

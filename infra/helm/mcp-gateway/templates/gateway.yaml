@@ -1,0 +1,154 @@
+{{/*
+gateway — ConfigMap (non-sensitive config), Service and Deployment.
+The Deployment runs migrations in an init container (tracked in
+schema_migrations, so re-runs skip applied files) before the app starts.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+data:
+  GATEWAY_HOST: "0.0.0.0"
+  GATEWAY_PORT: {{ .Values.gateway.service.port | quote }}
+  LOG_LEVEL: {{ .Values.logLevel | quote }}
+  TOOL_CACHE_TTL_MS: {{ .Values.gateway.toolCacheTtlMs | quote }}
+  # Upstream MCP servers by Kubernetes service DNS (docs/architecture.md §8).
+  WOOCOMMERCE_MCP_URL: "http://woocommerce-mcp:{{ .Values.woocommerceMcp.port }}/mcp"
+  INVENTORY_MCP_URL: "http://inventory-mcp:{{ .Values.inventoryMcp.port }}/mcp"
+  SUPPORT_MCP_URL: "http://support-mcp:{{ .Values.supportMcp.port }}/mcp"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  type: {{ .Values.gateway.service.type }}
+  # Keep streamable-HTTP MCP sessions on one gateway pod when replicas > 1.
+  sessionAffinity: ClientIP
+  selector:
+    {{- include "mcp.selectorLabels" (dict "root" . "name" "gateway") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.gateway.service.port }}
+      targetPort: http
+      protocol: TCP
+      {{- if and (eq .Values.gateway.service.type "NodePort") .Values.gateway.service.nodePort }}
+      nodePort: {{ .Values.gateway.service.nodePort }}
+      {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mcp.selectorLabels" (dict "root" . "name" "gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcp.labels" . | nindent 8 }}
+        {{- include "mcp.selectorLabels" (dict "root" . "name" "gateway") | nindent 8 }}
+        app.kubernetes.io/component: gateway
+    spec:
+      securityContext:
+        {{- include "mcp.podSecurityContext" . | nindent 8 }}
+        # Numeric IDs matching the image's `USER node` — kubelet refuses named
+        # users when runAsNonRoot is set.
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        # Waits for PostgreSQL and applies migrations. The runner tracks
+        # applied files in schema_migrations, so this is safe on every pod
+        # start; bounded retries handle PostgreSQL still initialising.
+        - name: migrate
+          image: {{ printf "%s:%s" .Values.gateway.image.repository .Values.gateway.image.tag | quote }}
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              i=0
+              until node dist/db/migrate.js; do
+                i=$((i+1))
+                if [ "$i" -ge {{ .Values.gateway.migrate.maxAttempts }} ]; then
+                  echo "migrations failed after $i attempts" >&2
+                  exit 1
+                fi
+                echo "waiting for postgres (attempt $i)" >&2
+                sleep {{ .Values.gateway.migrate.sleepSeconds }}
+              done
+          env:
+            - name: MIGRATE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: MIGRATE_DATABASE_URL
+            - name: MCP_APP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: MCP_APP_DB_PASSWORD
+          securityContext:
+            {{- include "mcp.containerSecurityContext" . | nindent 12 }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      containers:
+        - name: gateway
+          image: {{ printf "%s:%s" .Values.gateway.image.repository .Values.gateway.image.tag | quote }}
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.service.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: gateway-config
+          env:
+            # DATABASE_URL is the least-privilege mcp_gateway_app role the
+            # init container just created; the admin URL stays in the init
+            # container only.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: DATABASE_URL
+            - name: API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: API_KEY_PEPPER
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            {{- include "mcp.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
