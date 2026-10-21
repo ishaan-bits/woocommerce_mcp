@@ -1,12 +1,14 @@
 # Threat Model — MCP Gateway
 
-**Status (updated after Milestone 4):** C1 (API-key hashing + browser session cookies),
-C2 (role enforcement, now including upstream toggles) and C6 (audit logs, including
-`upstream_enabled`/`upstream_disabled` rows) are **implemented and test-verified**; C5's
-per-principal grants and pre-forward schema validation are implemented, and enable/disable
-is a real server-side control backed by `upstream_overrides`. C3, C4, C7, C8 and the B1
-boundary hardening remain planned for Milestone 8 — each control below names its verifying
-test once implemented.
+**Status (updated after Milestone 8):** C1–C8 and the B1 boundary hardening are
+**implemented and test-verified** — every control below names its verifying test.
+C1/C2/C6 were verified in Milestones 3–4; Milestone 8 added the C4 SSRF guard
+(allow-list + private-address classifier + response-size cap), the C7 limits
+(per-key rate limit, per-IP login throttle, per-upstream concurrency cap, JSON
+body limit), the C3/C8 log-scrubbing extensions (postgres URLs, session cookies,
+authorization values; gateway and woocommerce-mcp parity), the C8 ServiceAccounts
+(`automountServiceAccountToken: false`), the B1 host-header allow-listing on the
+internal MCP servers, and B3 upstream error-message sanitization.
 
 Method: identify assets → draw trust boundaries → list threats → attach controls → record what
 is explicitly out of scope. Loosely STRIDE-flavoured, kept plain-English.
@@ -55,14 +57,19 @@ Rules implied by the diagram:
 - **B1/B2:** nothing crosses without authentication. The deliberate exceptions are
   operational: `/healthz` and `/readyz` answer unauthenticated because container probes
   cannot present an API key (decision D21), and `POST /api/auth/login` must be reachable
-  *to obtain* credentials — it exposes no data and audits every failure (D23). The probes
-  expose aggregate status only. Everything else (`/mcp`, `/api/*`) fails closed on
-  missing, malformed, invalid or revoked credentials; browser requests pass either a
-  Bearer key or the `urumi_session` cookie, and the cookie is honored **only** under
-  `/api/*` (never `/mcp`, never as a fallback for a presented-but-invalid Bearer).
+  *to obtain* credentials — it exposes no data, audits every failure (D23) and is
+  rate-limited per client IP (Milestone 8). The probes expose aggregate status only.
+  Everything else (`/mcp`, `/api/*`) fails closed on missing, malformed, invalid or
+  revoked credentials; browser requests pass either a Bearer key or the `urumi_session`
+  cookie, and the cookie is honored **only** under `/api/*` (never `/mcp`, never as a
+  fallback for a presented-but-invalid Bearer). The internal MCP servers additionally
+  validate the `Host` header against `MCP_ALLOWED_HOSTS` (service DNS names + the pod's
+  own IP for kubelet probes), closing the DNS-rebinding hole on the otherwise
+  unauthenticated cluster-internal surface.
 - **B3:** upstreams are *semi-trusted*: they are our code today, but the gateway must treat
   their responses as untrusted input (a compromised upstream must not be able to forge an
-  audit row or smuggle a call to another upstream).
+  audit row or smuggle a call to another upstream). Protocol-level error messages from an
+  upstream are bounded and sanitized before they can reach a gateway client.
 - **B4:** WooCommerce credentials are used on exactly one side of B4, inside `woocommerce-mcp`.
 
 ---
@@ -125,13 +132,19 @@ row), and the `403` + `access_denied` rows against real PostgreSQL in
 - WooCommerce consumer key/secret exist **only** as env vars inside the `woocommerce-mcp` Pod,
   mounted from a Kubernetes Secret.
 - They are never sent to the gateway, never returned by any API, never logged (log scrubbing
-  for `ck_`/`cs_` prefixes), never in the dashboard bundle.
+  for `ck_`/`cs_` prefixes — and, since Milestone 8, for `sk_`/`umk_` keys, `Bearer` tokens,
+  `postgres://` URLs, session-cookie values and JSON `authorization` fields in **both** the
+  gateway and woocommerce-mcp loggers), never in the dashboard bundle.
 - The gateway holds only the *URL* of the WooCommerce MCP server, not store credentials.
 - Store API keys get the **minimum WooCommerce permission** that works (`read` vs `read/write`
   split if two keys are feasible).
 
-**Verified by:** grep-style test over logs/responses for `ck_`/`cs_`; a code review checklist
-item on every new endpoint.
+**Status: implemented (Milestones 3–8). Verified by:** `test/logger.test.ts` (gateway:
+"redacts credential-looking strings", "redacts postgres URLs, session cookies and
+authorization fields (C3)"), `services/woocommerce-mcp/test/logger.test.ts` (parity test
+covering `umk_`/`sk_`/`Bearer`/postgres/authorization), `test/audit.test.ts` ("No failure
+row ever carries a full key"), `test/auth-keys.test.ts` (stored material never contains
+plaintext), and the M8 demo script's live grep of gateway logs (`scripts/security-demo.sh`).
 
 ### C4 — URL validation / SSRF prevention (protects A6)
 
@@ -140,17 +153,32 @@ The gateway will call URLs that operators can configure, which is the classic SS
 - Upstream base URLs come from configuration, not from client requests. A downstream client can
   select *which configured upstream*, never *where* it points.
 - On load, each URL is validated: `https`/`http` only, no embedded credentials, no
-  user-info/`@` tricks, normalized before use.
-- DNS resolution is checked at connect time: reject loopback, link-local (`169.254.0.0/16`),
-  private ranges (`10/8`, `172.16/12`, `192.168/16`), CGNAT (`100.64/10`), IPv6 equivalents —
-  **unless** an explicit allow-list entry permits the in-cluster service range.
-- Re-validate after redirects; cap redirects (≤3) and re-check every hop.
-- No proxy inheritance from environment variables for upstream calls.
-- Response size limits so a malicious upstream cannot exhaust memory.
+  user-info/`@` tricks, normalized before use; a **literal non-routable address**
+  (loopback, link-local `169.254.0.0/16` incl. the cloud metadata address, private ranges
+  `10/8`/`172.16/12`/`192.168/16`, CGNAT `100.64/10`, IPv6 equivalents) is refused at
+  boot unless allow-listed.
+- DNS resolution is re-checked at connect time: every resolved address of an upstream
+  hostname must be routable unless the hostname is in `UPSTREAM_ALLOWED_PRIVATE_HOSTS`
+  (exact match; the in-cluster service DNS names are the intended entries; `*` is a
+  documented development escape hatch only). Decimal/hex IPv4 encodings are normalized
+  by the URL parser and classified as the addresses they denote.
+- Redirects: the MCP SDK transport follows **same-origin redirects only** (cross-origin
+  `Location` headers are refused, never followed) — so a redirect cannot bounce the
+  gateway onto the metadata service or another host.
+- No proxy inheritance from environment variables for upstream calls (undici ignores
+  `HTTP_PROXY`/`HTTPS_PROXY` by default).
+- Response size limits (`UPSTREAM_MAX_RESPONSE_BYTES`, default 10 MiB) so a malicious
+  upstream cannot exhaust memory.
 
-**Verified by:** unit tests for each rejected host form (`http://169.254.169.254/…`,
-`http://user@internal`, decimal-IP encodings, redirect-to-metadata) and a test that a
-configured in-cluster URL still works.
+**Status: implemented (Milestone 8). Verified by:** `test/ssrf.test.ts` — the
+`isPrivateAddress` classifier table, `assertUpstreamTargetAllowed` (literal metadata
+address refused, allow-listed in-cluster name permitted, DNS-rebinding answer refused,
+decimal-IP normalization, cross-origin redirect never followed) and `createCappedFetch`
+(Content-Length and chunked mid-stream rejection);
+`test/config.test.ts` ("refuses a literal non-routable upstream address…", "the '*'
+development escape hatch…"); `test/m8-security.test.ts` ("a metadata-service upstream is
+refused with blocked_private_address", "the same upstream works when the operator
+allow-lists the host"); live boot refusal in `scripts/security-demo.sh`.
 
 ### C5 — Tool permissions (protects A1, A5)
 
@@ -223,15 +251,26 @@ and any unexpected field are dropped before rendering, verified by
 - Per-upstream connect timeout and per-call timeout (defaults in `packages/shared`).
 - One upstream failing → only its tools return structured errors; all other upstreams keep
   serving.
-- Bounded concurrency per upstream; a bulk job cannot starve interactive calls.
-- Input and response size limits; JSON body size cap on `/mcp` and `/api`.
+- Bounded concurrency per upstream (semaphore, default 8 in flight, waiters time out into
+  a structured `busy` error); a bulk job cannot starve interactive calls.
+- Input and response size limits: JSON body cap on `/mcp` and `/api`
+  (`JSON_BODY_LIMIT`, default 100kb → HTTP 413) and the C4 response cap.
 - Upstream health is tracked so the dashboard can show degraded state rather than hanging.
 - Gateway restarts are handled by Kubernetes, not by an upstream's misbehaviour.
-- Rate limiting per API key (slow-start, configurable).
+- Rate limiting per API key (token bucket: `RATE_LIMIT_CALLS_PER_MINUTE` /
+  `RATE_LIMIT_BURST`, slow-start by bucket refill, 0 disables); rejections return MCP
+  error `-32000` (distinct from the `-32003` authorization denial) and audit as
+  `rate_limited`.
 
-**Verified by:** a fault-injection test — kill `woocommerce-mcp` mid-suite and assert
-`inventory_*` tools still succeed and the failing ones return `timeout`/`unreachable` errors
-within the deadline.
+**Status: implemented (Milestones 3–8). Verified by:** the fault-injection matrix in
+`test/mcp-failure.test.ts` (slow/ dead/ hanging upstreams; "a slow upstream times out
+with a structured error while other upstreams keep working"), `test/limits.test.ts`
+(token-bucket refill/isolation/reset, semaphore slot handoff + busy timeout),
+`test/m8-security.test.ts` ("exceeding the burst is rejected with -32000 and audited as
+rate_limited", "the rate limit is per key: another principal is unaffected", "oversized
+request bodies are refused with 413", "a second concurrent call to the same upstream
+fails with busy while the first completes"), plus the C4 response-cap tests in
+`test/ssrf.test.ts`.
 
 ### C8 — Supporting controls
 
@@ -239,11 +278,20 @@ within the deadline.
 | --- | --- |
 | TLS | Terminated at Ingress; cluster-internal traffic stays on the private network (documented as accepted risk for local; NetworkPolicy in prod values). |
 | Secrets in git | Impossible by policy: `.env` git-ignored, `.env.example` holds placeholders only, real values only in Kubernetes Secrets. |
-| Least-privilege RBAC | Each Pod gets its own ServiceAccount; no `cluster-admin`; the gateway's DB role can `INSERT`/`SELECT` only. |
+| Least-privilege RBAC | **Each workload has its own ServiceAccount with `automountServiceAccountToken: false`** (Milestone 8); no `cluster-admin`; the gateway's DB role can `INSERT`/`SELECT` only. |
 | Dependency hygiene | `npm audit` in the check script; lockfile committed; free/open-source dependencies only (budget constraint). |
 | Input validation | zod at every boundary: REST body, MCP tool args, upstream responses (they are untrusted too). |
-| Logging hygiene | Structured logs, scrubbed of `ck_`, `cs_`, `sk_`, `Bearer` and API-key-looking strings. |
-| Error messages | Never echo internal URLs, stack traces or SQL to clients. |
+| Logging hygiene | Structured logs, scrubbed of `ck_`, `cs_`, `sk_`, `umk_` keys, `Bearer`/`Basic` tokens, `postgres://` URLs, session-cookie values and JSON `authorization` fields (gateway **and** woocommerce-mcp). |
+| Error messages | Never echo internal URLs, stack traces or SQL to clients; upstream protocol errors are bounded and sanitized (B3) before leaving the gateway. |
+| Schema migrations | Atomic per file with recorded filename; a failing migration rolls back and records nothing — verified against real PostgreSQL. |
+
+**Status: implemented. Verified by:** `test/logger.test.ts`, woocommerce-mcp
+`test/logger.test.ts` (scrubbing), `test/m8-security.test.ts` ("URLs and long messages
+from an upstream never reach the gateway client"), the integration test "a failing
+migration rolls back and records nothing in schema_migrations (C6)", and the chart
+regression assertions in `scripts/security/assert-helm-security.sh` (ServiceAccounts,
+`automountServiceAccountToken: false`, ClusterIP-only internals, no plaintext secrets in
+the production render).
 
 ---
 
@@ -273,10 +321,10 @@ within the deadline.
 - **Full WAF / DDoS protection** — no paid services allowed.
 - **Formal cryptographic review** — we use standard library primitives (SHA-256, CSPRNG,
   `timingSafeEqual`) and standard constructions only.
-- **Non-HTTP lateral movement inside the cluster** — the chart now ships a
+- **Non-HTTP lateral movement inside the cluster** — the chart ships a
   namespace-internal NetworkPolicy (`networkPolicy.enabled`, on in production values),
-  but enforcement depends on the CNI and egress/per-workload policies remain part of the
-  security-hardening milestone.
+  but enforcement depends on the CNI; egress and per-workload policies remain out of
+  scope (documented limitation, not a planned control).
 
 ---
 
@@ -286,5 +334,11 @@ The security milestone is complete when every control C1–C7 has:
 
 1. working code (not a stub),
 2. an automated test that fails if the control is removed,
-3. a demo script showing the control in action, and
+3. a demo script showing the control in action
+   (`scripts/security-demo.sh` — exercises C1 revocation, C2/C5 denials, C4 boot
+   refusal and live guard, C6 audit rows, C7 rate limiting, C8 log scrubbing and
+   ClusterIP-only exposure against the running kind cluster), and
 4. a paragraph here updated from *planned* to *implemented* with the test name.
+
+Milestone 8 satisfies all four criteria for the remaining controls (C3, C4, C7, C8
+and the B1/B3 hardening); C1, C2, C5 and C6 were completed in Milestones 3–4.

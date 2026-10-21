@@ -47,6 +47,9 @@ async function main(): Promise<void> {
     configs: config.upstreams,
     toolCacheTtlMs: config.toolCacheTtlMs,
     logger,
+    ssrf: { allowedPrivateHosts: config.upstreamAllowedPrivateHosts },
+    maxConcurrentCallsPerUpstream: config.upstreamMaxConcurrentCalls,
+    maxResponseBytes: config.upstreamMaxResponseBytes,
     clientInfo: { name: "urumi-mcp-gateway", version: VERSION },
   });
 

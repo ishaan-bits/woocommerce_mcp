@@ -22,6 +22,9 @@ gateway:
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
+  # With the Ingress in front of the dashboard's nginx, the client IP the
+  # login throttle should key on is two hops back.
+  trustProxy: 2
   resources:
     requests:
       cpu: 250m

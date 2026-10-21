@@ -37,6 +37,14 @@ echo "==> Import smoke test for @mcp/shared"
 node -e "import('./packages/shared/dist/index.js').then(m => { if (m.WOOCOMMERCE_TOOLS.length !== 5) { throw new Error('unexpected tool list'); } console.log('shared package imports OK:', m.WOOCOMMERCE_TOOLS.join(', ')); })"
 
 echo
+echo "==> Helm security assertions (threat-model C8/B1; requires helm)"
+if command -v helm >/dev/null 2>&1; then
+  bash scripts/security/assert-helm-security.sh
+else
+  echo "helm not installed - SKIPPED (run scripts/security/assert-helm-security.sh where helm exists)"
+fi
+
+echo
 echo "==> npm audit (advisory data requires network; failure is reported, not fatal)"
 npm audit --audit-level=high || echo "WARN: npm audit reported issues (or network unavailable) - review manually"
 

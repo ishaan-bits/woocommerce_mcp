@@ -267,7 +267,7 @@ tool call — exact commands in [infra/helm/README.md](./infra/helm/README.md).
 | 5 | Inventory + Support servers | ✅ done: two seeded servers, config-only registration, process-to-process gateway tests |
 | 6 | Docker images | ✅ done: five multi-stage images built and container-tested (no registry push) |
 | 7 | Kubernetes + Helm | ✅ done: one chart, `values-local.yaml` + `values-prod.yaml`, installed and e2e-validated on kind |
-| 8 | Security hardening | ← you are here: threat-model C1–C7 with tests |
+| 8 | Security hardening | ✅ done: threat-model C1–C8 + B1 hardening implemented and test-verified (SSRF guard, rate/concurrency/limit controls, log scrubbing, ServiceAccounts, host allow-listing) |
 | 9 | Chat agent + LLM | Groq free tier or local Ollama, through the same gateway path |
 
 Details and the *why* for each ordering: [docs/architecture.md § 11](./docs/architecture.md).

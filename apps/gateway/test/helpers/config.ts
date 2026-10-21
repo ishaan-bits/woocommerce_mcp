@@ -12,6 +12,17 @@ export function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     upstreams: [],
     apiKeyPepper: TEST_PEPPER,
     databaseUrl: TEST_DATABASE_URL,
+    upstreamAllowedPrivateHosts: [],
+    // Rate limiting is off by default in the harness so existing suites are
+    // unaffected; dedicated tests enable it explicitly via overrides.
+    rateLimitPerMinute: 0,
+    rateLimitBurst: 20,
+    loginMaxFailuresPerIp: 0,
+    loginFailureWindowMs: 300_000,
+    upstreamMaxConcurrentCalls: 8,
+    upstreamMaxResponseBytes: 10 * 1024 * 1024,
+    jsonBodyLimit: "100kb",
+    trustProxy: 0,
     ...overrides,
   };
 }

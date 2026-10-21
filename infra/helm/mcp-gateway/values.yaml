@@ -20,6 +20,23 @@ gateway:
     port: 8080
     nodePort: null
   toolCacheTtlMs: 60000
+  # --- Milestone 8 security controls (threat-model C4/C7/B1) ----------------
+  # C4: hosts allowed to resolve to non-routable (ClusterIP) addresses. The
+  # rendered gateway config points only at the three service DNS names.
+  upstreamAllowedPrivateHosts:
+    - woocommerce-mcp
+    - inventory-mcp
+    - support-mcp
+  upstreamMaxResponseBytes: 10485760   # 10 MiB; 0 disables
+  upstreamMaxConcurrentCalls: 8
+  rateLimitPerMinute: 60               # per API key; 0 disables
+  rateLimitBurst: 20
+  jsonBodyLimit: "100kb"
+  loginMaxFailuresPerIp: 10            # 0 disables
+  loginFailureWindowMs: 300000
+  # Trusted proxy hops for client-IP extraction (login throttle): 1 = the
+  # dashboard's nginx; values-prod overrides to 2 when the Ingress sits first.
+  trustProxy: 1
   # The init container runs `node dist/db/migrate.js` until PostgreSQL accepts
   # connections; migrations are tracked in schema_migrations and re-runs skip.
   migrate:

@@ -7,6 +7,7 @@ const VALID_URL = "http://127.0.0.1:8081/mcp";
 const REQUIRED_ENV = {
   API_KEY_PEPPER: "test-pepper-0123456789abcdef",
   DATABASE_URL: "postgresql://mcp:pw@127.0.0.1:5432/mcp_gateway",
+  UPSTREAM_ALLOWED_PRIVATE_HOSTS: "127.0.0.1",
 };
 
 describe("gateway configuration", () => {
@@ -25,6 +26,15 @@ describe("gateway configuration", () => {
       timeoutMs: 10_000,
       connectTimeoutMs: 3_000,
     });
+    assert.deepEqual(config.upstreamAllowedPrivateHosts, ["127.0.0.1"]);
+    assert.equal(config.rateLimitPerMinute, 60);
+    assert.equal(config.rateLimitBurst, 20);
+    assert.equal(config.loginMaxFailuresPerIp, 10);
+    assert.equal(config.loginFailureWindowMs, 300_000);
+    assert.equal(config.upstreamMaxConcurrentCalls, 8);
+    assert.equal(config.upstreamMaxResponseBytes, 10 * 1024 * 1024);
+    assert.equal(config.jsonBodyLimit, "100kb");
+    assert.equal(config.trustProxy, 0);
   });
 
   test("requires at least one upstream URL", () => {
@@ -142,5 +152,92 @@ describe("gateway configuration", () => {
     ]);
     assert.equal(summary.port, 8080);
     assert.equal(summary.log_level, "info");
+  });
+});
+
+describe("gateway configuration (C4 SSRF + C7 limits)", () => {
+  test("refuses a literal non-routable upstream address without an allow-list entry", () => {
+    assert.throws(
+      () =>
+        loadConfig({
+          ...REQUIRED_ENV,
+          UPSTREAM_ALLOWED_PRIVATE_HOSTS: undefined,
+          WOOCOMMERCE_MCP_URL: "http://169.254.169.254/latest/meta-data",
+        }),
+      /non-routable address '169\.254\.169\.254'/,
+    );
+  });
+
+  test("permits a non-routable address that is explicitly allow-listed", () => {
+    const config = loadConfig({
+      ...REQUIRED_ENV,
+      UPSTREAM_ALLOWED_PRIVATE_HOSTS: "169.254.169.254",
+      WOOCOMMERCE_MCP_URL: "http://169.254.169.254/mcp",
+    });
+    assert.equal(config.upstreams.length, 1);
+    assert.deepEqual(config.upstreamAllowedPrivateHosts, ["169.254.169.254"]);
+  });
+
+  test("the '*' development escape hatch permits any upstream address", () => {
+    const config = loadConfig({
+      ...REQUIRED_ENV,
+      UPSTREAM_ALLOWED_PRIVATE_HOSTS: "*",
+      WOOCOMMERCE_MCP_URL: "http://10.1.2.3:8081/mcp",
+    });
+    assert.equal(config.upstreams.length, 1);
+    assert.deepEqual(config.upstreamAllowedPrivateHosts, ["*"]);
+  });
+
+  test("a public hostname is permitted with an empty allow-list", () => {
+    const config = loadConfig({
+      ...REQUIRED_ENV,
+      UPSTREAM_ALLOWED_PRIVATE_HOSTS: undefined,
+      WOOCOMMERCE_MCP_URL: "https://store.example.com/mcp",
+    });
+    assert.equal(config.upstreams.length, 1);
+    assert.deepEqual(config.upstreamAllowedPrivateHosts, []);
+  });
+
+  test("parses and validates the C7 limit envs", () => {
+    const config = loadConfig({
+      ...REQUIRED_ENV,
+      WOOCOMMERCE_MCP_URL: VALID_URL,
+      RATE_LIMIT_CALLS_PER_MINUTE: "0",
+      RATE_LIMIT_BURST: "5",
+      LOGIN_MAX_FAILURES_PER_IP: "0",
+      LOGIN_FAILURE_WINDOW_MS: "60000",
+      UPSTREAM_MAX_CONCURRENT_CALLS: "2",
+      UPSTREAM_MAX_RESPONSE_BYTES: "0",
+      JSON_BODY_LIMIT: "10kb",
+      TRUST_PROXY: "1",
+    });
+    assert.equal(config.rateLimitPerMinute, 0);
+    assert.equal(config.rateLimitBurst, 5);
+    assert.equal(config.loginMaxFailuresPerIp, 0);
+    assert.equal(config.loginFailureWindowMs, 60_000);
+    assert.equal(config.upstreamMaxConcurrentCalls, 2);
+    assert.equal(config.upstreamMaxResponseBytes, 0);
+    assert.equal(config.jsonBodyLimit, "10kb");
+    assert.equal(config.trustProxy, 1);
+  });
+
+  test("rejects malformed C7 limit envs", () => {
+    assert.throws(
+      () => loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL, JSON_BODY_LIMIT: "lots" }),
+      /JSON_BODY_LIMIT must look like/,
+    );
+    assert.throws(
+      () =>
+        loadConfig({
+          ...REQUIRED_ENV,
+          WOOCOMMERCE_MCP_URL: VALID_URL,
+          UPSTREAM_MAX_CONCURRENT_CALLS: "0",
+        }),
+      /UPSTREAM_MAX_CONCURRENT_CALLS must be between 1 and 100/,
+    );
+    assert.throws(
+      () => loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL, TRUST_PROXY: "-1" }),
+      /TRUST_PROXY must be between 0 and 10/,
+    );
   });
 });

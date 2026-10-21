@@ -1,4 +1,4 @@
-# Helm chart — `mcp-gateway` (Milestone 7)
+# Helm chart — `mcp-gateway` (Milestones 7–8)
 
 One chart deploys the whole stack onto Kubernetes: the gateway, the three MCP
 servers, the dashboard, PostgreSQL (with a PersistentVolumeClaim) and — for
@@ -26,6 +26,34 @@ Service names are **bare** (`gateway`, `postgres`, …) exactly as
 the system is plain Kubernetes service DNS — no hostnames are baked into
 values. Deploy **one release per namespace** (names are not release-prefixed;
 labels carry the release identity).
+
+### Milestone 8 security posture (threat-model C4/C7/C8/B1)
+
+Every workload runs under its own `ServiceAccount` with
+`automountServiceAccountToken: false` (none of these processes talk to the
+Kubernetes API). The three internal MCP servers receive `POD_IP` (downward
+API) and `MCP_ALLOWED_HOSTS=$(POD_IP),<svc>,<svc>.<ns>.svc.cluster.local`, so
+the SDK's host-header validation rejects DNS-rebinding style requests whose
+Host header is an attacker domain while port-forwards and service-DNS probes
+keep working. The gateway ConfigMap wires the Milestone 8 controls:
+
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `UPSTREAM_ALLOWED_PRIVATE_HOSTS` | `woocommerce-mcp,inventory-mcp,support-mcp` | C4: only these hosts may resolve to ClusterIPs (empty ⇒ literal private IPs refused at boot) |
+| `UPSTREAM_MAX_RESPONSE_BYTES` | `10485760` | C7: upstream response cap (streamed fetch guard) |
+| `UPSTREAM_MAX_CONCURRENT_CALLS` | `8` | C7: in-flight tool-call semaphore per upstream |
+| `RATE_LIMIT_CALLS_PER_MINUTE` / `RATE_LIMIT_BURST` | `60` / `20` | C7: per-API-key token bucket |
+| `JSON_BODY_LIMIT` | `100kb` | C7: express body cap (413 beyond) |
+| `LOGIN_MAX_FAILURES_PER_IP` / `LOGIN_FAILURE_WINDOW_MS` | `10` / `300000` | C7/B1: failed-login throttle |
+| `TRUST_PROXY` | `1` (prod: `2`) | client-IP extraction for the login throttle (nginx hop; +1 when an Ingress sits in front) |
+
+`scripts/security/assert-helm-security.sh` (wired into `scripts/check.sh`
+when `helm` is installed) renders `values-local` and `values-prod` and fails
+if any of these regress: an internal service leaves ClusterIP, a workload
+loses its non-automount ServiceAccount, the prod render contains a Secret or
+credential-looking literal, or the gateway loses its SSRF allow-list.
+`scripts/security-demo.sh` demonstrates the same controls live
+([docs/threat-model.md §6](../../docs/threat-model.md)).
 
 The gateway discovers the MCP servers at startup; if the servers are not up
 yet, the next `tools/list` after `toolCacheTtlMs` (default 60 s) re-fetches —

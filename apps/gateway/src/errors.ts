@@ -3,7 +3,11 @@ export type GatewayErrorCode =
   | "upstream_disabled"
   | "timeout"
   | "connect_timeout"
-  | "connection";
+  | "connection"
+  | "blocked_private_address"
+  | "response_too_large"
+  | "busy"
+  | "upstream_error";
 
 export interface GatewayErrorOptions {
   upstreamId?: string;

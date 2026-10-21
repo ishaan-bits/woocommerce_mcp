@@ -67,11 +67,19 @@ docker build -f infra/docker/dashboard/Dockerfile       -t urumi/dashboard:0.1.0
 
 | Image | Required env | Optional |
 | --- | --- | --- |
-| gateway | `DATABASE_URL`, `API_KEY_PEPPER` (≥16 chars), at least one of `WOOCOMMERCE_MCP_URL` / `INVENTORY_MCP_URL` / `SUPPORT_MCP_URL` | `GATEWAY_HOST=0.0.0.0`, `GATEWAY_PORT`, timeouts, `LOG_LEVEL`, `MIGRATE_DATABASE_URL`, `MCP_APP_DB_PASSWORD` |
+| gateway | `DATABASE_URL`, `API_KEY_PEPPER` (≥16 chars), at least one of `WOOCOMMERCE_MCP_URL` / `INVENTORY_MCP_URL` / `SUPPORT_MCP_URL`, `UPSTREAM_ALLOWED_PRIVATE_HOSTS` when any upstream URL points at a non-routable address (loopback, RFC1918, link-local, CGNAT — see below) | `GATEWAY_HOST=0.0.0.0`, `GATEWAY_PORT`, timeouts, `LOG_LEVEL`, `MIGRATE_DATABASE_URL`, `MCP_APP_DB_PASSWORD`, `UPSTREAM_MAX_RESPONSE_BYTES`, `RATE_LIMIT_CALLS_PER_MINUTE`, `RATE_LIMIT_BURST`, `LOGIN_MAX_FAILURES_PER_IP`, `LOGIN_FAILURE_WINDOW_MS`, `UPSTREAM_MAX_CONCURRENT_CALLS`, `JSON_BODY_LIMIT`, `TRUST_PROXY` |
 | woocommerce-mcp | `WOOCOMMERCE_STORE_URL`, `WOOCOMMERCE_CONSUMER_KEY`, `WOOCOMMERCE_CONSUMER_SECRET` | `HOST=0.0.0.0`, `PORT`, `WOOCOMMERCE_TIMEOUT_MS`, `LOG_LEVEL`, `MCP_ALLOWED_HOSTS` |
 | inventory-mcp | — (seeded demo data) | `HOST=0.0.0.0`, `PORT`, `LOG_LEVEL`, `MCP_ALLOWED_HOSTS` |
 | support-mcp | — (seeded demo data) | `HOST=0.0.0.0`, `PORT`, `LOG_LEVEL`, `MCP_ALLOWED_HOSTS` |
 | dashboard | — | `GATEWAY_UPSTREAM` (gateway base URL for the `/api` proxy, see below) |
+
+**C4 SSRF guard (Milestone 8)**: the gateway refuses to contact upstreams whose
+address is non-routable (loopback, RFC1918, link-local/metadata `169.254.169.254`,
+CGNAT, IPv6 equivalents) unless the hostname is explicitly allow-listed in
+`UPSTREAM_ALLOWED_PRIVATE_HOSTS` (comma-separated, exact match; `*` allows
+everything — development only). Docker Compose-style bridges and
+`host.docker.internal` are private addresses, so container-to-container runs
+typically need e.g. `-e UPSTREAM_ALLOWED_PRIVATE_HOSTS=host.docker.internal,woocommerce-mcp`.
 
 **`HOST=0.0.0.0` matters**: the servers default to binding `127.0.0.1` (right on a
 laptop, useless in a container), so published ports would refuse connections. Pass

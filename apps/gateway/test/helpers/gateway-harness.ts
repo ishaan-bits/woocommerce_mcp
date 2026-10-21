@@ -192,6 +192,7 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
     configs: config.upstreams,
     toolCacheTtlMs: options.toolCacheTtlMs ?? config.toolCacheTtlMs,
     logger,
+    ssrf: { allowedPrivateHosts: ["*"] },
     now: options.now,
     clientInfo: { name: "harness-gateway", version: "0.0.0" },
   });

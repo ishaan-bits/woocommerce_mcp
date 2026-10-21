@@ -9,6 +9,7 @@ import {
 } from "@mcp/shared";
 import { ConfigurationError } from "./errors.ts";
 import type { LogLevel } from "./logger.ts";
+import { hostnameOf, isPrivateAddress } from "./ssrf.ts";
 
 export interface AppConfig {
   host: string;
@@ -18,6 +19,22 @@ export interface AppConfig {
   upstreams: UpstreamConfig[];
   apiKeyPepper: string;
   databaseUrl: string;
+  /** C4: hosts (or "*") permitted to resolve to non-routable addresses. */
+  upstreamAllowedPrivateHosts: string[];
+  /** C7: per-API-key tool-call rate limit; 0 disables. */
+  rateLimitPerMinute: number;
+  rateLimitBurst: number;
+  /** C7: failed-login throttle per client IP; 0 disables. */
+  loginMaxFailuresPerIp: number;
+  loginFailureWindowMs: number;
+  /** C7: per-upstream concurrent tool calls. */
+  upstreamMaxConcurrentCalls: number;
+  /** C4: per-response size cap; 0 disables. */
+  upstreamMaxResponseBytes: number;
+  /** C7: maximum accepted JSON request body (express limit syntax). */
+  jsonBodyLimit: string;
+  /** Trusted proxy hops for client-IP extraction (0 = trust none). */
+  trustProxy: number;
 }
 
 export const DEFAULT_HOST = "127.0.0.1";
@@ -96,6 +113,61 @@ const envSchema = z.object({
       error: "LOG_LEVEL must be one of debug, info, warn, error",
     })
     .default("info"),
+  upstreamAllowedPrivateHosts: z
+    .string()
+    .optional()
+    .transform((value) =>
+      (value ?? "")
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0),
+    ),
+  rateLimitPerMinute: z.coerce
+    .number({ error: "RATE_LIMIT_CALLS_PER_MINUTE must be an integer number of calls" })
+    .int("RATE_LIMIT_CALLS_PER_MINUTE must be an integer number of calls")
+    .min(0, "RATE_LIMIT_CALLS_PER_MINUTE must be between 0 and 100000")
+    .max(100_000, "RATE_LIMIT_CALLS_PER_MINUTE must be between 0 and 100000")
+    .default(60),
+  rateLimitBurst: z.coerce
+    .number({ error: "RATE_LIMIT_BURST must be an integer number of calls" })
+    .int("RATE_LIMIT_BURST must be an integer number of calls")
+    .min(1, "RATE_LIMIT_BURST must be between 1 and 100000")
+    .max(100_000, "RATE_LIMIT_BURST must be between 1 and 100000")
+    .default(20),
+  loginMaxFailuresPerIp: z.coerce
+    .number({ error: "LOGIN_MAX_FAILURES_PER_IP must be an integer number of failures" })
+    .int("LOGIN_MAX_FAILURES_PER_IP must be an integer number of failures")
+    .min(0, "LOGIN_MAX_FAILURES_PER_IP must be between 0 and 1000")
+    .max(1_000, "LOGIN_MAX_FAILURES_PER_IP must be between 0 and 1000")
+    .default(10),
+  loginFailureWindowMs: z.coerce
+    .number({ error: "LOGIN_FAILURE_WINDOW_MS must be an integer number of milliseconds" })
+    .int("LOGIN_FAILURE_WINDOW_MS must be an integer number of milliseconds")
+    .min(1_000, "LOGIN_FAILURE_WINDOW_MS must be between 1000 and 3600000")
+    .max(3_600_000, "LOGIN_FAILURE_WINDOW_MS must be between 1000 and 3600000")
+    .default(300_000),
+  upstreamMaxConcurrentCalls: z.coerce
+    .number({ error: "UPSTREAM_MAX_CONCURRENT_CALLS must be an integer" })
+    .int("UPSTREAM_MAX_CONCURRENT_CALLS must be an integer")
+    .min(1, "UPSTREAM_MAX_CONCURRENT_CALLS must be between 1 and 100")
+    .max(100, "UPSTREAM_MAX_CONCURRENT_CALLS must be between 1 and 100")
+    .default(8),
+  upstreamMaxResponseBytes: z.coerce
+    .number({ error: "UPSTREAM_MAX_RESPONSE_BYTES must be an integer number of bytes" })
+    .int("UPSTREAM_MAX_RESPONSE_BYTES must be an integer number of bytes")
+    .min(0, "UPSTREAM_MAX_RESPONSE_BYTES must be between 0 and 1073741824")
+    .max(1_073_741_824, "UPSTREAM_MAX_RESPONSE_BYTES must be between 0 and 1073741824")
+    .default(10 * 1024 * 1024),
+  jsonBodyLimit: z
+    .string({ error: "JSON_BODY_LIMIT must look like 100kb or 1mb" })
+    .regex(/^\d+(b|kb|mb|gb)?$/i, "JSON_BODY_LIMIT must look like 100kb or 1mb")
+    .default("100kb"),
+  trustProxy: z.coerce
+    .number({ error: "TRUST_PROXY must be an integer number of hops" })
+    .int("TRUST_PROXY must be an integer number of hops")
+    .min(0, "TRUST_PROXY must be between 0 and 10")
+    .max(10, "TRUST_PROXY must be between 0 and 10")
+    .default(0),
   apiKeyPepper: z
     .string({
       error: "API_KEY_PEPPER is required and must be at least 16 characters",
@@ -133,6 +205,15 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     timeoutMs: trimmed(env, "UPSTREAM_TIMEOUT_MS"),
     connectTimeoutMs: trimmed(env, "UPSTREAM_CONNECT_TIMEOUT_MS"),
     logLevel: trimmed(env, "LOG_LEVEL"),
+    upstreamAllowedPrivateHosts: trimmed(env, "UPSTREAM_ALLOWED_PRIVATE_HOSTS"),
+    rateLimitPerMinute: trimmed(env, "RATE_LIMIT_CALLS_PER_MINUTE"),
+    rateLimitBurst: trimmed(env, "RATE_LIMIT_BURST"),
+    loginMaxFailuresPerIp: trimmed(env, "LOGIN_MAX_FAILURES_PER_IP"),
+    loginFailureWindowMs: trimmed(env, "LOGIN_FAILURE_WINDOW_MS"),
+    upstreamMaxConcurrentCalls: trimmed(env, "UPSTREAM_MAX_CONCURRENT_CALLS"),
+    upstreamMaxResponseBytes: trimmed(env, "UPSTREAM_MAX_RESPONSE_BYTES"),
+    jsonBodyLimit: trimmed(env, "JSON_BODY_LIMIT"),
+    trustProxy: trimmed(env, "TRUST_PROXY"),
     apiKeyPepper: trimmed(env, "API_KEY_PEPPER"),
     databaseUrl: trimmed(env, "DATABASE_URL"),
   });
@@ -143,18 +224,28 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
   }
 
   const upstreams: UpstreamConfig[] = [];
-  const data = parsed.success
-    ? parsed.data
-    : {
-        host: DEFAULT_HOST,
-        port: DEFAULT_PORT,
-        toolCacheTtlMs: DEFAULT_TOOL_CACHE_TTL_MS,
-        timeoutMs: DEFAULT_UPSTREAM_TIMEOUT_MS,
-        connectTimeoutMs: DEFAULT_CONNECT_TIMEOUT_MS,
-        logLevel: "info" as LogLevel,
-        apiKeyPepper: "",
-        databaseUrl: "",
-      };
+  const fallback = {
+    host: DEFAULT_HOST,
+    port: DEFAULT_PORT,
+    toolCacheTtlMs: DEFAULT_TOOL_CACHE_TTL_MS,
+    timeoutMs: DEFAULT_UPSTREAM_TIMEOUT_MS,
+    connectTimeoutMs: DEFAULT_CONNECT_TIMEOUT_MS,
+    logLevel: "info" as LogLevel,
+    apiKeyPepper: "",
+    databaseUrl: "",
+    upstreamAllowedPrivateHosts: [] as string[],
+    rateLimitPerMinute: 60,
+    rateLimitBurst: 20,
+    loginMaxFailuresPerIp: 10,
+    loginFailureWindowMs: 300_000,
+    upstreamMaxConcurrentCalls: 8,
+    upstreamMaxResponseBytes: 10 * 1024 * 1024,
+    jsonBodyLimit: "100kb",
+    trustProxy: 0,
+  };
+  const data = parsed.success ? parsed.data : fallback;
+  const allowedPrivateHosts = data.upstreamAllowedPrivateHosts;
+  const allowAll = allowedPrivateHosts.includes("*");
 
   for (const upstreamId of UPSTREAM_IDS) {
     const envKey = UPSTREAM_URL_ENV[upstreamId];
@@ -165,6 +256,20 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     const result = mcpUrlSchema.safeParse(raw);
     if (!result.success) {
       issues.push(`${envKey} ${result.error.issues.map((issue) => issue.message).join("; ")}`);
+      continue;
+    }
+    // C4 load-time check: a literal non-routable address is refused at boot
+    // unless allow-listed. DNS names are checked again at connect time.
+    const url = new URL(result.data);
+    const host = hostnameOf(url);
+    if (
+      !allowAll &&
+      isPrivateAddress(host) &&
+      !allowedPrivateHosts.some((entry) => entry.toLowerCase() === host.toLowerCase())
+    ) {
+      issues.push(
+        `${envKey} points at non-routable address '${host}'; allow-list it via UPSTREAM_ALLOWED_PRIVATE_HOSTS or use a routable address`,
+      );
       continue;
     }
     upstreams.push({
@@ -194,6 +299,15 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     upstreams,
     apiKeyPepper: data.apiKeyPepper,
     databaseUrl: data.databaseUrl,
+    upstreamAllowedPrivateHosts: allowedPrivateHosts,
+    rateLimitPerMinute: data.rateLimitPerMinute,
+    rateLimitBurst: data.rateLimitBurst,
+    loginMaxFailuresPerIp: data.loginMaxFailuresPerIp,
+    loginFailureWindowMs: data.loginFailureWindowMs,
+    upstreamMaxConcurrentCalls: data.upstreamMaxConcurrentCalls,
+    upstreamMaxResponseBytes: data.upstreamMaxResponseBytes,
+    jsonBodyLimit: data.jsonBodyLimit,
+    trustProxy: data.trustProxy,
   };
 }
 

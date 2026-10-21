@@ -50,6 +50,7 @@ To reach it through the gateway, set the URL (this is the entire registration):
 
 ```bash
 INVENTORY_MCP_URL=http://127.0.0.1:8083/mcp   # gateway: inventory_list_products, inventory_adjust_stock
+# loopback upstreams need the C4 SSRF allow-list: UPSTREAM_ALLOWED_PRIVATE_HOSTS=127.0.0.1
 ```
 
 Container (Milestone 6):

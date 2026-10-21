@@ -52,6 +52,7 @@ To reach it through the gateway, set the URL (this is the entire registration):
 
 ```bash
 SUPPORT_MCP_URL=http://127.0.0.1:8084/mcp   # gateway: support_list_tickets, support_create_ticket
+# loopback upstreams need the C4 SSRF allow-list: UPSTREAM_ALLOWED_PRIVATE_HOSTS=127.0.0.1
 ```
 
 Note for gateway grants: the gateway test harness's static grant set includes

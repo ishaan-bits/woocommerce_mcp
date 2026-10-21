@@ -690,3 +690,54 @@ run twice. The chart carries no Helm `test` pods or hook-based smoke tests: the 
 walkthrough in `infra/helm/README.md` (lint, template review, server dry-run, live e2e,
 restarts) is the source of truth, because it exercises real authz and persistence rather than
 a pod that only proves HTTP 200.
+
+## D28 — Milestone 8 security posture: default-deny SSRF allow-list, in-memory per-process limits, opt-in trust proxy
+
+**Context.** The threat model's remaining controls (C3 extensions, C4, C7, C8 and the B1
+hardening) had to be implemented without breaking the documented local, Docker and kind
+flows, without new dependencies, and with tests that fail when a control is removed.
+
+**Decision.**
+
+- **C4 SSRF guard defaults to deny.** `UPSTREAM_ALLOWED_PRIVATE_HOSTS` starts empty, so a
+  literal non-routable upstream address (loopback, RFC1918, link-local/metadata, CGNAT,
+  IPv6 equivalents) is refused at boot and a hostname resolving privately is refused at
+  connect time. Every documented flow carries its allow-list: `.env.example` and the local
+  Helm values allow the loopback/service names they need; the production values allow only
+  the three in-cluster service DNS names. The literal `*` is a documented development
+  escape hatch, never a production value. The classifier runs on WHATWG-normalized
+  hostnames, so decimal/hex IPv4 encodings cannot smuggle loopback.
+- **Redirects are refused cross-origin by the MCP SDK transport itself** — no separate
+  redirect hop-count was added; a same-origin redirect stays on the (already checked)
+  configured host, and a cross-origin `Location` is never followed (tested).
+- **Response-size cap rides the SDK's pluggable fetch** (`createCappedFetch`): Content-Length
+  rejected up front, chunked bodies aborted mid-stream, default 10 MiB, 0 disables.
+- **C7 limits are in-memory and per-process** (token buckets for per-key tool calls and
+  per-IP failed logins; a semaphore per upstream). That is correct for the single-replica
+  deployments this milestone validates; a multi-replica gateway needs a shared store and
+  gets none silently — documented as a limitation instead of half-implemented.
+- **`TRUST_PROXY` is opt-in** (default 0). The login throttle keys on `req.ip`; the Helm
+  values set 1 hop so the dashboard's nginx forwards the real client IP, and the
+  production values note that an extra Ingress hop means 2.
+- **B1 host allow-listing uses the downward API.** Each internal MCP server gets
+  `MCP_ALLOWED_HOSTS=$(POD_IP),<service>,<service>.<ns>.svc.cluster.local` — the pod IP
+  (expanded by kubelet before the process starts) keeps the HTTP probes working, the
+  service names keep the gateway working, and everything else gets 403. The gateway
+  itself stays off this list: it is authenticated and must remain reachable through
+  port-forward and NodePort with `localhost` Host headers.
+- **C8 least privilege:** every workload gets its own ServiceAccount with
+  `automountServiceAccountToken: false`, asserted by `scripts/security/assert-helm-security.sh`
+  (wired into `check.sh`) so a regression fails the build, not the review.
+- **Body-size limit is injected into the SDK's own parser.** `createMcpExpressApp` mounts
+  `express.json()` with its defaults at creation; the gateway wraps `express.json` for the
+  duration of that call so the parser is created with `JSON_BODY_LIMIT` (default 100kb —
+  unchanged from body-parser's default) and restores it immediately. No second parser, no
+  SDK fork.
+
+**Trade-offs.** Default-deny means a fresh `.env` copied from an older README snippet fails
+to boot with a message naming `UPSTREAM_ALLOWED_PRIVATE_HOSTS` — deliberate: the fix is one
+env var, the failure mode it prevents is a gateway connecting to a cloud metadata service.
+The `$(POD_IP)` trick couples the chart to Kubernetes env expansion (documented in the
+template). The `express.json` wrap touches a module export for two synchronous statements —
+contained, commented, and covered by the 413 tests; the alternative (forking the SDK app
+assembly) costs more than it protects.

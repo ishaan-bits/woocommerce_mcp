@@ -9,8 +9,10 @@ import {
   type UpstreamHealth,
 } from "@mcp/shared";
 import { ArgumentValidationError, GatewayError } from "./errors.ts";
+import { createSemaphore, type Semaphore } from "./limits.ts";
 import type { Logger } from "./logger.ts";
 import { parseToolName, qualifyToolName } from "./routing.ts";
+import { assertUpstreamTargetAllowed, createCappedFetch, type SsrfPolicy } from "./ssrf.ts";
 import { createSchemaValidator } from "./validation.ts";
 import { VERSION } from "./version.ts";
 
@@ -18,6 +20,14 @@ export interface UpstreamRegistryOptions {
   configs: readonly UpstreamConfig[];
   toolCacheTtlMs: number;
   logger: Logger;
+  /** C4: private-address guard for upstream targets. */
+  ssrf: SsrfPolicy;
+  /** C7: per-upstream concurrent tool-call cap (default 8). */
+  maxConcurrentCallsPerUpstream?: number;
+  /** C7: how long a call may wait for a concurrency slot before busy (default 2000). */
+  callQueueWaitMs?: number;
+  /** C4: per-response size cap in bytes; 0 disables (default 10 MiB). */
+  maxResponseBytes?: number;
   now?: () => number;
   clientInfo?: { name: string; version: string };
 }
@@ -94,6 +104,9 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
   const now = options.now ?? Date.now;
   const clientInfo = options.clientInfo ?? { name: "urumi-mcp-gateway", version: VERSION };
   const validator = createSchemaValidator();
+  const maxConcurrentCalls = options.maxConcurrentCallsPerUpstream ?? 8;
+  const callQueueWaitMs = options.callQueueWaitMs ?? 2_000;
+  const maxResponseBytes = options.maxResponseBytes ?? 10 * 1024 * 1024;
 
   const states: UpstreamState[] = options.configs.map((config) => ({
     config,
@@ -105,6 +118,11 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
     lastErrorMessage: null,
     connectPromise: null,
   }));
+
+  /** C7: bounded concurrency per upstream so bulk jobs cannot exhaust sockets. */
+  const semaphores = new Map<string, Semaphore>(
+    states.map((state) => [state.config.id, createSemaphore(maxConcurrentCalls)]),
+  );
 
   function stateFor(upstreamId: string): UpstreamState | undefined {
     return states.find((state) => state.config.id === upstreamId);
@@ -145,6 +163,22 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
     );
   }
 
+  /**
+   * B3: upstreams are semi-trusted. Protocol-level error messages are logged
+   * locally but replaced with a bounded, fixed-shape message before they can
+   * reach the gateway's clients (a compromised upstream could otherwise echo
+   * URLs, headers or stack text through the gateway).
+   */
+  function sanitizeUpstreamMcpError(error: McpError, upstreamId: string): GatewayError {
+    const message = error.message ?? "";
+    const unsafe =
+      message.length > 200 || /https?:\/\/|[<>]|\r|\n/.test(message);
+    const safe = unsafe
+      ? `upstream '${upstreamId}' returned an MCP error ${error.code}`
+      : `upstream '${upstreamId}' returned an MCP error ${error.code}: ${message}`;
+    return new GatewayError("upstream_error", safe, { upstreamId, cause: error });
+  }
+
   async function resetConnection(state: UpstreamState): Promise<void> {
     const client = state.client;
     state.client = null;
@@ -166,8 +200,14 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
       return;
     }
     const connectPromise = (async () => {
+      const target = new URL(state.config.baseUrl);
+      // C4: refuse non-routable targets unless the operator allow-listed them.
+      await assertUpstreamTargetAllowed(target, options.ssrf);
       const client = new Client(clientInfo);
-      const transport = new StreamableHTTPClientTransport(new URL(state.config.baseUrl));
+      const transport = new StreamableHTTPClientTransport(
+        target,
+        maxResponseBytes > 0 ? { fetch: createCappedFetch(maxResponseBytes, state.config.id) } : {},
+      );
       try {
         await client.connect(transport, { timeout: state.config.connectTimeoutMs });
       } catch (error) {
@@ -306,6 +346,11 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
         });
       }
 
+      const semaphore = semaphores.get(state.config.id);
+      const release =
+        semaphore !== undefined
+          ? await semaphore.acquire(Math.min(state.config.timeoutMs, callQueueWaitMs))
+          : () => {};
       try {
         const result = await client.callTool(
           { name: parsed.localName, arguments: args },
@@ -322,7 +367,7 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
           );
         }
         if (error instanceof McpError) {
-          throw error;
+          throw sanitizeUpstreamMcpError(error, state.config.id);
         }
         markUnreachable(state, error);
         await resetConnection(state);
@@ -331,6 +376,8 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
           `upstream '${state.config.id}' is unreachable (the connection failed)`,
           { upstreamId: state.config.id, cause: error },
         );
+      } finally {
+        release();
       }
     },
 

@@ -3,6 +3,16 @@ woocommerce-mcp — ClusterIP only: internal MCP servers are never exposed
 outside the namespace (docs/architecture.md §8, threat-model.md B-boundary).
 */}}
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: woocommerce-mcp
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: woocommerce-mcp
+# C8 least privilege: the workload never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: woocommerce-mcp-config
@@ -58,6 +68,7 @@ spec:
         {{- include "mcp.selectorLabels" (dict "root" . "name" "woocommerce-mcp") | nindent 8 }}
         app.kubernetes.io/component: woocommerce-mcp
     spec:
+      serviceAccountName: woocommerce-mcp
       securityContext:
         {{- include "mcp.podSecurityContext" . | nindent 8 }}
         # Numeric IDs matching the image's `USER node` — kubelet refuses named
@@ -76,6 +87,15 @@ spec:
             - configMapRef:
                 name: woocommerce-mcp-config
           env:
+            # B1/C8 DNS-rebinding protection: the gateway reaches us by service
+            # DNS name; kubelet probes by pod IP (expanded from the downward
+            # API before this value is interpolated).
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: MCP_ALLOWED_HOSTS
+              value: "$(POD_IP),woocommerce-mcp,woocommerce-mcp.{{ .Release.Namespace }}.svc.cluster.local"
             - name: WOOCOMMERCE_CONSUMER_KEY
               valueFrom:
                 secretKeyRef:

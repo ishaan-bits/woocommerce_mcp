@@ -1,8 +1,18 @@
 {{/*
-gateway — ConfigMap (non-sensitive config), Service and Deployment.
-The Deployment runs migrations in an init container (tracked in
+gateway — ServiceAccount, ConfigMap (non-sensitive config), Service and
+Deployment. The Deployment runs migrations in an init container (tracked in
 schema_migrations, so re-runs skip applied files) before the app starts.
 */}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+# C8 least privilege: the workload never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,6 +29,20 @@ data:
   WOOCOMMERCE_MCP_URL: "http://woocommerce-mcp:{{ .Values.woocommerceMcp.port }}/mcp"
   INVENTORY_MCP_URL: "http://inventory-mcp:{{ .Values.inventoryMcp.port }}/mcp"
   SUPPORT_MCP_URL: "http://support-mcp:{{ .Values.supportMcp.port }}/mcp"
+  # Milestone 8 security controls (threat-model C4/C7/B1):
+  # C4: only the three service DNS names may resolve to private ClusterIPs.
+  UPSTREAM_ALLOWED_PRIVATE_HOSTS: {{ .Values.gateway.upstreamAllowedPrivateHosts | join "," | quote }}
+  UPSTREAM_MAX_RESPONSE_BYTES: {{ .Values.gateway.upstreamMaxResponseBytes | quote }}
+  UPSTREAM_MAX_CONCURRENT_CALLS: {{ .Values.gateway.upstreamMaxConcurrentCalls | quote }}
+  # C7: per-key tool-call rate limit and request-body cap.
+  RATE_LIMIT_CALLS_PER_MINUTE: {{ .Values.gateway.rateLimitPerMinute | quote }}
+  RATE_LIMIT_BURST: {{ .Values.gateway.rateLimitBurst | quote }}
+  JSON_BODY_LIMIT: {{ .Values.gateway.jsonBodyLimit | quote }}
+  # B1/C7: failed-logins-per-IP throttle; trust proxy hops for client IPs
+  # (1 = the dashboard's nginx; 2 when an Ingress sits in front of it).
+  LOGIN_MAX_FAILURES_PER_IP: {{ .Values.gateway.loginMaxFailuresPerIp | quote }}
+  LOGIN_FAILURE_WINDOW_MS: {{ .Values.gateway.loginFailureWindowMs | quote }}
+  TRUST_PROXY: {{ .Values.gateway.trustProxy | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -61,6 +85,7 @@ spec:
         {{- include "mcp.selectorLabels" (dict "root" . "name" "gateway") | nindent 8 }}
         app.kubernetes.io/component: gateway
     spec:
+      serviceAccountName: gateway
       securityContext:
         {{- include "mcp.podSecurityContext" . | nindent 8 }}
         # Numeric IDs matching the image's `USER node` — kubelet refuses named

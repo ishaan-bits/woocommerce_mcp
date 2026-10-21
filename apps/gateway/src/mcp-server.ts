@@ -10,6 +10,7 @@ import type { ApiKeyPrincipal } from "@mcp/shared";
 import type { AuditWriter } from "./audit.ts";
 import type { AuthzDecision } from "./auth/authorization.ts";
 import { ArgumentValidationError, isGatewayError } from "./errors.ts";
+import type { TokenBucketLimiter } from "./limits.ts";
 import type { Logger } from "./logger.ts";
 import { parseToolName } from "./routing.ts";
 import type { UpstreamRegistry } from "./upstream-registry.ts";
@@ -22,18 +23,23 @@ import { VERSION } from "./version.ts";
  */
 export const PERMISSION_DENIED = -32003;
 
+/** Distinct from PERMISSION_DENIED so clients can tell throttling from denial. */
+export const RATE_LIMIT_EXCEEDED = -32000;
+
 export interface GatewayMcpServerOptions {
   registry: UpstreamRegistry;
   logger: Logger;
   audit: AuditWriter;
   principal: ApiKeyPrincipal;
   authorize: (qualifiedName: string) => AuthzDecision;
+  /** C7: per-key token bucket; null/undefined disables the limit. */
+  rateLimiter?: TokenBucketLimiter | null;
   name?: string;
   version?: string;
 }
 
 export function createGatewayMcpServer(options: GatewayMcpServerOptions): Server {
-  const { registry, logger, audit, principal, authorize } = options;
+  const { registry, logger, audit, principal, authorize, rateLimiter } = options;
   const server = new Server(
     {
       name: options.name ?? "urumi-mcp-gateway",
@@ -96,6 +102,13 @@ export function createGatewayMcpServer(options: GatewayMcpServerOptions): Server
         user_id: principal.userId,
       });
     };
+
+    // C7: per-API-key throttle, checked before authorization so a flood of
+    // denied probes is rate-limited too. Audited like any other denial.
+    if (rateLimiter != null && !rateLimiter.tryTake(principal.keyId)) {
+      await record("denied", "rate_limited");
+      throw new McpError(RATE_LIMIT_EXCEEDED, "Rate limit exceeded for this API key; retry shortly");
+    }
 
     // C5 order: authorization (role → grants) runs before validation and routing.
     const decision = authorize(qualifiedName);

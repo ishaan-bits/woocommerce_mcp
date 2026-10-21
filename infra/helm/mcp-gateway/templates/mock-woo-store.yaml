@@ -7,6 +7,16 @@ headers, which carry credentials.
 */}}
 {{- if .Values.mockStore.enabled }}
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mock-woo-store
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-woo-store
+# C8 least privilege: the workload never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mock-woo-store
@@ -243,6 +253,7 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      serviceAccountName: mock-woo-store
       containers:
         - name: mock-woo-store
           image: {{ printf "%s:%s" .Values.mockStore.image.repository .Values.mockStore.image.tag | quote }}

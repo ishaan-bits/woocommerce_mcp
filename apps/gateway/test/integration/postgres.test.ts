@@ -375,6 +375,7 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
       configs: config.upstreams,
       toolCacheTtlMs: config.toolCacheTtlMs,
       logger,
+      ssrf: { allowedPrivateHosts: ["*"] },
       clientInfo: { name: "integration-gateway", version: "0.0.0" },
     });
     const mcpApp = createApp({
@@ -647,6 +648,7 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
       configs: config.upstreams,
       toolCacheTtlMs: 1_000,
       logger,
+      ssrf: { allowedPrivateHosts: ["*"] },
       clientInfo: { name: "integration-restart", version: "0.0.0" },
     });
     try {
@@ -663,6 +665,26 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
     } finally {
       await registry.close();
       await admin.query(`DELETE FROM upstream_overrides`);
+    }
+  });
+
+  test("a failing migration rolls back and records nothing in schema_migrations (C6)", async () => {
+    // Sabotage: a wrong-shape `users` table makes 001's CREATE TABLE IF NOT
+    // EXISTS skip, so the seed INSERT inside the same transaction fails and
+    // the whole migration must roll back.
+    await admin.query(
+      `DROP TABLE IF EXISTS audit_log, api_keys, users, web_sessions, upstream_overrides, schema_migrations CASCADE`,
+    );
+    await admin.query(`CREATE TABLE users (oops integer)`);
+    try {
+      await assert.rejects(() => runMigrations({ databaseUrl, appPassword: APP_PASSWORD, log: () => undefined }));
+      const applied = await admin.query<{ filename: string }>(`SELECT filename FROM schema_migrations`);
+      assert.equal(applied.rows.length, 0, "no migration may be recorded after a rollback");
+      const users = await admin.query(`SELECT oops FROM users`);
+      assert.equal(users.rows.length, 0, "the sabotaged table must be untouched by the rolled-back DDL");
+    } finally {
+      await admin.query(`DROP TABLE IF EXISTS users CASCADE`);
+      await runMigrations({ databaseUrl, appPassword: APP_PASSWORD, log: () => undefined });
     }
   });
 });

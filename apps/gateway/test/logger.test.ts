@@ -20,6 +20,19 @@ describe("gateway logger", () => {
     assert.match(redacted, /\[redacted\]/);
   });
 
+  test("redacts postgres URLs, session cookies and authorization fields (C3)", () => {
+    const line = JSON.stringify({
+      db: "postgresql://mcp:s3cr3t-pw@127.0.0.1:5432/mcp",
+      cookie: "urumi_session=abcDEF123.456xyz",
+      authorization: "Bearer some-opaque-token-value",
+    });
+    const redacted = redactLine(line);
+    assert.ok(!redacted.includes("s3cr3t-pw"));
+    assert.ok(!redacted.includes("abcDEF123.456xyz"));
+    assert.ok(!redacted.includes("some-opaque-token-value"));
+    assert.match(redacted, /\[redacted\]/);
+  });
+
   test("filters by level and emits structured JSON", () => {
     const lines: string[] = [];
     const logger = createLogger({

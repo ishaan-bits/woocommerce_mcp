@@ -14,6 +14,18 @@
         "image": { "$ref": "#/definitions/image" },
         "service": { "$ref": "#/definitions/httpService" },
         "toolCacheTtlMs": { "type": "integer", "minimum": 1000 },
+        "upstreamAllowedPrivateHosts": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "upstreamMaxResponseBytes": { "type": "integer", "minimum": 0 },
+        "upstreamMaxConcurrentCalls": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "rateLimitPerMinute": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "jsonBodyLimit": { "type": "string", "pattern": "^[0-9]+(b|kb|mb|gb)?$", "maxLength": 8 },
+        "loginMaxFailuresPerIp": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "loginFailureWindowMs": { "type": "integer", "minimum": 1000 },
+        "trustProxy": { "type": "integer", "minimum": 0, "maximum": 10 },
         "migrate": {
           "type": "object",
           "properties": {

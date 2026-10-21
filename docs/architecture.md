@@ -631,7 +631,7 @@ Nothing in this repository should be described as "working" unless a check in
 | 5 | **Inventory + Support MCP servers** | ✅ done: two seeded servers, config-only registration, process-to-process proof that no gateway code changed |
 | 6 | **Docker images** | ✅ done: five images built and container-tested — wrap each unit once its runtime deps are final |
 | 7 | **Kubernetes + Helm (local, then prod values)** | ✅ done: one chart, two value files, installed and e2e-validated on kind |
-| 8 | **Security hardening + threat-model review** | ← you are here: controls verified against the running system. |
+| 8 | **Security hardening + threat-model review** | ✅ done: every threat-model control implemented and verified against tests + the running kind cluster (see `docs/threat-model.md` §3 for the per-control test names). |
 | 9 | **Chat agent + LLM (Groq free tier / Ollama)** | Optional intelligence layer on top of a correct, audited gateway. |
 
 Each stage ends with a reviewable demo; none of them starts before the previous one is

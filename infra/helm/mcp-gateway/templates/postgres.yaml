@@ -26,6 +26,16 @@ spec:
   {{- end }}
 ---
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: postgres
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+# C8 least privilege: the workload never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: postgres
@@ -63,6 +73,7 @@ spec:
         {{- include "mcp.selectorLabels" (dict "root" . "name" "postgres") | nindent 8 }}
         app.kubernetes.io/component: postgres
     spec:
+      serviceAccountName: postgres
       containers:
         - name: postgres
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}

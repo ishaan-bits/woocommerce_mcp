@@ -27,9 +27,14 @@ const LEVEL_WEIGHT: Record<LogLevel, number> = {
 };
 
 const CREDENTIAL_PATTERNS: RegExp[] = [
+  /postgres(?:ql)?:\/\/[^\s"']+/g,
+  /"authorization":\s*"[^"]*"/g,
   /ck_[A-Za-z0-9]+/g,
   /cs_[A-Za-z0-9]+/g,
+  /sk_[A-Za-z0-9]+/g,
+  /umk_[A-Za-z0-9_-]+/g,
   /Basic\s+[A-Za-z0-9+/=]{8,}/g,
+  /Bearer\s+[A-Za-z0-9._~+/-]{8,}=*/g,
 ];
 
 export function redactLine(line: string): string {

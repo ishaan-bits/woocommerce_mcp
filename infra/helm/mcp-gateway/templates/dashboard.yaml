@@ -5,6 +5,16 @@ image's entrypoint writes the documented 503 fallback instead (an Ingress
 then owns /api — docs/architecture.md §8).
 */}}
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+# C8 least privilege: the workload never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: dashboard-config
@@ -53,6 +63,7 @@ spec:
         {{- include "mcp.selectorLabels" (dict "root" . "name" "dashboard") | nindent 8 }}
         app.kubernetes.io/component: dashboard
     spec:
+      serviceAccountName: dashboard
       securityContext:
         {{- include "mcp.podSecurityContext" . | nindent 8 }}
         # Numeric IDs matching the image's `USER nginx` — kubelet refuses named

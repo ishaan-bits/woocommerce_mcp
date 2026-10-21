@@ -110,6 +110,15 @@ deleted before the cookie is cleared).
 | `MIGRATE_DATABASE_URL` | `DATABASE_URL` | admin connection used only by `npm run migrate` |
 | `MCP_APP_DB_PASSWORD` | unset | when set, the migration runner creates the least-privilege `mcp_gateway_app` role (append-only audit) |
 | `TEST_DATABASE_URL` | unset | when set, `test/integration/postgres.test.ts` runs against that (disposable!) database; when unset it skips **with a printed reason** |
+| `UPSTREAM_ALLOWED_PRIVATE_HOSTS` | *(empty)* | **C4 SSRF guard**: comma-separated hosts allowed to point at non-routable addresses (loopback/RFC1918/link-local/CGNAT); empty = refuse them all; `*` = allow everything (dev only). Literal private IPs are refused at boot, DNS names at connect time |
+| `UPSTREAM_MAX_RESPONSE_BYTES` | `10485760` | **C4**: per-response size cap; 0 disables |
+| `RATE_LIMIT_CALLS_PER_MINUTE` | `60` | **C7**: per-API-key `tools/call` rate; 0 disables (rejections audit as `rate_limited`) |
+| `RATE_LIMIT_BURST` | `20` | **C7**: token-bucket burst for the per-key limiter |
+| `LOGIN_MAX_FAILURES_PER_IP` | `10` | **B1/C7**: failed dashboard logins per client IP before 429; 0 disables |
+| `LOGIN_FAILURE_WINDOW_MS` | `300000` | **B1/C7**: refill window for the login limiter |
+| `UPSTREAM_MAX_CONCURRENT_CALLS` | `8` | **C7**: concurrent `tools/call`s per upstream; waiters get `busy` after the queue budget |
+| `JSON_BODY_LIMIT` | `100kb` | **C7**: max JSON request body (express limit syntax); oversized bodies get 413 |
+| `TRUST_PROXY` | `0` | trusted proxy hops for client-IP extraction (login throttle); set `1` behind the dashboard's nginx |
 
 At least one `*_MCP_URL` is required. Invalid configuration fails fast with one issue per
 problem, naming the variable. See [.env.example](../../.env.example).
@@ -229,7 +238,6 @@ never skipped silently.
   still decide *which* upstreams exist and where they point (D24/C4: the admin API can
   never introduce a connection target). The on/off state lives in `upstream_overrides` and
   is reapplied at boot.
-- **No rate limiting / bounded per-upstream concurrency** — threat-model C7, Milestone 8.
 - **Sessions are database rows** — no session-listing/revocation UI (a row expires or the
   key is revoked); login failures are audited, successful logins are only logged.
 - **Two seeded users, no self-service signup** — provisioning stays ops work. Their seed
@@ -239,10 +247,14 @@ never skipped silently.
   full authorization shape (including the denials).
 - **The live pairing with real server processes is proven in tests, not in Docker** —
   `test/real-upstreams.test.ts` spawns the three real MCP server processes on loopback;
-  running the whole set under Docker/kind still belongs to Milestones 6–7. The paid
+  running the whole set under Docker/k8s belongs to Milestones 6–8 validation. The paid
   WooCommerce REST API still has a mock standing in for it.
-- Per-upstream concurrency is not yet bounded: one upstream under load does not degrade
-  others (isolation), but within one upstream there is no queue or rate limit yet.
+- **Rate limiting and per-upstream concurrency caps are in-memory and per-process** —
+  correct for the single-replica deployments this milestone validates; a multi-replica
+  gateway would need a shared store (documented, not implemented).
+- **SSRF guard trusts operator DNS at connect time** — the hostname is resolved and every
+  resolved address checked when a connection is made (not re-checked per HTTP redirect;
+  the SDK already refuses cross-origin redirects).
 
 ## Source layout
 
@@ -250,7 +262,9 @@ never skipped silently.
 | --- | --- |
 | `src/config.ts` | env parsing (zod), fail-fast messages naming the variable |
 | `src/routing.ts` | qualified names ↔ upstream ids |
-| `src/upstream-registry.ts` | discovery, TTL cache, connect/call timeouts, health, contract check, `setEnabled` override + `applyUpstreamOverrides` (D24) |
+| `src/upstream-registry.ts` | discovery, TTL cache, connect/call timeouts, health, contract check, `setEnabled` override + `applyUpstreamOverrides` (D24), SSRF connect-time guard + capped fetch (C4), per-upstream semaphore + sanitized upstream errors (C7/B3) |
+| `src/ssrf.ts` | C4: private-address classifier, allow-list guard, response-size-capped fetch |
+| `src/limits.ts` | C7: token-bucket rate limiter (per key / per IP) and concurrency semaphore |
 | `src/validation.ts` | ajv pre-forward argument validation |
 | `src/mcp-server.ts` | downstream MCP server: aggregated `tools/list`, routed `tools/call` |
 | `src/app.ts` | Express app: auth middleware, sessions (bound to the key's user), probes, draining |

@@ -26,6 +26,22 @@ describe("redactLine", () => {
     assert.ok(!redacted.includes("dGVzdDpzZWNyZXQ="));
     assert.ok(redacted.includes("[redacted]"));
   });
+
+  test("redacts gateway keys, Bearer tokens, postgres URLs and JSON authorization fields (C3 parity)", () => {
+    const line = JSON.stringify({
+      key: "umk_live_abcdefghijklmnop",
+      sk: "sk_live_1234567890",
+      auth: "Bearer opaque-token-value",
+      db: "postgresql://mcp:pw@db:5432/woo",
+      authorization: "Basic dXNlcjpwYXNz",
+    });
+    const redacted = redactLine(line);
+    assert.ok(!redacted.includes("umk_live_abcdefghijklmnop"));
+    assert.ok(!redacted.includes("sk_live_1234567890"));
+    assert.ok(!redacted.includes("opaque-token-value"));
+    assert.ok(!redacted.includes("postgresql://mcp:pw@db:5432/woo"));
+    assert.ok(!redacted.includes("dXNlcjpwYXNz"));
+  });
 });
 
 describe("createLogger", () => {

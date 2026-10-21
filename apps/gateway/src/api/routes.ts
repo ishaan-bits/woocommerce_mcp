@@ -18,6 +18,7 @@ import type { AuditRepository } from "../db/audit-repository.ts";
 import type { AuthRepository } from "../db/auth-repository.ts";
 import type { SessionRepository } from "../db/session-repository.ts";
 import type { UpstreamStateRepository } from "../db/upstream-state-repository.ts";
+import type { TokenBucketLimiter } from "../limits.ts";
 import type { Logger } from "../logger.ts";
 import type { UpstreamRegistry } from "../upstream-registry.ts";
 
@@ -33,6 +34,8 @@ export interface ApiRouterDeps {
   registry: UpstreamRegistry;
   logger: Logger;
   pepper: string;
+  /** C7/B1: failed-logins-per-IP throttle; null/undefined disables. */
+  loginLimiter?: TokenBucketLimiter | null;
   now?: () => number;
 }
 
@@ -94,7 +97,31 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
       return;
     }
 
+    // B1/C7: throttle failed logins per client IP. A token is consumed per
+    // attempt and the bucket is cleared on success, so only failures count
+    // against the limit. With TRUST_PROXY set, req.ip comes from X-Forwarded-For.
+    const clientIp = req.ip ?? "unknown";
+    if (deps.loginLimiter != null && !deps.loginLimiter.tryTake(clientIp)) {
+      await deps.audit.record({
+        action: "auth_failed",
+        keyId: null,
+        userId: null,
+        role: null,
+        upstreamId: null,
+        toolName: null,
+        qualifiedName: null,
+        outcome: "denied",
+        durationMs: now() - startedAt,
+        errorCode: "rate_limited",
+      });
+      res.status(429).json({ error: "too_many_attempts" });
+      return;
+    }
+
     const result = await verifyApiKey(deps.authRepo, deps.pepper, key);
+    if (result.kind === "ok") {
+      deps.loginLimiter?.reset(clientIp);
+    }
     if (result.kind === "db_error") {
       deps.logger.error("login_lookup_failed", { error: String(result.error) });
       res.status(503).json({ error: "service_unavailable" });

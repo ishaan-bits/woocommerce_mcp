@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import express from "express";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -13,6 +14,7 @@ import type { AuditRepository } from "./db/audit-repository.ts";
 import type { AuthRepository } from "./db/auth-repository.ts";
 import type { SessionRepository } from "./db/session-repository.ts";
 import type { UpstreamStateRepository } from "./db/upstream-state-repository.ts";
+import { createTokenBucketLimiter, type TokenBucketLimiter } from "./limits.ts";
 import type { Logger } from "./logger.ts";
 import { createGatewayMcpServer, PERMISSION_DENIED } from "./mcp-server.ts";
 import type { UpstreamRegistry } from "./upstream-registry.ts";
@@ -64,12 +66,47 @@ export function createApp(options: CreateAppOptions): McpApp {
   const sweepIntervalMs = options.sweepIntervalMs ?? Math.max(1_000, Math.floor(sessionIdleMs / 3));
   const now = options.now ?? Date.now;
 
-  const app = createMcpExpressApp({
-    host: config.host,
-    allowedHosts: undefined,
-  });
+  // C7: bound request body size. The SDK app mounts express.json() with its
+  // own defaults (100kb) at creation time; we temporarily wrap express.json so
+  // that parser is created with our configured limit instead.
+  const originalJson = express.json.bind(express);
+  express.json = ((opts?: Parameters<typeof originalJson>[0]) =>
+    originalJson({ ...opts, limit: config.jsonBodyLimit })) as typeof express.json;
+  let app: Express;
+  try {
+    app = createMcpExpressApp({
+      host: config.host,
+      allowedHosts: undefined,
+    });
+  } finally {
+    express.json = originalJson;
+  }
+
+  // Client IPs for the login throttle: only trust a proxy when configured
+  // (the Helm chart sets TRUST_PROXY=1 behind the dashboard's nginx).
+  if (config.trustProxy > 0) {
+    app.set("trust proxy", config.trustProxy);
+  }
 
   const audit = createAuditWriter(auditRepo, logger);
+
+  // C7: per-key tool-call throttle; null disables (RATE_LIMIT_CALLS_PER_MINUTE=0).
+  const toolCallRateLimiter: TokenBucketLimiter | null =
+    config.rateLimitPerMinute > 0
+      ? createTokenBucketLimiter({
+          capacity: config.rateLimitBurst,
+          refillPerMinute: config.rateLimitPerMinute,
+        })
+      : null;
+
+  // C7/B1: failed-logins-per-IP throttle; null disables (LOGIN_MAX_FAILURES_PER_IP=0).
+  const loginRateLimiter: TokenBucketLimiter | null =
+    config.loginMaxFailuresPerIp > 0
+      ? createTokenBucketLimiter({
+          capacity: config.loginMaxFailuresPerIp,
+          refillPerMinute: (60_000 / config.loginFailureWindowMs) * config.loginMaxFailuresPerIp,
+        })
+      : null;
 
   // Boundary B2: every request except the operational probes needs a valid,
   // unrevoked credential — a Bearer key, or (for /api only) the dashboard
@@ -97,6 +134,7 @@ export function createApp(options: CreateAppOptions): McpApp {
       registry,
       logger,
       pepper: config.apiKeyPepper,
+      loginLimiter: loginRateLimiter,
       now,
     }),
   );
@@ -201,6 +239,7 @@ export function createApp(options: CreateAppOptions): McpApp {
           audit,
           principal,
           authorize: authorizeToolCall.bind(null, principal),
+          rateLimiter: toolCallRateLimiter,
         });
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
@@ -308,6 +347,10 @@ export function createApp(options: CreateAppOptions): McpApp {
     const status = (error as { status?: number }).status;
     if (type === "entity.parse.failed") {
       jsonRpcError(res, 400, -32700, "Parse error: request body is not valid JSON");
+      return;
+    }
+    if (type === "entity.too.large" || status === 413) {
+      jsonRpcError(res, 413, -32600, "Request body too large");
       return;
     }
     if (typeof status === "number" && status >= 400 && status < 500) {

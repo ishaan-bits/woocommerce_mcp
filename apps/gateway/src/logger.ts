@@ -27,6 +27,9 @@ const LEVEL_WEIGHT: Record<LogLevel, number> = {
 };
 
 const CREDENTIAL_PATTERNS: RegExp[] = [
+  /postgres(?:ql)?:\/\/[^\s"']+/g,
+  /urumi_session=[A-Za-z0-9._~+/=-]+/g,
+  /"authorization":\s*"[^"]*"/g,
   /ck_[A-Za-z0-9]+/g,
   /cs_[A-Za-z0-9]+/g,
   /sk_[A-Za-z0-9]+/g,

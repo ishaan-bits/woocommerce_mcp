@@ -7,9 +7,10 @@ never speaks MCP itself, never executes tools, and never holds credentials.
 ## Quick start
 
 ```bash
-# terminal 1 — the gateway (needs DATABASE_URL + at least one *_MCP_URL)
+# terminal 1 — the gateway (needs DATABASE_URL + at least one *_MCP_URL;
+# UPSTREAM_ALLOWED_PRIVATE_HOSTS is the C4 SSRF allow-list — required for loopback)
 cd apps/gateway
-DATABASE_URL=postgresql://... API_KEY_PEPPER=... WOOCOMMERCE_MCP_URL=http://127.0.0.1:8081/mcp npm run dev
+DATABASE_URL=postgresql://... API_KEY_PEPPER=... WOOCOMMERCE_MCP_URL=http://127.0.0.1:8081/mcp UPSTREAM_ALLOWED_PRIVATE_HOSTS=127.0.0.1 npm run dev
 
 # terminal 2 — the dashboard dev server (proxies /api to the gateway)
 cd apps/dashboard
