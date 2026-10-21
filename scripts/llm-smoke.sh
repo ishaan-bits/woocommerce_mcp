@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Milestone 9 — OPT-IN live LLM smoke test (D29). Never part of check.sh.
 #
-# Skips cleanly (exit 0) when GROQ_API_KEY is unset — the automated suite
-# never needs a provider. When run for real it sends ONE chat request through
-# a deployed gateway and checks the HTTP shape only. Free-tier rate limits
-# apply; see README "Free-tier limitations".
+# Skips cleanly (exit 0) when the gateway URL or an API key for it is unset —
+# the automated suite never needs a provider. When run for real it sends ONE
+# chat request through a deployed gateway and checks the HTTP shape only.
+# Free-tier rate limits apply; see README "Free-tier limitations".
+#
+# The Groq key itself is held by the GATEWAY (env var or Kubernetes Secret) —
+# it is never needed, read, or printed here. GROQ_API_KEY is accepted as an
+# optional no-op for older invocations; presence of the provider key is
+# verified server-side by the 200/503 result.
 #
 # Usage:
-#   GROQ_API_KEY=gsk_... GATEWAY_URL=http://127.0.0.1:8080 \
-#   GATEWAY_API_KEY=umk_... bash scripts/llm-smoke.sh
+#   GATEWAY_URL=http://127.0.0.1:8080 GATEWAY_API_KEY=umk_... \
+#     bash scripts/llm-smoke.sh
 set -euo pipefail
 
-if [ -z "${GROQ_API_KEY:-}" ]; then
-  echo "SKIPPED: GROQ_API_KEY is not set - no live provider call performed."
-  exit 0
-fi
 if [ -z "${GATEWAY_URL:-}" ]; then
   echo "SKIPPED: GATEWAY_URL is not set (e.g. http://127.0.0.1:8080 via port-forward)." >&2
   exit 0

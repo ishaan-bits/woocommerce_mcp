@@ -232,6 +232,13 @@ kubectl -n urumi rollout status deploy/gateway
 kubectl -n urumi exec deploy/gateway -c gateway -- \
   node -e "console.log('GROQ_API_KEY present:', !!process.env.GROQ_API_KEY)"
 # -> GROQ_API_KEY present: true
+
+# 5) Same style of non-printing sanity check on the value's SHAPE. A pasted
+#    placeholder or a quoted/wrapped paste fails here (and only here) instead
+#    of as a provider 401 later:
+kubectl -n urumi exec deploy/gateway -c gateway -- \
+  node -e 'const k=process.env.GROQ_API_KEY||""; console.log("gsk_ prefix:", k.startsWith("gsk_"), "| single token:", !/\s/.test(k))'
+# -> gsk_ prefix: true | single token: true
 ```
 
 Then exercise a real call (this hits Groq's free tier; rate limits apply):
@@ -257,8 +264,11 @@ kubectl -n urumi rollout restart deploy/gateway
 Production behaves identically: add `GROQ_API_KEY` to the operator-created
 `secrets.existingSecret` (e.g. `urumi-gateway-secrets`) with your secret
 manager of choice (external-secrets, SOPS, `kubectl create secret` from a
-file outside the repo). `scripts/llm-smoke.sh` is the same live check for a
-non-Kubernetes gateway and stays opt-in (`GROQ_API_KEY` unset = clean skip).
+file outside the repo). `scripts/llm-smoke.sh` is the same live check — run
+it against a reachable gateway as
+`GATEWAY_URL=… GATEWAY_API_KEY=… bash scripts/llm-smoke.sh`; it is opt-in
+and never part of `scripts/check.sh` (unset URL or gateway key = clean skip).
+The Groq key itself is never an input to that script: the gateway holds it.
 
 ## Access
 
@@ -300,6 +310,27 @@ Performed on kind `urumi-local` with `values-local.yaml`:
 | Internal exposure | `kubectl -n urumi get svc` | only `gateway`/`dashboard` are NodePort; the rest ClusterIP |
 | Log hygiene | `kubectl logs` all containers scanned for the live secret values and key material | no matches in 374 lines |
 | Disk impact | `df` before/after image import | host free 62 Gi → 60 Gi; kind node 4.6 G used / 42 G free |
+
+### Chat-agent verification (Milestone 9 live, 2026-10-22)
+
+Performed on the same cluster after the `GROQ_API_KEY` wiring (commit `0f263d5`):
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Key presence (boolean) | `node -e "console.log(!!process.env.GROQ_API_KEY)"` in the gateway container | `true`; model `llama-3.3-70b-versatile`, base `https://api.groq.com`, timeout `45000` |
+| Non-sensitive config | `kubectl get configmap gateway-config` | `GROQ_MODEL` / `LLM_REQUEST_TIMEOUT_MS` present; **no** `GROQ_API_KEY` key |
+| Agent disabled state (pre-key, prior session) | unauthenticated + authenticated `POST /api/chat` with no key | `401` without auth; `503 agent_not_configured` with auth — C6 `auth_failed` rows written |
+| Auth intact (post-key) | unauthenticated `POST /api/chat` | `401 unauthorized`; audit `auth_failed, errorCode=missing_credentials` |
+| Provider rejection mapping | `scripts/llm-smoke.sh` → `POST /api/chat` | **live call FAILED**: gateway `502 provider_error`, server log `chat_provider_failed kind=rejected status=401` — Groq rejected the credential |
+| Root cause (shape check, no value printed) | in-pod boolean/shape probe | stored value is 44 chars with **7 internal spaces, 2 quotes, no `gsk_` prefix** → not a Groq key (malformed/placeholder material in the Secret) |
+| MCP tool call via chat | — | **not performed**: depends on a successful model response; the path is covered by mocked tests (`test/agent/agent.test.ts`, `test/chat-api.test.ts`) |
+| Dashboard chat UI | `http://127.0.0.1:8088` via port-forward | serves; unauthenticated API calls correctly rejected |
+
+**Required operator action (once):** replace the Secret value with a real Groq
+key using the `read -rsp` + `jq --patch-file` command in "Enabling the chat
+agent" above, then `kubectl -n urumi rollout restart deploy/gateway` and rerun
+`GATEWAY_URL=http://127.0.0.1:8080 GATEWAY_API_KEY=<gateway key> bash scripts/llm-smoke.sh`.
+The key never enters this repository, chat, or logs.
 
 **Not performed** (honest gaps): TLS and real DNS (no certificate and no
 public host exists); Ingress routing (Kind has no ingress controller — the

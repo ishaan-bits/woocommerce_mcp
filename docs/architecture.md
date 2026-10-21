@@ -623,7 +623,8 @@ the complete validation log are in [infra/docker/README.md](../infra/docker/READ
 - Kubernetes manifests and Helm charts (`infra/helm` contains an explanatory README
   only; `infra/docker` now holds the five built images' Dockerfiles).
 - A real WooCommerce store's credentials; the chat agent's live-provider smoke test
-  (`scripts/llm-smoke.sh`) requires an operator-supplied `GROQ_API_KEY` and is opt-in.
+  (`scripts/llm-smoke.sh`) needs a reachable gateway holding a valid `GROQ_API_KEY`
+  (env or Kubernetes Secret — never the script's own environment) and is opt-in.
 
 Nothing in this repository should be described as "working" unless a check in
 `scripts/check.sh` proves it.

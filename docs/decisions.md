@@ -766,7 +766,9 @@ tier** as the default. Local models must stay possible for contributors without 
   `rejected`/`malformed`) → HTTP 429/504/502 with generic messages; provider bodies are
   never echoed to clients (L4). No automatic retries — free-tier limits would amplify them.
 - The live-provider smoke test is the opt-in `scripts/llm-smoke.sh` (skips cleanly with
-  exit 0 when `GROQ_API_KEY` is unset); it is deliberately **not** part of
+  exit 0 when the target gateway URL or its API key is unset; the Groq key is the
+  *gateway's* input — env var or Kubernetes Secret — and is never read or printed by the
+  script); it is deliberately **not** part of
   `scripts/check.sh`, so the automated suite never depends on a third party.
 
 **Trade-offs.** Chat-completions (not responses/streaming) keeps the client tiny and the
