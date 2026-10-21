@@ -421,6 +421,10 @@ Key points for the interview:
   gateway-computed so a failed call can never be relabelled as a success.
 - Missing provider config is a first-class state: the gateway boots without any LLM env,
   everything else works, and `POST /api/chat` answers `503 agent_not_configured`.
+  In Kubernetes the key is an **optional** `GROQ_API_KEY` key in the release Secret
+  (`optional: true` `secretKeyRef` on the gateway Deployment) — never a Helm value, never
+  in the ConfigMap; adding or removing it is a Secret patch plus a rollout restart
+  (infra/helm/README.md "Enabling the chat agent").
 
 ---
 

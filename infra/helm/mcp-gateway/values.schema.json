@@ -26,6 +26,15 @@
         "loginMaxFailuresPerIp": { "type": "integer", "minimum": 0, "maximum": 1000 },
         "loginFailureWindowMs": { "type": "integer", "minimum": 1000 },
         "trustProxy": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "llm": {
+          "type": "object",
+          "properties": {
+            "model": { "type": "string", "minLength": 1 },
+            "baseUrl": { "type": "string" },
+            "requestTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 120000 }
+          },
+          "required": ["model", "baseUrl", "requestTimeoutMs"]
+        },
         "migrate": {
           "type": "object",
           "properties": {

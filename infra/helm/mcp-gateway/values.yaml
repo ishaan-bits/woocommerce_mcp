@@ -37,6 +37,16 @@ gateway:
   # Trusted proxy hops for client-IP extraction (login throttle): 1 = the
   # dashboard's nginx; values-prod overrides to 2 when the Ingress sits first.
   trustProxy: 1
+  # --- Milestone 9 chat agent (D29) -------------------------------------------
+  # Non-sensitive LLM settings rendered into the gateway ConfigMap. The
+  # provider key is NOT a chart value: it is the optional `GROQ_API_KEY` key
+  # in the Secret (see the `secrets` block below). Without that key the agent
+  # is disabled and POST /api/chat answers 503 agent_not_configured — the
+  # gateway boots and every other feature works.
+  llm:
+    model: "llama-3.3-70b-versatile"   # Groq free-tier default (README, D29)
+    baseUrl: ""                        # "" = provider default (api.groq.com)
+    requestTimeoutMs: 45000
   # The init container runs `node dist/db/migrate.js` until PostgreSQL accepts
   # connections; migrations are tracked in schema_migrations and re-runs skip.
   migrate:
@@ -164,6 +174,11 @@ mockStore:
 # Required keys: POSTGRES_PASSWORD, MCP_APP_DB_PASSWORD, MIGRATE_DATABASE_URL,
 # DATABASE_URL, API_KEY_PEPPER, WOOCOMMERCE_CONSUMER_KEY,
 # WOOCOMMERCE_CONSUMER_SECRET.
+# Optional keys: GROQ_API_KEY (Milestone 9 chat agent; the gateway reads it
+# with optional: true, so a Secret without this key boots the same gateway
+# with the agent disabled). Real key material is never a chart value — see
+# infra/helm/README.md "Enabling the chat agent" for the safe add/rotate
+# commands.
 secrets:
   create: false
   existingSecret: ""

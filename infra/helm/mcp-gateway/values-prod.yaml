@@ -3,8 +3,10 @@
 # This file deliberately contains NO credentials. An operator must:
 #   1. push the five urumi images (immutable tags, e.g. 0.1.0) to their
 #      registry and replace registry.example.com below,
-#   2. create the Secret named in secrets.existingSecret with the seven keys
-#      listed in values.yaml (kubectl create secret generic …),
+#   2. create the Secret named in secrets.existingSecret with the required
+#      keys listed in values.yaml (kubectl create secret generic …); add the
+#      optional GROQ_API_KEY key too if the chat agent should be enabled —
+#      without it the gateway boots identically and /api/chat answers 503,
 #   3. set ingress.host to a real hostname and, for TLS, supply a certificate
 #      before enabling ingress.tls,
 #   4. confirm the cluster's default StorageClass (or set

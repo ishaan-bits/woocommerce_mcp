@@ -261,6 +261,15 @@ describe("gateway configuration (Milestone 9 chat agent)", () => {
     assert.equal(config.llm?.requestTimeoutMs, 45_000);
   });
 
+  test("blank or whitespace GROQ_API_KEY (optional Secret key absent/empty) keeps the agent disabled", () => {
+    // Mirrors the Kubernetes optional secretKeyRef: an unset env var, an empty
+    // value, or pure whitespace must all behave as 'no provider configured'.
+    for (const value of ["", "   ", "\t"]) {
+      const config = loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL, GROQ_API_KEY: value });
+      assert.equal(config.llm, null, `GROQ_API_KEY=${JSON.stringify(value)} must leave the agent disabled`);
+    }
+  });
+
   test("LLM_BASE_URL selects a local provider without any key", () => {
     const config = loadConfig({
       ...REQUIRED_ENV,

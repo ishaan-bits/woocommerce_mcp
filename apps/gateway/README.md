@@ -119,6 +119,10 @@ deleted before the cookie is cleared).
 | `UPSTREAM_MAX_CONCURRENT_CALLS` | `8` | **C7**: concurrent `tools/call`s per upstream; waiters get `busy` after the queue budget |
 | `JSON_BODY_LIMIT` | `100kb` | **C7**: max JSON request body (express limit syntax); oversized bodies get 413 |
 | `TRUST_PROXY` | `0` | trusted proxy hops for client-IP extraction (login throttle); set `1` behind the dashboard's nginx |
+| `GROQ_API_KEY` | unset | **optional** Milestone 9 chat-agent provider key (Groq free tier, D29). Server-side only: never logged, never returned, never in the dashboard bundle. Unset/blank = agent disabled, `POST /api/chat` answers `503 agent_not_configured`. In Kubernetes it is an optional key in the release Secret — see [infra/helm/README.md](../../infra/helm/README.md) |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | chat-agent model name (Groq free-tier default; override if Groq retires the model) |
+| `LLM_BASE_URL` | `https://api.groq.com/openai/v1` | OpenAI-compatible endpoint; set to a local server (e.g. `http://127.0.0.1:11434/v1` for Ollama) to use a local model with no key |
+| `LLM_REQUEST_TIMEOUT_MS` | `45000` | per provider-call budget (1000–120000); timeouts map to HTTP 504 `provider_timeout` |
 
 At least one `*_MCP_URL` is required. Invalid configuration fails fast with one issue per
 problem, naming the variable. See [.env.example](../../.env.example).

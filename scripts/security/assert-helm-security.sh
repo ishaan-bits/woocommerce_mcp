@@ -10,6 +10,8 @@
 #   4. the production render contains a credential-looking literal
 #      (local values intentionally carry `local-dev-only-…` placeholders)
 #   5. the gateway loses its SSRF allow-list or its pod-level security context
+#   6. the chat-agent key (GROQ_API_KEY) is not optional-secret-sourced, or
+#      any render contains a literal Groq-looking key (Milestone 9 / D29/L4)
 #
 # Usage: scripts/security/assert-helm-security.sh   (from the repo root)
 set -euo pipefail
@@ -69,7 +71,7 @@ if grep -q "^kind: Secret$" "$WORKDIR/prod.yaml"; then
 fi
 
 echo "==> 4. production render contains no credential-looking literals"
-if grep -nE "local-dev-only-|umk_[A-Za-z0-9_-]{10,}|ck_[A-Za-z0-9]{10,}|cs_[A-Za-z0-9]{10,}" "$WORKDIR/prod.yaml"; then
+if grep -nE "local-dev-only-|umk_[A-Za-z0-9_-]{10,}|ck_[A-Za-z0-9]{10,}|cs_[A-Za-z0-9]{10,}|gsk_[A-Za-z0-9]{10,}" "$WORKDIR/prod.yaml"; then
   fail "prod render contains credential-looking material"
 fi
 
@@ -78,6 +80,32 @@ for render in local prod; do
   grep -q 'UPSTREAM_ALLOWED_PRIVATE_HOSTS: "woocommerce-mcp,inventory-mcp,support-mcp"' \
     "$WORKDIR/$render.yaml" || fail "$render render: gateway SSRF allow-list missing or unexpected"
   grep -q 'runAsNonRoot: true' "$WORKDIR/$render.yaml" || fail "$render render: runAsNonRoot missing"
+done
+
+echo "==> 6. chat-agent key wiring stays optional and secret-sourced (M9 / D29 / L4)"
+# local render: the chart-created Secret is <release>-secrets; prod points at
+# the operator-supplied existingSecret. Either way the key must arrive as an
+# OPTIONAL secretKeyRef — never a literal, never a ConfigMap value.
+for render in local prod; do
+  grep -qE 'gsk_[A-Za-z0-9]{10,}' "$WORKDIR/$render.yaml" \
+    && fail "$render render contains a credential-looking GROQ key literal"
+  ref=$(grep -A6 'name: GROQ_API_KEY' "$WORKDIR/$render.yaml" || true)
+  [ -n "$ref" ] || fail "$render render: gateway lost its GROQ_API_KEY env entry"
+  echo "$ref" | grep -q 'optional: true' \
+    || fail "$render render: GROQ_API_KEY secretKeyRef must be optional: true"
+  echo "$ref" | grep -q 'secretKeyRef:' \
+    || fail "$render render: GROQ_API_KEY must come from a secretKeyRef"
+  echo "$ref" | grep -q 'key: GROQ_API_KEY' \
+    || fail "$render render: GROQ_API_KEY must read the GROQ_API_KEY secret key"
+  grep -q 'GROQ_MODEL: "llama-3.3-70b-versatile"' "$WORKDIR/$render.yaml" \
+    || fail "$render render: GROQ_MODEL missing from gateway ConfigMap"
+  grep -q 'LLM_REQUEST_TIMEOUT_MS: "45000"' "$WORKDIR/$render.yaml" \
+    || fail "$render render: LLM_REQUEST_TIMEOUT_MS missing from gateway ConfigMap"
+  if echo "$ref" | grep -q 'GROQ_API_KEY' && grep -q '^kind: ConfigMap' "$WORKDIR/$render.yaml"; then
+    # The ConfigMap must never carry the key itself.
+    awk '/^kind: ConfigMap$/,/^---$/' "$WORKDIR/$render.yaml" | grep -q 'GROQ_API_KEY:' \
+      && fail "$render render: GROQ_API_KEY leaked into the gateway ConfigMap"
+  fi
 done
 
 echo "ASSERT OK: helm security assertions passed (local + prod renders)"

@@ -49,7 +49,7 @@ documenting every operator-supplied production input).**
 | Docker images | ✅ five multi-stage images (`urumi/<name>:0.1.0`: gateway, three MCP servers, dashboard), non-root, runtime-config only, built and container-tested — see [infra/docker/README.md](./infra/docker/README.md) |
 | Kubernetes / Helm | ✅ one chart (`infra/helm/mcp-gateway`) with `values-local.yaml` + `values-prod.yaml`, installed and e2e-validated on kind `urumi-local` (7 workloads, PVC-backed PostgreSQL, chart/external secrets, port-forward access) — see [infra/helm/README.md](./infra/helm/README.md) |
 | PostgreSQL schema, API keys, audit log | ✅ migrations (001–002), two seeded users, hashed revocable keys, append-only audit incl. upstream-toggle rows, session + override tables (`npm run migrate`; integration-tested against PostgreSQL 17) |
-| LLM / chat agent | ✅ `POST /api/chat` agent loop: Groq (free tier) or local OpenAI-compatible server via `LLM_BASE_URL`; tools from the gateway registry, executed through the shared authz/audit pipeline; disabled cleanly (503) with no key — see [docs/decisions.md D29/D30](./docs/decisions.md) |
+| LLM / chat agent | ✅ `POST /api/chat` agent loop: Groq (free tier) or local OpenAI-compatible server via `LLM_BASE_URL`; tools from the gateway registry, executed through the shared authz/audit pipeline; disabled cleanly (503) with no key — see [docs/decisions.md D29/D30](./docs/decisions.md). In Kubernetes the key is an optional `GROQ_API_KEY` in the release Secret ([infra/helm/README.md](./infra/helm/README.md) "Enabling the chat agent") |
 
 No feature should be described as working unless `npm run check` proves it. Files in this repo
 are deliberately honest: empty workspaces have **no placeholder endpoints** that could be

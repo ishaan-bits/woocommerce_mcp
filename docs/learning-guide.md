@@ -309,7 +309,10 @@ against the running cluster.
 **Checkpoint:** ask a question in the dashboard, watch an audited tool call appear, get a
 grounded answer with gateway-computed tool chips; then revoke the calling key and watch
 every subsequent call fail closed (`denied`, one audit row per attempt). With no provider
-configured, confirm the banner path (503) instead.
+configured, confirm the banner path (503) instead. On Kubernetes the provider key is an
+optional `GROQ_API_KEY` key in the release Secret (`infra/helm/README.md` "Enabling the
+chat agent") — patch the Secret, restart the gateway, and confirm the key's *presence*
+without ever printing it.
 
 **Recruiter questions**
 - Who validates the arguments the model produced?

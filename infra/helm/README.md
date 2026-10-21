@@ -158,7 +158,10 @@ The chart reads one Secret (name: `<release>-secrets`, or
 `secrets.existingSecret`). Required keys: `POSTGRES_PASSWORD`,
 `MCP_APP_DB_PASSWORD`, `MIGRATE_DATABASE_URL`, `DATABASE_URL`,
 `API_KEY_PEPPER`, `WOOCOMMERCE_CONSUMER_KEY`, `WOOCOMMERCE_CONSUMER_SECRET`.
-Local values create it with obvious `local-dev-only-…` placeholders. In
+Optional key: `GROQ_API_KEY` (the Milestone 9 chat agent; the gateway mounts it
+with `optional: true`, so a Secret without this key boots the identical gateway
+with the agent disabled). Local values create it with obvious
+`local-dev-only-…` placeholders. In
 production the chart does **not** render a Secret — the operator creates one:
 
 ```bash
@@ -195,6 +198,67 @@ The seeded users' grants are the C5 contract: `admin-demo` (role `admin`) may
 call the WooCommerce tools; `reader-demo` (role `reader`) may only call the
 three read tools on the WooCommerce upstream. Role ceilings, upstream grants
 and tool grants all apply — there is no admin bypass.
+
+## Enabling the chat agent (optional Groq key)
+
+The chat agent (Milestone 9, D29) is off until a provider key exists. The key
+is **never** a chart value and never typed into chat, files in this repo, or
+command output: it is added to the same Secret as an optional `GROQ_API_KEY`
+key, and the gateway reads it via an `optional: true` `secretKeyRef`. Without
+it the gateway boots normally and `POST /api/chat` answers
+`503 agent_not_configured`.
+
+Local kind cluster (release `urumi`, namespace `urumi`, Secret
+`urumi-secrets`):
+
+```bash
+# 1) Put the key in an environment variable yourself (never commit it, never
+#    paste it into a chat). read -s keeps it off screen and out of shell history:
+read -rsp "Groq API key: " GROQ_KEY && echo
+
+# 2) Merge it into the existing Secret without touching the other keys. The
+#    value travels through a process substitution, so it never appears in the
+#    kubectl argv (no `ps` exposure) and no file on disk holds it:
+kubectl -n urumi patch secret urumi-secrets --type merge \
+  --patch-file <(jq -n --arg v "$GROQ_KEY" '{stringData: {GROQ_API_KEY: $v}}')
+unset GROQ_KEY   # drop it from this shell
+
+# 3) Restart the gateway so the new env var is picked up (Secret values are
+#    resolved at pod start, not hot-reloaded):
+kubectl -n urumi rollout restart deploy/gateway
+kubectl -n urumi rollout status deploy/gateway
+
+# 4) Verify the wiring WITHOUT printing the key — presence only:
+kubectl -n urumi exec deploy/gateway -c gateway -- \
+  node -e "console.log('GROQ_API_KEY present:', !!process.env.GROQ_API_KEY)"
+# -> GROQ_API_KEY present: true
+```
+
+Then exercise a real call (this hits Groq's free tier; rate limits apply):
+
+```bash
+kubectl -n urumi port-forward svc/gateway 18080:8080 &
+# log in with a seeded key (see the bootstrap section above), then:
+curl -sS -c /tmp/urumi.cookies -X POST http://127.0.0.1:18080/api/auth/login \
+  -H 'content-type: application/json' -d '{"key":"<your umk_… key>"}'
+curl -sS -b /tmp/urumi.cookies -X POST http://127.0.0.1:18080/api/chat \
+  -H 'content-type: application/json' \
+  -d '{"message":"Reply with exactly: smoke-ok","history":[]}'
+```
+
+To remove the key again (agent returns to disabled):
+
+```bash
+kubectl -n urumi patch secret urumi-secrets --type json \
+  -p '[{"op": "remove", "path": "/stringData/GROQ_API_KEY"}]'
+kubectl -n urumi rollout restart deploy/gateway
+```
+
+Production behaves identically: add `GROQ_API_KEY` to the operator-created
+`secrets.existingSecret` (e.g. `urumi-gateway-secrets`) with your secret
+manager of choice (external-secrets, SOPS, `kubectl create secret` from a
+file outside the repo). `scripts/llm-smoke.sh` is the same live check for a
+non-Kubernetes gateway and stays opt-in (`GROQ_API_KEY` unset = clean skip).
 
 ## Access
 
@@ -264,7 +328,7 @@ Service).
 | Images | local tags `urumi/*:0.1.0` via `kind`/`ctr` import | operator registry, immutable `0.1.0` tags (schema rejects `latest`) |
 | Replicas | 1 everywhere | gateway 2, dashboard 2, MCP servers 1, postgres 1 |
 | Resources | tiny (fits a 4-CPU / 6-GiB Mac) | larger requests/limits |
-| Secrets | chart-created, `local-dev-only-…` placeholders | `secrets.create=false`; operator creates `existingSecret` |
+| Secrets | chart-created, `local-dev-only-…` placeholders | `secrets.create=false`; operator creates `existingSecret` (add optional `GROQ_API_KEY` to enable the chat agent) |
 | Store | in-cluster labelled mock (`mockStore.enabled=true`) | mock off; `woocommerceMcp.storeUrl` = real store + creds from the Secret |
 | Dashboard `/api` | pod nginx proxies to `http://gateway:8080` | `gatewayUpstream: ""` — Ingress owns `/api` |
 | Access | NodePorts + port-forward | Ingress (`/mcp` + `/api` → gateway, `/` → dashboard), TLS left **off** until a real certificate is supplied |
