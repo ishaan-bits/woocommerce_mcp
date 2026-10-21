@@ -145,9 +145,12 @@ Also not present: a WooCommerce store. Milestone 1 shipped against a **mock** Wo
 API (no store, Docker or network needed); verifying against a real store — a free local
 container or trial store — remains an open follow-up.
 
-**Environment status (updated 2026-10-21):** Docker (via Colima), kubectl, kind and Helm are
+**Environment status (updated 2026-10-22):** Docker (via Colima), kubectl, kind and Helm are
 installed, the kind cluster `urumi-local` is running, and the Helm chart is deployed there
 (release `urumi`, namespace `urumi` — see [infra/helm/README.md](./infra/helm/README.md)).
+The Milestone 9 chat agent is live end-to-end verified there on the Groq free tier
+(smoke HTTP 200 + a model → tool → model round-trip with an audit row, provider model
+`openai/gpt-oss-120b`).
 `npm run check` still runs **no container/Kubernetes check** by design: the application
 milestones are validated by Node/TypeScript tests, and deployment validation is the chart's
 own documented procedure (`helm lint`/`template` + the cluster walkthrough).

@@ -326,11 +326,47 @@ Performed on the same cluster after the `GROQ_API_KEY` wiring (commit `0f263d5`)
 | MCP tool call via chat | — | **not performed**: depends on a successful model response; the path is covered by mocked tests (`test/agent/agent.test.ts`, `test/chat-api.test.ts`) |
 | Dashboard chat UI | `http://127.0.0.1:8088` via port-forward | serves; unauthenticated API calls correctly rejected |
 
-**Required operator action (once):** replace the Secret value with a real Groq
-key using the `read -rsp` + `jq --patch-file` command in "Enabling the chat
-agent" above, then `kubectl -n urumi rollout restart deploy/gateway` and rerun
-`GATEWAY_URL=http://127.0.0.1:8080 GATEWAY_API_KEY=<gateway key> bash scripts/llm-smoke.sh`.
-The key never enters this repository, chat, or logs.
+**Operator action (completed 2026-10-22):** the Secret was re-patched with a
+valid Groq key by the operator using the `read -rsp` + `jq --patch-file`
+command in "Enabling the chat agent" above (shape probed as booleans only —
+prefix/single-token/length), followed by a rollout restart and the smoke rerun.
+The key never entered this repository, chat, or logs.
+
+### Chat-agent verification — end-to-end PASS (2026-10-22, follow-up)
+
+The FAILED row above was resolved in three steps on the same cluster; every
+check stayed sanitized (booleans, HTTP codes, log `kind`/`status`, audit safe
+fields — no key material anywhere):
+
+1. **Credential** — operator re-patched the Secret; the shape probe showed a
+   valid `gsk_` single token (booleans only) and `kind=rejected status=401`
+   disappeared.
+2. **Model** — Groq retired `llama-3.3-70b-versatile` on 2026-08-16 (free/dev
+   tiers) → HTTP **404** (`kind=unavailable status=404`). Chart default,
+   config defaults, docs and the security assertion moved to
+   `openai/gpt-oss-120b` (Helm revision 7; `GROQ_MODEL` verified live in
+   `gateway-config`).
+3. **Second-round wire shape** — after a successful tool call, Groq rejected
+   round 2 with HTTP **400**: the agent re-sent the *internal* parsed
+   tool-call shape. `OpenAiCompatProvider` now serializes the OpenAI message
+   shape (`{id, type:"function", function:{name, arguments:"<json string>"}}`
+   with the provider's id/name/arguments preserved), covered by outbound-body
+   regression tests in `apps/gateway/test/agent/agent.test.ts`.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Live smoke (opt-in, ₹0) | `GATEWAY_URL=… GATEWAY_API_KEY=… bash scripts/llm-smoke.sh` | **HTTP 200** `{"reply":"smoke-ok","tool_calls":[],"rounds":1}` → `LIVE SMOKE OK` |
+| End-to-end chat with tool | authenticated `POST /api/chat` (list store products) | **HTTP 200**, `rounds: 2`, `tool_calls:[{name: woocommerce_list_products, outcome: success}]`, reply grounded in the mock store's real product names |
+| Follow-up provider round | `chat_provider_failed` in gateway logs since deploy | **none** — Groq accepted the wire-shaped second request |
+| Audit record | `GET /api/audit?limit=3` (safe fields only) | `action=tool_call, toolName=list_products, outcome=success, durationMs=39` under the admin principal |
+| Full checks after fix | `TEST_DATABASE_URL=… bash scripts/check.sh` + `helm lint` (both values) | 397 pass / 0 fail / 0 skipped; helm security assertions 6/6; `npm audit` 0 vulnerabilities; lint OK |
+
+**Remaining limitations:** one provider (Groq free tier) with no automatic
+fallback — provider failures still surface as `502 provider_error` (`504` on
+timeout); tool rounds are capped at 4 per chat request; the dashboard chat UI
+was not manually re-verified in this pass (route and agent are covered by
+tests); free-tier rate limits apply — `scripts/llm-smoke.sh` stays opt-in and
+is never part of `check.sh`.
 
 **Not performed** (honest gaps): TLS and real DNS (no certificate and no
 public host exists); Ingress routing (Kind has no ingress controller — the

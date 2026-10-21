@@ -109,6 +109,63 @@ describe("OpenAiCompatProvider", () => {
     assert.equal(argumentsWereMalformed(response.toolCalls[0]!), true);
   });
 
+  test("serializes assistant tool_calls back in the OpenAI wire shape (live Groq round-2 HTTP 400 regression)", async () => {
+    const capture: { current: FetchCapture } = { current: undefined };
+    const provider = new OpenAiCompatProvider(
+      config(),
+      fakeFetch(200, { choices: [{ message: { content: "final answer" } }] }, capture),
+    );
+    await provider.complete({
+      messages: [
+        { role: "user", content: "list products" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            { id: "call_live_1", name: "woocommerce_list_products", arguments: { page: 1 }, rawArguments: '{"page":1}' },
+          ],
+        },
+        { role: "tool", content: "products: Blue Mug", tool_call_id: "call_live_1" },
+      ],
+      tools: [],
+      timeoutMs: 1_000,
+    });
+    const body = JSON.parse(String(capture.current?.init.body)) as { messages: Array<Record<string, unknown>> };
+    // Exact wire shape: nested function, stringified arguments, no internal
+    // fields (flat name / parsed object / rawArguments) — what strict providers
+    // validate on every follow-up round.
+    assert.deepEqual(body.messages, [
+      { role: "user", content: "list products" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call_live_1", type: "function", function: { name: "woocommerce_list_products", arguments: '{"page":1}' } },
+        ],
+      },
+      { role: "tool", content: "products: Blue Mug", tool_call_id: "call_live_1" },
+    ]);
+  });
+
+  test("serializes empty raw arguments as '{}' so the entry stays valid JSON", async () => {
+    const capture: { current: FetchCapture } = { current: undefined };
+    const provider = new OpenAiCompatProvider(
+      config(),
+      fakeFetch(200, { choices: [{ message: { content: "ok" } }] }, capture),
+    );
+    await provider.complete({
+      messages: [
+        { role: "assistant", content: "", tool_calls: [{ id: "c0", name: "a_tool", arguments: {}, rawArguments: "" }] },
+      ],
+      tools: [],
+      timeoutMs: 1_000,
+    });
+    const body = JSON.parse(String(capture.current?.init.body)) as {
+      messages: Array<{ tool_calls?: Array<{ function: { arguments: string } }> }>;
+    };
+    assert.equal(body.messages[0]?.tool_calls?.[0]?.function.arguments, "{}");
+  });
+
   test("maps 429 to rate_limited, 401 to rejected, 5xx to unavailable", async () => {
     for (const [status, kind] of [
       [429, "rate_limited"],

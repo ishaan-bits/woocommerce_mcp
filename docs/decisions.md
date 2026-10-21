@@ -754,7 +754,8 @@ tier** as the default. Local models must stay possible for contributors without 
 - One provider implementation: `OpenAiCompatProvider` (apps/gateway/src/agent/provider.ts)
   speaks the OpenAI chat-completions shape with an injected `fetch`, so Groq works out of
   the box (`LLM_BASE_URL` defaults to `https://api.groq.com/openai/v1`, model
-  `llama-3.3-70b-versatile`) and any local OpenAI-compatible server (e.g. Ollama) works by
+  `openai/gpt-oss-120b`; the earlier default `llama-3.3-70b-versatile` was retired by
+  Groq on 2026-08-16) and any local OpenAI-compatible server (e.g. Ollama) works by
   overriding `LLM_BASE_URL` alone — no API key required for local.
 - Server-side env only: `GROQ_API_KEY`, `GROQ_MODEL`, `LLM_BASE_URL`,
   `LLM_REQUEST_TIMEOUT_MS` (45s). The key never reaches the dashboard bundle, API

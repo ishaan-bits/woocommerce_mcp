@@ -256,7 +256,7 @@ describe("gateway configuration (Milestone 9 chat agent)", () => {
     });
     assert.ok(config.llm !== null);
     assert.equal(config.llm?.baseUrl, "https://api.groq.com/openai/v1");
-    assert.equal(config.llm?.model, "llama-3.3-70b-versatile");
+    assert.equal(config.llm?.model, "openai/gpt-oss-120b");
     assert.equal(config.llm?.apiKey, "gsk_test_fake_key_config_test");
     assert.equal(config.llm?.requestTimeoutMs, 45_000);
   });
@@ -309,7 +309,7 @@ describe("gateway configuration (Milestone 9 chat agent)", () => {
     const summary = safeConfigSummary(config);
     assert.equal(summary.llm.configured, true);
     assert.equal(summary.llm.key_present, true);
-    assert.equal(summary.llm.model, "llama-3.3-70b-versatile");
+    assert.equal(summary.llm.model, "openai/gpt-oss-120b");
     assert.ok(!JSON.stringify(summary).includes(key));
 
     const off = safeConfigSummary(loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL }));

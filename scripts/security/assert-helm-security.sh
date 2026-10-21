@@ -97,7 +97,7 @@ for render in local prod; do
     || fail "$render render: GROQ_API_KEY must come from a secretKeyRef"
   echo "$ref" | grep -q 'key: GROQ_API_KEY' \
     || fail "$render render: GROQ_API_KEY must read the GROQ_API_KEY secret key"
-  grep -q 'GROQ_MODEL: "llama-3.3-70b-versatile"' "$WORKDIR/$render.yaml" \
+  grep -q 'GROQ_MODEL: "openai/gpt-oss-120b"' "$WORKDIR/$render.yaml" \
     || fail "$render render: GROQ_MODEL missing from gateway ConfigMap"
   grep -q 'LLM_REQUEST_TIMEOUT_MS: "45000"' "$WORKDIR/$render.yaml" \
     || fail "$render render: LLM_REQUEST_TIMEOUT_MS missing from gateway ConfigMap"

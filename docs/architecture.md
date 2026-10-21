@@ -425,6 +425,11 @@ Key points for the interview:
   (`optional: true` `secretKeyRef` on the gateway Deployment) — never a Helm value, never
   in the ConfigMap; adding or removing it is a Secret patch plus a rollout restart
   (infra/helm/README.md "Enabling the chat agent").
+- The provider adapter owns the wire format in both directions: it parses tool calls
+  out of provider responses and re-encodes them into the OpenAI message shape
+  (`{id, type:"function", function:{name, arguments}}`) on every follow-up round —
+  strict providers (Groq) reject the internal parsed shape with HTTP 400. Regression
+  tests assert the exact outbound JSON (`test/agent/agent.test.ts`).
 
 ---
 
@@ -644,7 +649,7 @@ Nothing in this repository should be described as "working" unless a check in
 | 6 | **Docker images** | ✅ done: five images built and container-tested — wrap each unit once its runtime deps are final |
 | 7 | **Kubernetes + Helm (local, then prod values)** | ✅ done: one chart, two value files, installed and e2e-validated on kind |
 | 8 | **Security hardening + threat-model review** | ✅ done: every threat-model control implemented and verified against tests + the running kind cluster (see `docs/threat-model.md` §3 for the per-control test names). |
-| 9 | **Chat agent + LLM (Groq free tier / Ollama)** | ✅ done: optional intelligence layer on top of a correct, audited gateway — same `executeToolCall` pipeline as `/mcp` (D29/D30); boots cleanly with no key. |
+| 9 | **Chat agent + LLM (Groq free tier / Ollama)** | ✅ done: optional intelligence layer on top of a correct, audited gateway — same `executeToolCall` pipeline as `/mcp` (D29/D30); boots cleanly with no key. **Live end-to-end verified 2026-10-22** on the kind cluster with the Groq free tier: model → tool → model round-trip (HTTP 200, `rounds: 2`, audit row) on `openai/gpt-oss-120b`. |
 
 Each stage ends with a reviewable demo; none of them starts before the previous one is
 explained back in your own words.

@@ -190,7 +190,7 @@ const envSchema = z.object({
   groqModel: z
     .string({ error: "GROQ_MODEL must be a non-empty model name" })
     .min(1, "GROQ_MODEL must be a non-empty model name")
-    .default("llama-3.3-70b-versatile"),
+    .default("openai/gpt-oss-120b"),
   llmBaseUrl: z
     .string()
     .refine(
@@ -289,7 +289,7 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     upstreamMaxResponseBytes: 10 * 1024 * 1024,
     jsonBodyLimit: "100kb",
     trustProxy: 0,
-    groqModel: "llama-3.3-70b-versatile",
+    groqModel: "openai/gpt-oss-120b",
     llmRequestTimeoutMs: 45_000,
     groqApiKey: undefined as string | undefined,
     llmBaseUrl: undefined as string | undefined,

@@ -108,7 +108,7 @@ export class OpenAiCompatProvider implements ChatProvider {
         headers,
         body: JSON.stringify({
           model: this.model,
-          messages: request.messages,
+          messages: request.messages.map(toWireMessage),
           tools: request.tools.map((tool) => ({
             type: "function",
             function: {
@@ -150,6 +150,33 @@ export class OpenAiCompatProvider implements ChatProvider {
 
     return parseChatCompletion(payload);
   }
+}
+
+/**
+ * Outbound message wire shape. The internal parsed tool-call (`ProviderToolCall`)
+ * must be re-encoded as the OpenAI chat-completions assistant entry —
+ * `{id, type:"function", function:{name, arguments:"<json string>"}}` — before
+ * it is sent back as conversation history. The internal shape (flat name/
+ * parsed arguments) makes strict providers reject the second round with
+ * HTTP 400. The provider's original id, function name and JSON-encoded
+ * arguments are preserved verbatim (empty arguments serialize as "{}").
+ */
+function toWireMessage(message: ProviderMessage): Record<string, unknown> {
+  if (message.tool_calls === undefined) {
+    return { ...message };
+  }
+  return {
+    role: message.role,
+    content: message.content,
+    tool_calls: message.tool_calls.map((call) => ({
+      id: call.id,
+      type: "function",
+      function: {
+        name: call.name,
+        arguments: call.rawArguments === "" ? "{}" : call.rawArguments,
+      },
+    })),
+  };
 }
 
 interface RawToolCall {

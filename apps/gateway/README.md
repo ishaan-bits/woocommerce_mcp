@@ -120,12 +120,27 @@ deleted before the cookie is cleared).
 | `JSON_BODY_LIMIT` | `100kb` | **C7**: max JSON request body (express limit syntax); oversized bodies get 413 |
 | `TRUST_PROXY` | `0` | trusted proxy hops for client-IP extraction (login throttle); set `1` behind the dashboard's nginx |
 | `GROQ_API_KEY` | unset | **optional** Milestone 9 chat-agent provider key (Groq free tier, D29). Server-side only: never logged, never returned, never in the dashboard bundle. Unset/blank = agent disabled, `POST /api/chat` answers `503 agent_not_configured`. In Kubernetes it is an optional key in the release Secret — see [infra/helm/README.md](../../infra/helm/README.md) |
-| `GROQ_MODEL` | `llama-3.3-70b-versatile` | chat-agent model name (Groq free-tier default; override if Groq retires the model) |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | chat-agent model name (Groq free-tier default; predecessor `llama-3.3-70b-versatile` was retired by Groq on 2026-08-16) |
 | `LLM_BASE_URL` | `https://api.groq.com/openai/v1` | OpenAI-compatible endpoint; set to a local server (e.g. `http://127.0.0.1:11434/v1` for Ollama) to use a local model with no key |
 | `LLM_REQUEST_TIMEOUT_MS` | `45000` | per provider-call budget (1000–120000); timeouts map to HTTP 504 `provider_timeout` |
 
 At least one `*_MCP_URL` is required. Invalid configuration fails fast with one issue per
 problem, naming the variable. See [.env.example](../../.env.example).
+
+### Chat agent — live-verified behavior (2026-10-22)
+
+- End-to-end on the kind cluster with the Groq free tier: one authenticated
+  `POST /api/chat` selected a tool, executed it through the shared
+  `executeToolCall` pipeline (exactly one audit row), and returned a grounded
+  reply in a second model round — HTTP 200, `rounds: 2`.
+- Every follow-up round re-sends the model's tool call in the OpenAI wire
+  shape (`{id, type:"function", function:{name, arguments:"<json>"}}`); the
+  internal parsed shape is rejected by strict providers (HTTP 400) and is
+  covered by outbound-body regression tests in `test/agent/agent.test.ts`.
+- Limitations: a single provider without fallback (provider errors surface as
+  `502`, timeouts as `504`), at most 4 tool rounds per request, the dashboard
+  chat UI is test-covered but was not manually re-verified in this pass, and
+  free-tier rate limits apply to the opt-in `scripts/llm-smoke.sh`.
 
 ## Routing and naming
 

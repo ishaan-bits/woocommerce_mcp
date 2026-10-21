@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { ApiKeyPrincipal } from "@mcp/shared";
 import { AgentInputError, createChatAgent, type ChatAgent } from "../../src/agent/agent.ts";
-import { ProviderError } from "../../src/agent/provider.ts";
+import { OpenAiCompatProvider, ProviderError } from "../../src/agent/provider.ts";
 import { createAuditWriter } from "../../src/audit.ts";
 import { createLogger } from "../../src/logger.ts";
 import { createUpstreamRegistry, type UpstreamRegistry } from "../../src/upstream-registry.ts";
@@ -568,6 +568,216 @@ describe("chat agent — provider failures and secrets", () => {
           assert.ok(!message.content.includes("127.0.0.1:"));
         }
       }
+    } finally {
+      await f.close();
+    }
+  });
+});
+
+/**
+ * Live regression (2026-10-22): with the real OpenAiCompatProvider, the
+ * second round-trip request must carry the model's tool call re-encoded in
+ * the OpenAI wire shape — Groq rejected the previous internal (flat) shape
+ * with HTTP 400 `chat_provider_failed` after a successful tool execution.
+ * These tests run the whole agent loop against an injected fetch and assert
+ * the actual JSON bodies sent to the provider: no network, no credits.
+ */
+interface CapturedBody {
+  messages: Array<Record<string, unknown>>;
+  tools: Array<{ type?: string; function?: { name?: string } }>;
+}
+
+interface WireFixture {
+  agent: ChatAgent;
+  auditRepo: FakeAuditRepository;
+  fakes: Map<string, FakeUpstream>;
+  bodies: CapturedBody[];
+  close(): Promise<void>;
+}
+
+async function wireFixture(
+  responses: Array<{ status?: number; body: unknown }>,
+): Promise<WireFixture> {
+  const fakes = new Map<string, FakeUpstream>();
+  const woocommerce = await startFakeUpstream({ name: "woocommerce-fake", tools: WOOCOMMERCE_TOOLS });
+  fakes.set("woocommerce", woocommerce);
+
+  const logger = createLogger({ level: "error", sink: { write: () => undefined } });
+  const auditRepo = new FakeAuditRepository();
+  const audit = createAuditWriter(auditRepo, logger);
+  const registry = createUpstreamRegistry({
+    configs: [
+      { id: "woocommerce", baseUrl: woocommerce.mcpUrl, enabled: true, timeoutMs: 3_000, connectTimeoutMs: 2_000 },
+    ],
+    toolCacheTtlMs: 60_000,
+    logger,
+    ssrf: { allowedPrivateHosts: ["*"] },
+  });
+
+  const bodies: CapturedBody[] = [];
+  const queue = [...responses];
+  const provider = new OpenAiCompatProvider(
+    {
+      baseUrl: "https://llm.example.test/v1",
+      apiKey: "gsk_test_fake_key_roundtrip_regression",
+      model: "test-model",
+      requestTimeoutMs: 5_000,
+    },
+    async (_url: string, init: RequestInit): Promise<Response> => {
+      bodies.push(JSON.parse(String(init.body)) as CapturedBody);
+      const next = queue.shift();
+      assert.ok(next !== undefined, "scripted HTTP response missing");
+      return new Response(JSON.stringify(next.body), {
+        status: next.status ?? 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  );
+
+  const agent = createChatAgent({ provider, registry, logger, audit });
+  return {
+    agent,
+    auditRepo,
+    fakes,
+    bodies,
+    async close() {
+      await registry.close();
+      for (const fake of fakes.values()) {
+        await fake.close();
+      }
+    },
+  };
+}
+
+describe("chat agent — second-round provider wire shape (live Groq HTTP 400 regression)", () => {
+  test("model-selected tool call executes, and round 2 sends wire-shaped tool_calls + matching tool result", async () => {
+    const f = await wireFixture([
+      {
+        body: {
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call_live_1",
+                    type: "function",
+                    function: { name: "woocommerce_list_products", arguments: '{"page":1}' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      { body: { choices: [{ message: { content: "One product: Blue Mug." } }] } },
+    ]);
+    try {
+      const result = await f.agent.run({ message: "list my products" }, ADMIN);
+      assert.equal(result.reply, "One product: Blue Mug.");
+      assert.deepEqual(result.toolCalls, [{ name: "woocommerce_list_products", outcome: "success" }]);
+      assert.equal(f.fakes.get("woocommerce")?.calls.length, 1);
+      const rows = toolRows(f.auditRepo);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]?.outcome, "success");
+
+      assert.equal(f.bodies.length, 2);
+      const round2 = f.bodies[1]!.messages;
+      const assistant = round2.find((m) => m.role === "assistant");
+      // Exact wire shape — id, name and JSON-encoded arguments preserved.
+      assert.deepEqual(assistant, {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call_live_1", type: "function", function: { name: "woocommerce_list_products", arguments: '{"page":1}' } },
+        ],
+      });
+      const toolMessage = round2.find((m) => m.role === "tool");
+      assert.equal(toolMessage?.tool_call_id, "call_live_1");
+      assert.match(String(toolMessage?.content), /Blue Mug/);
+      // Tool definitions stay wire-shaped on every round.
+      assert.equal(f.bodies[1]?.tools[0]?.type, "function");
+      assert.equal(f.bodies[1]?.tools[0]?.function?.name, "woocommerce_list_products");
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("malformed model arguments: refused without execution, round-2 request stays wire-valid", async () => {
+    const f = await wireFixture([
+      {
+        body: {
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  { id: "call_bad", type: "function", function: { name: "woocommerce_list_products", arguments: "{oops" } },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      { body: { choices: [{ message: { content: "That was not valid JSON." } }] } },
+    ]);
+    try {
+      const result = await f.agent.run({ message: "go" }, ADMIN);
+      assert.equal(result.reply, "That was not valid JSON.");
+      assert.equal(result.toolCalls[0]?.outcome, "invalid");
+      assert.equal(f.fakes.get("woocommerce")?.calls.length, 0);
+      assert.equal(toolRows(f.auditRepo).length, 0);
+
+      const round2 = f.bodies[1]!.messages;
+      const assistant = round2.find((m) => m.role === "assistant");
+      assert.deepEqual(assistant?.tool_calls, [
+        // The malformed argument string is preserved verbatim on the wire —
+        // it is the model's own output, and the call was already refused.
+        { id: "call_bad", type: "function", function: { name: "woocommerce_list_products", arguments: "{oops" } },
+      ]);
+      const toolMessage = round2.find((m) => m.role === "tool");
+      assert.equal(toolMessage?.tool_call_id, "call_bad");
+      assert.match(String(toolMessage?.content), /not valid JSON/);
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("provider failure on round 2 propagates and never fabricates a success", async () => {
+    const f = await wireFixture([
+      {
+        body: {
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  { id: "call_1", type: "function", function: { name: "woocommerce_list_products", arguments: "{}" } },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      { status: 400, body: { error: { message: "invalid_request" } } },
+    ]);
+    try {
+      await assert.rejects(
+        () => f.agent.run({ message: "list products" }, ADMIN),
+        (error: unknown) =>
+          error instanceof ProviderError && error.kind === "unavailable" && error.status === 400,
+      );
+      // The tool already executed and was audited exactly once; the failed
+      // follow-up must not produce a reply at all.
+      assert.equal(f.bodies.length, 2);
+      assert.equal(f.fakes.get("woocommerce")?.calls.length, 1);
+      const rows = toolRows(f.auditRepo);
+      assert.equal(rows.length, 1);
+      // Even when the provider rejects the round, what we SENT was valid wire shape.
+      const assistant = f.bodies[1]?.messages.find((m) => m.role === "assistant");
+      assert.deepEqual(assistant?.tool_calls, [
+        { id: "call_1", type: "function", function: { name: "woocommerce_list_products", arguments: "{}" } },
+      ]);
     } finally {
       await f.close();
     }
