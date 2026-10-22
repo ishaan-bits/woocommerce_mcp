@@ -66,7 +66,9 @@ export type AuditAction =
   | "key_created"
   | "key_revoked"
   | "upstream_enabled"
-  | "upstream_disabled";
+  | "upstream_disabled"
+  | "user_created"
+  | "user_updated";
 
 export interface AuditLogEntry {
   readonly id: string;

@@ -5,7 +5,42 @@ import type {
   KeyMetadata,
   StoredApiKey,
   StoredUser,
+  UserAdminRecord,
+  CreateUserInput,
+  UpdateUserInput,
 } from "./auth-repository.ts";
+import { UserConflictError } from "./auth-repository.ts";
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "23505"
+  );
+}
+
+function toUserAdminRecord(row: {
+  id: string;
+  display_name: string;
+  role: string;
+  allowed_upstreams: string[] | null;
+  allowed_tools: string[] | null;
+  created_at?: Date;
+  active_keys: string | number;
+  total_keys: string | number;
+}): UserAdminRecord {
+  return {
+    id: row.id,
+    displayName: row.display_name,
+    role: row.role === "admin" ? "admin" : "reader",
+    allowedUpstreams: (row.allowed_upstreams ?? []) as UserAdminRecord["allowedUpstreams"],
+    allowedTools: row.allowed_tools ?? [],
+    createdAt: row.created_at?.toISOString() ?? new Date(0).toISOString(),
+    activeKeys: Number(row.active_keys),
+    totalKeys: Number(row.total_keys),
+  };
+}
 
 interface KeyRow {
   id: string;
@@ -152,6 +187,85 @@ export function createPostgresAuthRepository(pool: Pool): AuthRepository {
     async userExists(userId: string): Promise<boolean> {
       const result = await pool.query<Pick<UserRow, "id">>(`SELECT id FROM users WHERE id = $1`, [userId]);
       return (result.rowCount ?? 0) > 0;
+    },
+
+    async listUsers(): Promise<UserAdminRecord[]> {
+      const result = await pool.query<{
+        id: string;
+        display_name: string;
+        role: string;
+        allowed_upstreams: string[] | null;
+        allowed_tools: string[] | null;
+        created_at: Date;
+        active_keys: string | number;
+        total_keys: string | number;
+      }>(
+        `SELECT u.id, u.display_name, u.role, u.allowed_upstreams, u.allowed_tools, u.created_at,
+                count(k.id) FILTER (WHERE k.revoked_at IS NULL) AS active_keys,
+                count(k.id) AS total_keys
+           FROM users u
+           LEFT JOIN api_keys k ON k.user_id = u.id
+          GROUP BY u.id
+          ORDER BY u.created_at, u.display_name`,
+      );
+      return result.rows.map(toUserAdminRecord);
+    },
+
+    async createUser(input: CreateUserInput): Promise<UserAdminRecord> {
+      try {
+        const inserted = await pool.query<UserRow & { created_at: Date }>(
+          `INSERT INTO users (display_name, role, allowed_upstreams, allowed_tools)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, display_name, role, allowed_upstreams, allowed_tools, created_at`,
+          [input.displayName, input.role, input.allowedUpstreams, input.allowedTools],
+        );
+        const row = inserted.rows[0];
+        if (row === undefined) {
+          throw new Error("insert returned no row");
+        }
+        return { ...toUserAdminRecord({ ...row, active_keys: 0, total_keys: 0 }), createdAt: row.created_at.toISOString() };
+      } catch (error) {
+        if (isUniqueViolation(error)) {
+          throw new UserConflictError(input.displayName);
+        }
+        throw error;
+      }
+    },
+
+    async updateUser(userId: string, patch: UpdateUserInput): Promise<UserAdminRecord | null> {
+      try {
+        const updated = await pool.query<UserRow & { created_at: Date }>(
+          `UPDATE users
+              SET display_name     = COALESCE($2, display_name),
+                  role             = COALESCE($3, role),
+                  allowed_upstreams = COALESCE($4, allowed_upstreams),
+                  allowed_tools    = COALESCE($5, allowed_tools)
+            WHERE id = $1
+            RETURNING id, display_name, role, allowed_upstreams, allowed_tools, created_at`,
+          [
+            userId,
+            patch.displayName ?? null,
+            patch.role ?? null,
+            patch.allowedUpstreams === undefined ? null : patch.allowedUpstreams,
+            patch.allowedTools ?? null,
+          ],
+        );
+        const row = updated.rows[0];
+        if (row === undefined) {
+          return null;
+        }
+        const counts = await pool.query<{ active_keys: string | number; total_keys: string | number }>(
+          `SELECT count(id) FILTER (WHERE revoked_at IS NULL) AS active_keys, count(id) AS total_keys
+             FROM api_keys WHERE user_id = $1`,
+          [userId],
+        );
+        return toUserAdminRecord({ ...row, ...(counts.rows[0] ?? { active_keys: 0, total_keys: 0 }) });
+      } catch (error) {
+        if (isUniqueViolation(error)) {
+          throw new UserConflictError(patch.displayName ?? "");
+        }
+        throw error;
+      }
     },
   };
 }

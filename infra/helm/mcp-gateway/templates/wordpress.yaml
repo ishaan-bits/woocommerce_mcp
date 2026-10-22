@@ -1,0 +1,488 @@
+{{/*
+wordpress — the real WooCommerce storefront (docs/architecture.md §10).
+Deployment with strategy Recreate (the single ReadWriteOnce PVC must never
+back two servers at once), a PVC, a ClusterIP Service, and an idempotent
+wp-cli init container that seeds the store before Apache starts.
+
+Security posture (mirrors the postgres notes in infra/helm/README.md):
+  * The pod sets fsGroup 82 (www-data in the wp-cli image) so the init
+    container can write into the freshly provisioned volume; the init
+    container itself runs non-root (uid/gid 82, no privilege escalation, all
+    capabilities dropped).
+  * The main container does NOT set runAsNonRoot: the official wordpress
+    image starts Apache as root and drops its workers to www-data (setuid),
+    which needs the default capability set — the same pattern the official
+    postgres image forces on us. The store is reachable only through the
+    ClusterIP Service (never an Ingress route), and the WooCommerce REST API
+    is additionally internal-hostname-only — see the HTTPS marker comment in
+    the init script below.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wordpress-data
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.wordpress.persistence.size }}
+  {{- with .Values.wordpress.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wordpress
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+# C8 least privilege: the workload never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wordpress-init
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+data:
+  # Mounted directly into conf-enabled (Apache includes conf-enabled/*.conf):
+  # the stock image ships AllowOverride None for /var/www/, which silently
+  # disables the .htaccess WordPress writes for pretty permalinks — and the
+  # WooCommerce REST API is addressed at /wp-json/... (query-string-free
+  # store URLs, docs/architecture.md §7).
+  urumi-links.conf: |
+    <Directory /var/www/html>
+      Options Indexes FollowSymLinks
+      AllowOverride All
+      Require all granted
+    </Directory>
+  # Loaded after the image's own conf.d (see PHP_INI_SCAN_DIR below): WP-CLI
+  # extracts the WordPress/WooCommerce zips in PHP and blows through the
+  # image's 128M memory_limit while doing so.
+  php-extra.ini: |
+    memory_limit = 512M
+  init.sh: |
+    #!/bin/sh
+    # Idempotent first-boot seeding for the URUMI demo store: WordPress core,
+    # WooCommerce (pinned), pretty permalinks, sample catalog, two demo
+    # orders and the WooCommerce API key used by woocommerce-mcp. Safe to
+    # re-run on every pod start; re-downloads nothing once state exists.
+    set -eu
+    cd /var/www/html
+
+    echo "wordpress-init: waiting for the database"
+    tries=0
+    until php -r '
+      $h = getenv("WORDPRESS_DB_HOST"); $p = 3306;
+      if ( strpos( $h, ":" ) !== false ) { list( $h, $p ) = explode( ":", $h, 2 ); }
+      $m = @new mysqli( $h, getenv( "WORDPRESS_DB_USER" ), getenv( "WORDPRESS_DB_PASSWORD" ), getenv( "WORDPRESS_DB_NAME" ), (int) $p );
+      exit( $m->connect_errno ? 1 : 0 );
+    '; do
+      tries=$((tries + 1))
+      if [ "$tries" -ge 60 ]; then
+        echo "wordpress-init: database not reachable after ${tries} attempts" >&2
+        exit 1
+      fi
+      sleep 2
+    done
+
+    if [ ! -f wp-config.php ]; then
+      # WooCommerce only attempts Basic authentication when is_ssl() is true
+      # (woocommerce/includes/class-wc-rest-authentication.php). The store API
+      # is reached exclusively under the in-cluster hostname "wordpress"
+      # (ClusterIP, never an Ingress host), so exactly those requests are
+      # marked as TLS. Browser-facing traffic keeps the plain-http siteurl —
+      # no scheme flip, no Secure-cookie surprises on the port-forward demo.
+      wp config create \
+        --dbname="${WORDPRESS_DB_NAME}" \
+        --dbuser="${WORDPRESS_DB_USER}" \
+        --dbpass="${WORDPRESS_DB_PASSWORD}" \
+        --dbhost="${WORDPRESS_DB_HOST}" \
+        --skip-check \
+        --extra-php <<'PHP'
+    if ( preg_match( '/^wordpress(\.|$)/', strtolower( (string) ( $_SERVER['HTTP_HOST'] ?? '' ) ) ) ) {
+        $_SERVER['HTTPS'] = 'on'; // internal store API → Basic auth permitted
+    }
+    PHP
+      # Pin the version: auto-updates would silently invalidate "pinned
+      # images + pinned core" (Phase C requirement). Plugin/theme
+      # auto-updates are opt-in in WordPress and stay off.
+      wp config set WP_AUTO_UPDATE_CORE false --raw
+    fi
+
+    # Version-aware core guard: the completion marker alone cannot detect a
+    # core upgrade, and a crashed extraction can leave files without the
+    # marker — require BOTH. `wp core version` parses
+    # wp-includes/version.php without touching the database, so it also
+    # reports "none" while core files are absent.
+    current_core="$(wp core version 2>/dev/null || true)"
+    if [ ! -f .urumi-core-downloaded ] || [ "${current_core}" != "${WORDPRESS_CORE_VERSION}" ]; then
+      echo "wordpress-init: installing WordPress ${WORDPRESS_CORE_VERSION} (found: ${current_core:-none})"
+      wp core download --version="${WORDPRESS_CORE_VERSION}" --force
+      touch .urumi-core-downloaded
+      # --force replaces files but never the schema: migrate an existing
+      # database when the on-disk core just changed (fresh installs skip).
+      if wp core is-installed; then
+        wp core update-db
+      fi
+    fi
+
+    if ! wp core is-installed; then
+      echo "wordpress-init: installing WordPress"
+      wp core install \
+        --url="${WORDPRESS_SITE_URL}" \
+        --title="${WORDPRESS_SITE_TITLE}" \
+        --admin_user="${WORDPRESS_ADMIN_USER}" \
+        --admin_password="${WORDPRESS_ADMIN_PASSWORD}" \
+        --admin_email="${WORDPRESS_ADMIN_EMAIL}" \
+        --skip-email
+    fi
+
+    # siteUrl (values file) is the source of truth for home/siteurl.
+    wp option update home "${WORDPRESS_SITE_URL}"
+    wp option update siteurl "${WORDPRESS_SITE_URL}"
+
+    # Pretty permalinks: the WooCommerce REST API is addressed at
+    # /wp-json/wc/v3/... and store URLs must not contain query strings
+    # (docs/architecture.md §7). Without a .htaccess, /wp-json/ answers 404.
+    # We write it directly because `wp rewrite flush --hard` cannot detect
+    # Apache from the CLI SAPI (got_mod_rewrite() needs apache_get_modules())
+    # and only prints "Regenerating a .htaccess file requires special
+    # configuration." The block below is WordPress's canonical rewrite rule
+    # set for /%postname%/, plus the Authorization-header pass-through REST
+    # API Basic auth needs. Overwritten each boot — idempotent.
+    wp rewrite structure '/%postname%/'
+    cat > /var/www/html/.htaccess <<'URUMI_HTACCESS'
+    # BEGIN WordPress
+    <IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+    RewriteBase /
+    RewriteRule ^index\.php$ - [L]
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule . /index.php [L]
+    </IfModule>
+    # END WordPress
+    URUMI_HTACCESS
+    echo "wordpress-init: .htaccess written"
+
+    if ! wp plugin is-installed woocommerce; then
+      echo "wordpress-init: installing WooCommerce ${WOOCOMMERCE_VERSION}"
+      wp plugin install woocommerce --version="${WOOCOMMERCE_VERSION}"
+    fi
+    if ! wp plugin is-active woocommerce; then
+      wp plugin activate woocommerce
+    fi
+
+    # Sample data + API key (idempotent; exits non-zero if WooCommerce did not
+    # load so the pod fails visibly instead of serving an empty store).
+    wp eval-file /init/seed.php
+
+    echo "wordpress-init: store ready"
+  seed.php: |
+    <?php
+    /**
+     * Idempotent demo-store seed, run by the wp-init container on every pod
+     * start (guarded by SKU / option / key lookups, so it is a fast no-op
+     * after the first run): currency, sample products, two demo orders, and
+     * the WooCommerce API key that services/woocommerce-mcp authenticates
+     * with (consumer key stored hashed via wc_api_hash, secret stored in the
+     * clear exactly as WooCommerce itself stores it — read here from the
+     * container environment, which comes from the Kubernetes Secret).
+     */
+    if ( ! defined( 'ABSPATH' ) ) {
+        exit( 1 );
+    }
+    if ( ! function_exists( 'wc_get_product_id_by_sku' ) ) {
+        echo "seed: WooCommerce is not loaded\n";
+        exit( 1 );
+    }
+
+    update_option( 'woocommerce_currency', 'USD' );
+
+    $seed_products = array(
+        array( 'sku' => 'URUMI-TEA-001',  'name' => 'Nilgiri Sunrise Tea 100g', 'price' => '8.50',  'stock' => 24, 'cat' => 'Tea' ),
+        array( 'sku' => 'URUMI-CHAI-001', 'name' => 'Masala Chai Blend 80g',    'price' => '7.25',  'stock' => 30, 'cat' => 'Tea' ),
+        array( 'sku' => 'URUMI-COF-001',  'name' => 'Araku Valley Coffee 250g', 'price' => '12.00', 'stock' => 18, 'cat' => 'Coffee' ),
+        array( 'sku' => 'URUMI-MUG-001',  'name' => 'Stoneware Mug 350ml',      'price' => '9.75',  'stock' => 40, 'cat' => 'Accessories' ),
+    );
+
+    $created = 0;
+    foreach ( $seed_products as $spec ) {
+        if ( wc_get_product_id_by_sku( $spec['sku'] ) ) {
+            continue;
+        }
+        $term_id = 0;
+        $term    = term_exists( $spec['cat'], 'product_cat' );
+        if ( ! $term ) {
+            $term = wp_insert_term( $spec['cat'], 'product_cat' );
+        }
+        if ( ! is_wp_error( $term ) && $term ) {
+            $term_id = (int) $term['term_id'];
+        }
+        $product = new WC_Product_Simple();
+        $product->set_name( $spec['name'] );
+        $product->set_sku( $spec['sku'] );
+        $product->set_regular_price( $spec['price'] );
+        $product->set_manage_stock( true );
+        $product->set_stock_quantity( $spec['stock'] );
+        $product->set_status( 'publish' );
+        $product->set_catalog_visibility( 'visible' );
+        if ( $term_id ) {
+            $product->set_category_ids( array( $term_id ) );
+        }
+        $product->save();
+        ++$created;
+    }
+
+    if ( ! get_option( 'woocommerce_shop_page_id' ) && method_exists( 'WC_Install', 'create_pages' ) ) {
+        WC_Install::create_pages();
+    }
+
+    // Two demo orders once, so wc_get_orders has history to return.
+    if ( ! get_option( 'urumi_seed_orders_done' ) ) {
+        $order_specs = array(
+            array( 'email' => 'demo1@example.local', 'qty' => 2, 'sku' => 'URUMI-TEA-001' ),
+            array( 'email' => 'demo2@example.local', 'qty' => 1, 'sku' => 'URUMI-CHAI-001' ),
+        );
+        foreach ( $order_specs as $spec ) {
+            $order = wc_create_order();
+            if ( is_wp_error( $order ) ) {
+                echo 'seed: order creation failed: ' . $order->get_error_message() . "\n";
+                exit( 1 );
+            }
+            $product_id = wc_get_product_id_by_sku( $spec['sku'] );
+            if ( $product_id ) {
+                $order->add_product( wc_get_product( $product_id ), $spec['qty'] );
+            }
+            $order->set_billing_email( $spec['email'] );
+            $order->calculate_totals();
+            $order->update_status( 'completed', 'Seeded demo order (helm init)' );
+        }
+        update_option( 'urumi_seed_orders_done', '1' );
+    }
+
+    // The API key woocommerce-mcp sends as Basic auth. WooCommerce looks the
+    // key up as wc_api_hash(ck) and compares the secret verbatim — matching
+    // what admin-generated keys store (verified against woocommerce 11.2.1).
+    $consumer_key    = (string) getenv( 'WOOCOMMERCE_CONSUMER_KEY' );
+    $consumer_secret = (string) getenv( 'WOOCOMMERCE_CONSUMER_SECRET' );
+    if ( '' === $consumer_key || '' === $consumer_secret ) {
+        echo "seed: WOOCOMMERCE_CONSUMER_KEY/SECRET not provided\n";
+        exit( 1 );
+    }
+    global $wpdb;
+    $table = $wpdb->prefix . 'woocommerce_api_keys';
+    $hash  = wc_api_hash( sanitize_text_field( $consumer_key ) );
+    $key_id = $wpdb->get_var( $wpdb->prepare( "SELECT key_id FROM {$table} WHERE consumer_key = %s", $hash ) );
+    if ( ! $key_id ) {
+        $user   = get_user_by( 'login', (string) getenv( 'WORDPRESS_ADMIN_USER' ) );
+        $result = $wpdb->insert(
+            $table,
+            array(
+                'user_id'         => $user ? (int) $user->ID : 1,
+                'description'     => 'urumi-mcp-gateway (helm init seed)',
+                'permissions'     => 'read_write',
+                'consumer_key'    => $hash,
+                'consumer_secret' => $consumer_secret,
+                'nonces'          => null,
+                'truncated_key'   => substr( $consumer_key, -4 ),
+                'last_access'     => null,
+            )
+        );
+        if ( ! $result ) {
+            echo 'seed: API key insert failed: ' . $wpdb->last_error . "\n";
+            exit( 1 );
+        }
+        echo "seed: API key installed\n";
+    }
+
+    printf( "seed: %d new product(s), api key present\n", $created );
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+spec:
+  # Hardcoded: the storefront/service is reachable inside the namespace only
+  # (a port-forward or an explicit Ingress rule is how humans reach it).
+  type: ClusterIP
+  selector:
+    {{- include "mcp.selectorLabels" (dict "root" . "name" "wordpress") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+spec:
+  replicas: {{ .Values.wordpress.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "mcp.selectorLabels" (dict "root" . "name" "wordpress") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcp.labels" . | nindent 8 }}
+        {{- include "mcp.selectorLabels" (dict "root" . "name" "wordpress") | nindent 8 }}
+        app.kubernetes.io/component: wordpress
+    spec:
+      serviceAccountName: wordpress
+      securityContext:
+        # www-data as the Apache image defines it (uid/gid 33): both the init
+        # container and Apache must own files interchangeably across restarts
+        # (the wp-cli image ships its OWN www-data at 82 — using 33 here keeps
+        # one identity). fsGroup makes the freshly provisioned PVC writable.
+        fsGroup: 33
+      initContainers:
+        - name: wp-init
+          image: {{ printf "%s:%s" .Values.wordpress.cliImage.repository .Values.wordpress.cliImage.tag | quote }}
+          imagePullPolicy: {{ .Values.wordpress.cliImage.pullPolicy }}
+          command: ["/bin/sh", "/init/init.sh"]
+          securityContext:
+            runAsUser: 33
+            runAsGroup: 33
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # wp-cli wants a writable HOME for its cache even as a foreign uid.
+            - name: HOME
+              value: "/tmp"
+            # Image defaults first, then /init (the mounted ConfigMap) so
+            # php-extra.ini overrides memory_limit without losing the image's
+            # extension settings. The scanner ignores init.sh/seed.php.
+            - name: PHP_INI_SCAN_DIR
+              value: "/usr/local/etc/php/conf.d:/init"
+            - name: WORDPRESS_DB_HOST
+              value: "wordpress-db:3306"
+            - name: WORDPRESS_DB_NAME
+              value: {{ .Values.wordpressDb.database | quote }}
+            - name: WORDPRESS_DB_USER
+              value: {{ .Values.wordpressDb.user | quote }}
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WORDPRESS_DB_PASSWORD
+            - name: WORDPRESS_SITE_URL
+              value: {{ .Values.wordpress.siteUrl | quote }}
+            - name: WORDPRESS_SITE_TITLE
+              value: {{ .Values.wordpress.siteTitle | quote }}
+            - name: WORDPRESS_ADMIN_USER
+              value: {{ .Values.wordpress.adminUser | quote }}
+            - name: WORDPRESS_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WORDPRESS_ADMIN_PASSWORD
+            - name: WORDPRESS_ADMIN_EMAIL
+              value: {{ .Values.wordpress.adminEmail | quote }}
+            - name: WORDPRESS_CORE_VERSION
+              value: {{ .Values.wordpress.coreVersion | quote }}
+            - name: WOOCOMMERCE_VERSION
+              value: {{ .Values.wordpress.woocommerceVersion | quote }}
+            # Seed material for the store's API key — from the Secret, never
+            # from values (see values.yaml `secrets`).
+            - name: WOOCOMMERCE_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WOOCOMMERCE_CONSUMER_KEY
+            - name: WOOCOMMERCE_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WOOCOMMERCE_CONSUMER_SECRET
+          volumeMounts:
+            - name: data
+              mountPath: /var/www/html
+            - name: init
+              mountPath: /init
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              cpu: 300m
+              memory: 512Mi
+      containers:
+        - name: wordpress
+          image: {{ printf "%s:%s" .Values.wordpress.image.repository .Values.wordpress.image.tag | quote }}
+          imagePullPolicy: {{ .Values.wordpress.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            - name: WORDPRESS_DB_HOST
+              value: "wordpress-db:3306"
+            - name: WORDPRESS_DB_NAME
+              value: {{ .Values.wordpressDb.database | quote }}
+            - name: WORDPRESS_DB_USER
+              value: {{ .Values.wordpressDb.user | quote }}
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WORDPRESS_DB_PASSWORD
+          # No runAsNonRoot / capability drop here on purpose — see the header
+          # comment: the official image starts as root and drops its workers.
+          # Numeric port (not the "http" name): named-port resolution in this
+          # cluster's kubelet probed the wrong port and wedged the pod.
+          # /wp-login.php answers 200 without a canonical redirect (GET / 301s
+          # to siteurl), so probe success is unambiguous.
+          readinessProbe:
+            httpGet:
+              path: /wp-login.php
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /wp-login.php
+              port: 80
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.wordpress.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/www/html
+            - name: init
+              mountPath: /etc/apache2/conf-enabled/urumi-links.conf
+              subPath: urumi-links.conf
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: wordpress-data
+        - name: init
+          configMap:
+            name: wordpress-init

@@ -12,6 +12,7 @@ import { createAuditWriter } from "../../src/audit.ts";
 import { createAuthMiddleware, principalOf } from "../../src/auth/middleware.ts";
 import { generateApiKey } from "../../src/auth/keys.ts";
 import { createDatabaseDeps, type DatabaseDeps } from "../../src/db/index.ts";
+import { UserConflictError } from "../../src/db/auth-repository.ts";
 import { runMigrations } from "../../src/db/migrate.ts";
 import { createLogger, type Logger } from "../../src/logger.ts";
 import { applyUpstreamOverrides, createUpstreamRegistry } from "../../src/upstream-registry.ts";
@@ -104,7 +105,7 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
     const applied = await admin.query<{ filename: string }>(`SELECT filename FROM schema_migrations`);
     assert.deepEqual(
       applied.rows.map((row) => row.filename),
-      ["001_init.sql", "002_dashboard.sql"],
+      ["001_init.sql", "002_dashboard.sql", "003_user_admin.sql"],
     );
 
     const tables = await admin.query<{ regclass: string | null }>(
@@ -496,6 +497,137 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
       "an unknown audit action must violate the CHECK constraint",
     );
     await admin.query(`DELETE FROM audit_log WHERE action IN ('upstream_enabled', 'upstream_disabled')`);
+  });
+
+  test("migration 003 extends the audit action CHECK to the member-administration actions (M10)", async () => {
+    await admin.query(`INSERT INTO audit_log (action, outcome) VALUES ('user_created', 'success')`);
+    await admin.query(`INSERT INTO audit_log (action, outcome) VALUES ('user_updated', 'success')`);
+    await assert.rejects(
+      () => admin.query(`INSERT INTO audit_log (action, outcome) VALUES ('user_deleted', 'success')`),
+      (error: unknown) => (error as { code?: string }).code === "23514",
+      "an unknown audit action must still violate the CHECK constraint after 003",
+    );
+    await admin.query(`DELETE FROM audit_log WHERE action IN ('user_created', 'user_updated') AND key_id IS NULL`);
+  });
+
+  test("member administration runs against the real users table (M10)", async () => {
+    const created = await deps.authRepo.createUser({
+      displayName: "member-m10",
+      role: "reader",
+      allowedUpstreams: ["woocommerce"],
+      allowedTools: ["tools:woocommerce_list_products"],
+    });
+    assert.equal(created.displayName, "member-m10");
+    assert.equal(created.role, "reader");
+    assert.equal(created.activeKeys, 0, "a new member starts without keys");
+    assert.equal(created.totalKeys, 0);
+
+    // The UNIQUE constraint (not just the route) enforces display names.
+    await assert.rejects(
+      () =>
+        deps.authRepo.createUser({
+          displayName: "member-m10",
+          role: "reader",
+          allowedUpstreams: [],
+          allowedTools: [],
+        }),
+      (error: unknown) => error instanceof UserConflictError,
+      "duplicate display names must surface as UserConflictError",
+    );
+
+    // One issued key flips the counts through the real JOIN.
+    const generated = generateApiKey(TEST_PEPPER);
+    const key = await deps.authRepo.createKey(created.id, generated.keyPrefix, generated.keyHash);
+    const listed = await deps.authRepo.listUsers();
+    const mine = listed.find((user) => user.id === created.id);
+    assert.ok(mine, "the new member must appear in the admin listing");
+    assert.equal(mine.activeKeys, 1);
+    assert.equal(mine.totalKeys, 1);
+
+    // Role/grant updates persist; unknown ids return null (route maps to 404).
+    const updated = await deps.authRepo.updateUser(created.id, {
+      role: "admin",
+      allowedUpstreams: ["woocommerce", "support"],
+      allowedTools: ["tools:woocommerce_list_products", "tools:support_list_tickets"],
+    });
+    assert.ok(updated);
+    assert.equal(updated.role, "admin");
+    assert.deepEqual(updated.allowedUpstreams, ["woocommerce", "support"]);
+    const missing = await deps.authRepo.updateUser("00000000-0000-4000-8000-000000000000", { role: "reader" });
+    assert.equal(missing, null);
+
+    // Revocation is reflected in activeKeys (row kept, C1).
+    assert.equal(await deps.authRepo.revokeKey(key.id).then((result) => result.revokedNow), true);
+    const afterRevoke = await deps.authRepo.listUsers();
+    const mineAfter = afterRevoke.find((user) => user.id === created.id);
+    assert.equal(mineAfter?.activeKeys, 0);
+    assert.equal(mineAfter?.totalKeys, 1);
+
+    // Cleanup: api_keys references users with ON DELETE RESTRICT.
+    await admin.query(`DELETE FROM api_keys WHERE user_id = $1`, [created.id]);
+    await admin.query(`DELETE FROM users WHERE id = $1`, [created.id]);
+  });
+
+  test("audit filters run as parameterized SQL against the real audit_log (M10)", async () => {
+    const audit = createAuditWriter(deps.auditRepo, logger);
+    const marker = "m10_filter_marker";
+    await audit.record({
+      action: "tool_call",
+      keyId: adminKeyId,
+      userId: ADMIN_ID,
+      role: "admin",
+      upstreamId: "woocommerce",
+      toolName: "list_products",
+      qualifiedName: "woocommerce_list_products",
+      outcome: "success",
+      durationMs: 2,
+      errorCode: marker,
+    });
+    await audit.record({
+      action: "tool_call",
+      keyId: "m10-key",
+      userId: READER_ID,
+      role: "reader",
+      upstreamId: "inventory",
+      toolName: "adjust_stock",
+      qualifiedName: "inventory_adjust_stock",
+      outcome: "error",
+      durationMs: 3,
+      errorCode: marker,
+    });
+
+    try {
+      const toolCalls = await deps.auditRepo.recent(50, undefined, { action: "tool_call" });
+      assert.ok(toolCalls.length >= 2);
+      assert.ok(toolCalls.every((entry) => entry.action === "tool_call"));
+
+      const failures = await deps.auditRepo.recent(50, undefined, { action: "tool_call", outcome: "error" });
+      assert.ok(failures.length >= 1);
+      assert.ok(failures.every((entry) => entry.outcome === "error"));
+
+      const byUser = await deps.auditRepo.recent(50, undefined, { userId: READER_ID, action: "tool_call" });
+      assert.ok(byUser.length >= 1);
+      assert.ok(byUser.every((entry) => entry.userId === READER_ID));
+
+      const byUpstream = await deps.auditRepo.recent(50, undefined, { upstreamId: "inventory" });
+      assert.ok(byUpstream.every((entry) => entry.upstreamId === "inventory"));
+
+      const byTool = await deps.auditRepo.recent(50, undefined, { tool: "inventory" });
+      assert.ok(byTool.length >= 1);
+      assert.ok(byTool.every((entry) => (entry.qualifiedName ?? "").includes("inventory")));
+
+      // LIKE metacharacters are data, not syntax: no row contains "100%".
+      const literal = await deps.auditRepo.recent(50, undefined, { tool: "100%" });
+      assert.equal(literal.length, 0);
+
+      // Filters combine with the keyset cursor (beforeId still applies).
+      const firstPage = await deps.auditRepo.recent(1, undefined, { action: "tool_call" });
+      assert.equal(firstPage.length, 1);
+      const cursor = await deps.auditRepo.recent(50, firstPage[0]!.id, { action: "tool_call" });
+      assert.ok(cursor.every((entry) => Number(entry.id) < Number(firstPage[0]!.id)));
+    } finally {
+      await admin.query(`DELETE FROM audit_log WHERE error_code = $1`, [marker]);
+    }
   });
 
   /** The dashboard REST surface wired to the *real* session/audit/override stores. */

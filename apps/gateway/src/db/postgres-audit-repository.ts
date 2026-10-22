@@ -1,5 +1,5 @@
 import type { AuditLogEntry } from "@mcp/shared";
-import type { AuditRepository, NewAuditEntry } from "./audit-repository.ts";
+import type { AuditFilters, AuditRepository, NewAuditEntry } from "./audit-repository.ts";
 import type { Pool } from "./pool.ts";
 
 interface AuditRow {
@@ -57,15 +57,47 @@ export function createPostgresAuditRepository(pool: Pool): AuditRepository {
       );
     },
 
-    async recent(limit: number, beforeId?: string): Promise<AuditLogEntry[]> {
+    async recent(limit: number, beforeId?: string, filters?: AuditFilters): Promise<AuditLogEntry[]> {
+      // Dynamic WHERE built ONLY from parameterized fragments: values arrive
+      // as $n placeholders (no interpolation), so a filter can never change
+      // the query structure. Keyset pagination stays first in the predicate.
+      const params: Array<string | number | null> = [];
+      const predicates: string[] = ["($1::bigint IS NULL OR id < $1::bigint)"];
+      params.push(beforeId ?? null);
+
+      const push = (sql: (index: number) => string, value: string): void => {
+        params.push(value);
+        predicates.push(sql(params.length));
+      };
+
+      if (filters?.action !== undefined) {
+        push((i) => `action = $${i}`, filters.action);
+      }
+      if (filters?.outcome !== undefined) {
+        push((i) => `outcome = $${i}`, filters.outcome);
+      }
+      if (filters?.userId !== undefined) {
+        push((i) => `user_id = $${i}`, filters.userId);
+      }
+      if (filters?.upstreamId !== undefined) {
+        push((i) => `upstream_id = $${i}`, filters.upstreamId);
+      }
+      if (filters?.tool !== undefined) {
+        // Bounded substring: escape LIKE metacharacters, then anchor nothing —
+        // the route already capped the term length.
+        const term = `%${filters.tool.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+        push((i) => `qualified_name ILIKE $${i} ESCAPE '\\'`, term);
+      }
+
+      params.push(limit);
       const result = await pool.query<AuditRow>(
         `SELECT id, occurred_at, action, key_id, user_id, role, upstream_id,
                 tool_name, qualified_name, outcome, duration_ms, error_code
            FROM audit_log
-          WHERE ($1::bigint IS NULL OR id < $1::bigint)
+          WHERE ${predicates.join(" AND ")}
           ORDER BY id DESC
-          LIMIT $2`,
-        [beforeId ?? null, limit],
+          LIMIT $${params.length}`,
+        params,
       );
       return result.rows.map(toAuditEntry);
     },

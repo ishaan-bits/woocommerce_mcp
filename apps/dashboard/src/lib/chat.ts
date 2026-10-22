@@ -1,0 +1,96 @@
+/**
+ * Pure chat helpers (test/chat.test.ts): message id generation, the history
+ * slice we send back, the retry target (last user turn), and tool-chip labels.
+ * No DOM and no network, so all the non-trivial chat state logic is testable.
+ */
+
+import { parseToolName } from "./permissions.ts";
+
+export interface ChatMessage {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  toolCalls?: Array<{ name: string; outcome: string; error?: string }>;
+  /** Assistant turns produced by a failed request can be retried. */
+  rounds?: number;
+}
+
+/** How many prior turns we send back (the server bounds this too). */
+export const HISTORY_TURNS = 10;
+export const MAX_INPUT_CHARS = 4_000;
+
+let nextId = 1;
+
+/** Monotonic id generator for messages (module-scoped, collision-free). */
+export function newMessageId(): number {
+  return nextId++;
+}
+
+/** Reset the id counter — test-only helper, never called by the UI. */
+export function resetMessageIds(): void {
+  nextId = 1;
+}
+
+/** Send the most recent turns only, as `{role, content}` wire shape. */
+export function historySlice(
+  messages: readonly ChatMessage[],
+  limit: number = HISTORY_TURNS,
+): Array<{ role: "user" | "assistant"; content: string }> {
+  const bounded = Math.max(0, Math.floor(limit));
+  if (bounded === 0) {
+    return [];
+  }
+  return messages.slice(-bounded).map((m) => ({ role: m.role, content: m.content }));
+}
+
+/**
+ * The turn to retry after an error: the last user message. Retry re-sends
+ * that message with the history that preceded it (so the model keeps context
+ * but does not see the failed turn twice).
+ */
+export function retryTarget(
+  messages: readonly ChatMessage[],
+): { message: string; history: Array<{ role: "user" | "assistant"; content: string }> } | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message !== undefined && message.role === "user") {
+      const preceding = messages.slice(0, i);
+      return { message: message.content, history: historySlice(preceding) };
+    }
+  }
+  return null;
+}
+
+export function toolChipLabel(outcome: string): string {
+  switch (outcome) {
+    case "success":
+      return "✓";
+    case "denied":
+      return "denied";
+    case "invalid":
+      return "invalid";
+    default:
+      return "failed";
+  }
+}
+
+/** Upstream id parsed from a qualified tool name, or null when unparseable. */
+export function toolUpstream(name: string): string | null {
+  return parseToolName(name)?.upstreamId ?? null;
+}
+
+export function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof DOMException
+      ? error.name === "AbortError"
+      : typeof error === "object" && error !== null && (error as { name?: string }).name === "AbortError"
+  );
+}
+
+/** Four real example prompts (backend contract only — never fake data). */
+export const EXAMPLE_PROMPTS: readonly string[] = [
+  "List my products",
+  "How many open orders are there?",
+  "Check inventory levels for a product",
+  "What is the status of the latest order?",
+];

@@ -4,7 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0e1116" />
     <title>Urumi MCP Gateway</title>
+    <script>
+      // Apply the persisted / system theme before first paint (no flash).
+      // Mirrors resolveTheme() in src/state.ts — keep the storage key in sync.
+      (function () {
+        try {
+          var stored = localStorage.getItem("urumi-theme");
+          var prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+          var theme = stored === "dark" || stored === "light" ? stored : prefersLight ? "light" : "dark";
+          document.documentElement.setAttribute("data-theme", theme);
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", theme === "dark" ? "#0e1116" : "#f6f8fa");
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

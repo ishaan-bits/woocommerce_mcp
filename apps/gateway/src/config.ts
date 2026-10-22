@@ -41,6 +41,22 @@ export interface AppConfig {
    * API key is server-side only and never appears in logs or responses.
    */
   llm: LlmConfig | null;
+  /**
+   * Which backing store the WooCommerce upstream points at: "mock" (the
+   * in-cluster demo store) or "real" (the in-cluster WordPress/WooCommerce
+   * store). Purely a display label for the dashboard — the actual URL is
+   * chosen at deploy time and never switches at runtime (no silent fallback).
+   * null = not labelled.
+   */
+  woocommerceStoreMode: "mock" | "real" | null;
+  /**
+   * Externally reachable base URL of THIS gateway (e.g.
+   * "https://mcp.example.com" or "http://127.0.0.1:30081"), used only to
+   * render accurate MCP-client connection instructions in the dashboard.
+   * null = unknown (local dev) — the Settings page then shows guidance
+   * instead of inventing a URL.
+   */
+  gatewayPublicUrl: string | null;
 }
 
 /** Server-side LLM provider settings for the chat agent (Milestone 9). */
@@ -211,6 +227,37 @@ const envSchema = z.object({
     .min(1_000, "LLM_REQUEST_TIMEOUT_MS must be between 1000 and 120000")
     .max(120_000, "LLM_REQUEST_TIMEOUT_MS must be between 1000 and 120000")
     .default(45_000),
+  woocommerceStoreMode: z
+    .string()
+    .trim()
+    .refine(
+      (value) => value === "" || value === "mock" || value === "real",
+      'WOOCOMMERCE_STORE_MODE must be "mock", "real", or empty',
+    )
+    .optional(),
+  gatewayPublicUrl: z
+    .string()
+    .trim()
+    .refine(
+      (value) => {
+        if (value === "") {
+          return true;
+        }
+        try {
+          const url = new URL(value);
+          return (
+            (url.protocol === "http:" || url.protocol === "https:") &&
+            url.pathname === "/" &&
+            url.search === "" &&
+            url.hash === ""
+          );
+        } catch {
+          return false;
+        }
+      },
+      "GATEWAY_PUBLIC_URL must be an absolute http:// or https:// URL without path, query or fragment",
+    )
+    .optional(),
   apiKeyPepper: z
     .string({
       error: "API_KEY_PEPPER is required and must be at least 16 characters",
@@ -261,6 +308,8 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     groqModel: trimmed(env, "GROQ_MODEL"),
     llmBaseUrl: trimmed(env, "LLM_BASE_URL"),
     llmRequestTimeoutMs: trimmed(env, "LLM_REQUEST_TIMEOUT_MS"),
+    woocommerceStoreMode: trimmed(env, "WOOCOMMERCE_STORE_MODE"),
+    gatewayPublicUrl: trimmed(env, "GATEWAY_PUBLIC_URL"),
     apiKeyPepper: trimmed(env, "API_KEY_PEPPER"),
     databaseUrl: trimmed(env, "DATABASE_URL"),
   });
@@ -293,6 +342,8 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     llmRequestTimeoutMs: 45_000,
     groqApiKey: undefined as string | undefined,
     llmBaseUrl: undefined as string | undefined,
+    woocommerceStoreMode: undefined as string | undefined,
+    gatewayPublicUrl: undefined as string | undefined,
   };
   const data = parsed.success ? parsed.data : fallback;
   const allowedPrivateHosts = data.upstreamAllowedPrivateHosts;
@@ -360,8 +411,13 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     jsonBodyLimit: data.jsonBodyLimit,
     trustProxy: data.trustProxy,
     llm: buildLlmConfig(data.groqApiKey, data.llmBaseUrl, data.groqModel, data.llmRequestTimeoutMs),
+    woocommerceStoreMode: data.woocommerceStoreMode === "mock" || data.woocommerceStoreMode === "real" ? data.woocommerceStoreMode : null,
+    gatewayPublicUrl: data.gatewayPublicUrl === undefined || data.gatewayPublicUrl === "" ? null : data.gatewayPublicUrl,
   };
 }
+
+/** Display label for the WooCommerce upstream's backing store (mock | real | null). */
+export type WooStoreMode = "mock" | "real";
 
 /** Default OpenAI-compatible endpoint: Groq's free-tier API (D29). */
 export const DEFAULT_LLM_BASE_URL = "https://api.groq.com/openai/v1";
@@ -398,6 +454,7 @@ export interface SafeConfigSummary {
   upstreams: Array<{ id: UpstreamId; origin: string }>;
   /** Milestone 9: presence only — the key itself is never logged (D29). */
   llm: { configured: boolean; model: string | null; key_present: boolean; base_url: string | null };
+  woocommerce_store_mode: "mock" | "real" | null;
 }
 
 export function safeConfigSummary(config: AppConfig): SafeConfigSummary {
@@ -416,5 +473,6 @@ export function safeConfigSummary(config: AppConfig): SafeConfigSummary {
       key_present: (config.llm?.apiKey.length ?? 0) > 0,
       base_url: config.llm === null ? null : new URL(config.llm.baseUrl).origin,
     },
+    woocommerce_store_mode: config.woocommerceStoreMode,
   };
 }

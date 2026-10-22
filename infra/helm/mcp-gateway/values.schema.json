@@ -42,6 +42,10 @@
             "sleepSeconds": { "type": "integer", "minimum": 1 }
           }
         },
+        "publicUrl": {
+          "type": "string",
+          "pattern": "^$|^https?:\\/\\/[A-Za-z0-9.\\-[\\]:_]+$"
+        },
         "resources": { "$ref": "#/definitions/resources" }
       },
       "required": ["replicas", "image", "service"]
@@ -52,10 +56,11 @@
         "replicas": { "type": "integer", "minimum": 1 },
         "image": { "$ref": "#/definitions/image" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "storeMode": { "type": "string", "enum": ["mock", "real"] },
         "storeUrl": { "type": "string" },
         "resources": { "$ref": "#/definitions/resources" }
       },
-      "required": ["replicas", "image", "port"]
+      "required": ["replicas", "image", "port", "storeMode"]
     },
     "inventoryMcp": {
       "type": "object",
@@ -116,6 +121,52 @@
         "resources": { "$ref": "#/definitions/resources" }
       },
       "required": ["enabled", "image", "port"]
+    },
+    "wordpress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "cliImage": { "$ref": "#/definitions/image" },
+        "replicas": { "type": "integer", "minimum": 1, "maximum": 1 },
+        "siteUrl": {
+          "type": "string",
+          "pattern": "^https?:\\/\\/[^/?#]+$"
+        },
+        "siteTitle": { "type": "string", "minLength": 1 },
+        "adminUser": { "type": "string", "minLength": 1 },
+        "adminEmail": { "type": "string", "minLength": 3 },
+        "coreVersion": { "type": "string", "minLength": 1 },
+        "woocommerceVersion": { "type": "string", "minLength": 1 },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "size": { "type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$" },
+            "storageClass": { "type": "string" }
+          },
+          "required": ["size"]
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "required": ["enabled", "image", "cliImage", "siteUrl", "adminUser", "adminEmail", "coreVersion", "woocommerceVersion", "persistence"]
+    },
+    "wordpressDb": {
+      "type": "object",
+      "properties": {
+        "image": { "$ref": "#/definitions/image" },
+        "database": { "type": "string", "minLength": 1 },
+        "user": { "type": "string", "minLength": 1 },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "size": { "type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$" },
+            "storageClass": { "type": "string" }
+          },
+          "required": ["size"]
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "required": ["image", "database", "user", "persistence"]
     },
     "secrets": {
       "type": "object",

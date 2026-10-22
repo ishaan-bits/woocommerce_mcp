@@ -51,6 +51,16 @@ data:
   {{- if .Values.gateway.llm.baseUrl }}
   LLM_BASE_URL: {{ .Values.gateway.llm.baseUrl | quote }}
   {{- end }}
+  # Milestone 10 (Phase A/B): display label for the woocommerce upstream —
+  # which backing store the MCP was pointed at at deploy time. Purely
+  # informational for GET /api/upstreams; never a runtime switch.
+  WOOCOMMERCE_STORE_MODE: {{ required "woocommerceMcp.storeMode must be \"mock\" or \"real\"" .Values.woocommerceMcp.storeMode | quote }}
+  # Public origin (scheme://host[:port], no path) for GET /api/settings
+  # connection instructions. Omitted when unset: the endpoint then reports
+  # an unknown endpoint instead of guessing localhost.
+  {{- with .Values.gateway.publicUrl }}
+  GATEWAY_PUBLIC_URL: {{ . | quote }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service

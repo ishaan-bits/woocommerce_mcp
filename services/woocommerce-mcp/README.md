@@ -72,7 +72,7 @@ the image contract and validation log live in [infra/docker/README.md](../../inf
 npm test        # node --test, runs .ts sources directly (Node ≥ 23.6)
 ```
 
-The suite (69 tests) is deliberately honest about what it proves:
+The suite (70 tests) is deliberately honest about what it proves:
 
 - `test/helpers/mock-store.ts` is an **in-process fake WooCommerce REST API** (products,
   orders, pagination headers, failure injection). It is a test double, not a production
@@ -88,12 +88,18 @@ everything).
 
 ## Known limitations (deliberate, documented)
 
-- **Not verified against a real store.** No WooCommerce store exists on this machine; all
-  verification is against the mock. Real-store verification is an open follow-up.
+- **Unit tests use the mock; the real store is proven live.** All suites here run against
+  the in-process mock so `npm test` needs no store. Since Milestone 10 a real
+  WordPress/WooCommerce runs inside the same Kubernetes cluster and the MCP server was
+  live-verified against it end to end (products and orders over authenticated REST, then
+  `tools/call` through the gateway) — commands and observed results in
+  [docs/requirement-matrix.md](../../docs/requirement-matrix.md) §3.
 - **HTTPS required for Basic auth.** WooCommerce only accepts consumer key/secret via Basic
   auth when the request is SSL (verified in WooCommerce core `WC_REST_Authentication`).
-  Plain-HTTP stores would need OAuth 1.0a signing, which is **not implemented** (decision
-  D17). The server warns at startup if `WOOCOMMERCE_STORE_URL` is `http://`.
+  The in-cluster store works around this with a hostname-scoped `$_SERVER['HTTPS'] = 'on'`
+  marker set by the WordPress init container (decision D31) — a *different* plain-HTTP store
+  would still need TLS or OAuth 1.0a signing, which is **not implemented** (decision D17).
+  The server warns at startup if `WOOCOMMERCE_STORE_URL` is `http://`.
 - **One status per `list_orders` call** — the WooCommerce orders endpoint accepts a single
   status, not a list.
 - **No rate-limit handling yet** (429 from the store surfaces as a generic HTTP error).

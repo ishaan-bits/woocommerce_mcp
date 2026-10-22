@@ -23,12 +23,24 @@ data:
   HOST: "0.0.0.0"
   PORT: {{ .Values.woocommerceMcp.port | quote }}
   LOG_LEVEL: {{ .Values.logLevel | quote }}
-  # Clearly-labelled local mock store, or the operator-supplied real store
-  # URL (credentials always come from the Secret, never from values).
-  {{- if .Values.mockStore.enabled }}
+  # Backing store for woocommerce tools, decided at DEPLOY TIME together with
+  # the gateway's WOOCOMMERCE_STORE_MODE label (same value — one source of
+  # truth, no silent fallback):
+  #   "mock" → the clearly-labelled local mock service
+  #   "real" → the in-cluster WordPress store, else the operator storeUrl
+  {{- if eq .Values.woocommerceMcp.storeMode "mock" }}
+  {{- if not .Values.mockStore.enabled }}
+  {{- fail "woocommerceMcp.storeMode=\"mock\" requires mockStore.enabled=true (there is no silent fallback to a fake store or an empty URL)" }}
+  {{- end }}
   WOOCOMMERCE_STORE_URL: "http://woocommerce-store-mock:{{ .Values.mockStore.port }}"
+  {{- else if eq .Values.woocommerceMcp.storeMode "real" }}
+  {{- if .Values.wordpress.enabled }}
+  WOOCOMMERCE_STORE_URL: "http://wordpress"
   {{- else }}
-  WOOCOMMERCE_STORE_URL: {{ required "woocommerceMcp.storeUrl is required when mockStore.enabled=false" .Values.woocommerceMcp.storeUrl | quote }}
+  WOOCOMMERCE_STORE_URL: {{ required "woocommerceMcp.storeUrl is required when storeMode=\"real\" and wordpress.enabled=false" .Values.woocommerceMcp.storeUrl | quote }}
+  {{- end }}
+  {{- else }}
+  {{- fail (printf "woocommerceMcp.storeMode must be \"mock\" or \"real\" (got %q)" .Values.woocommerceMcp.storeMode) }}
   {{- end }}
 ---
 apiVersion: v1

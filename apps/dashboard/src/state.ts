@@ -109,3 +109,58 @@ export function nextAuditLimit(current: number): number {
   const index = steps.indexOf(clampAuditLimit(current));
   return steps[(index + 1) % steps.length] ?? AUDIT_LIMIT_DEFAULT;
 }
+
+/* Toasts -------------------------------------------------------------------- */
+
+export type ToastTone = "success" | "error" | "info";
+
+export interface Toast {
+  readonly id: number;
+  readonly tone: ToastTone;
+  readonly message: string;
+}
+
+let toastSeq = 1;
+
+export function makeToast(tone: ToastTone, message: string): Toast {
+  return { id: toastSeq++, tone, message };
+}
+
+/** Append a toast, dropping the oldest beyond `max` (bounded, no leak). */
+export function pushToast(toasts: readonly Toast[], toast: Toast, max = 4): Toast[] {
+  const next = [...toasts, toast];
+  return next.length > max ? next.slice(next.length - max) : next;
+}
+
+export function removeToast(toasts: readonly Toast[], id: number): Toast[] {
+  return toasts.filter((toast) => toast.id !== id);
+}
+
+/* Theme ---------------------------------------------------------------------- */
+
+export type Theme = "dark" | "light";
+export const THEME_STORAGE_KEY = "urumi-theme";
+
+/** Read stored theme, tolerating SSR/locked storage and unknown values. */
+export function readStoredTheme(): Theme | null {
+  try {
+    const value = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return value === "dark" || value === "light" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function storeTheme(theme: Theme): void {
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // Storage disabled — the toggle still works for this session.
+  }
+}
+
+/** Effective theme: explicit choice wins, else prefers-color-scheme, else dark. */
+export function resolveTheme(stored: Theme | null, prefersLight: boolean): Theme {
+  if (stored !== null) return stored;
+  return prefersLight ? "light" : "dark";
+}

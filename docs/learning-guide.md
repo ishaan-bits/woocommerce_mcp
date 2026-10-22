@@ -321,6 +321,38 @@ without ever printing it.
 
 ---
 
+## Stage 9 — Real store and honest indicators (Milestone 10) — implemented
+
+**Concepts**
+
+- Why "verified against a mock" and "verified against the real WooCommerce API" are
+  different claims, and how [requirement-matrix.md](./requirement-matrix.md) keeps every
+  claim tied to a command.
+- WordPress in Kubernetes: an init container doing version-pinned installs + idempotent
+  seeding, PVC-backed MariaDB, and why probes must use *numeric* ports (`port: http`
+  once resolved to the wrong container port under kubelet).
+- The two lines WooCommerce needs for plain-HTTP Basic auth in-cluster: `is_ssl()` must be
+  true (hostname-scoped `$_SERVER['HTTPS'] = 'on'`, D31) and `/wp-json/…` needs a real
+  `.htaccess` (WP-CLI cannot write one from the CLI SAPI) plus `AllowOverride All`.
+- Cosmetic UI predicates must *mirror* the server's authorization exactly — the dashboard's
+  `canUseTool` and the gateway's `authorizeToolCall` share the same check order and the
+  same regression fixtures (admins are bound by grants too).
+
+**Checkpoint (M10 — reproduced on 2026-10-22, commands in `infra/helm/README.md`
+"Verification"):** 9/9 pods running after `helm upgrade`; `wp-init` logs
+`store ready` + `.htaccess written` and is idempotent on re-run; authenticated
+`wc/v3/products` from inside the cluster returns the four seeded `URUMI-*` products;
+`GET /api/upstreams` labels the store `real`; `tools/call woocommerce_list_products`
+over `/mcp` returns those products, while a key without a grant gets
+`-32003 … not granted`; `bash scripts/check.sh` ends with `All required checks passed`.
+
+**Recruiter questions**
+- The dashboard said a tool was "allowed" but the gateway denied it — what was wrong?
+- Why does the store work over plain HTTP when WooCommerce requires HTTPS for Basic auth?
+- How do you prove seeding is idempotent without breaking the demo data?
+
+---
+
 ## Cross-cutting interview preparation
 
 Be ready to draw on a whiteboard, in under five minutes:

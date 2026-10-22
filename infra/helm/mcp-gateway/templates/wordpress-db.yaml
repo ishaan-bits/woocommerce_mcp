@@ -1,0 +1,131 @@
+{{/*
+wordpress-db — MariaDB for the real WooCommerce store. Same posture as
+postgres: Deployment with strategy Recreate (one ReadWriteOnce PVC must never
+back two servers at once), a PVC so node restarts keep the data, ClusterIP
+only (docs/architecture.md §8) and no Kubernetes API access.
+
+Like the official postgres image, mariadb starts as root to initialise the
+data directory and then drops the server process — this pod deliberately does
+not set runAsNonRoot (see infra/helm/README.md, "PostgreSQL and privileges").
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wordpress-db-data
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress-db
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.wordpressDb.persistence.size }}
+  {{- with .Values.wordpressDb.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wordpress-db
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress-db
+# C8 least privilege: the workload never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress-db
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress-db
+spec:
+  # Hardcoded: the database is never reachable outside the namespace.
+  type: ClusterIP
+  selector:
+    {{- include "mcp.selectorLabels" (dict "root" . "name" "wordpress-db") | nindent 4 }}
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress-db
+  labels:
+    {{- include "mcp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress-db
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "mcp.selectorLabels" (dict "root" . "name" "wordpress-db") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcp.labels" . | nindent 8 }}
+        {{- include "mcp.selectorLabels" (dict "root" . "name" "wordpress-db") | nindent 8 }}
+        app.kubernetes.io/component: wordpress-db
+    spec:
+      serviceAccountName: wordpress-db
+      containers:
+        - name: mariadb
+          image: {{ printf "%s:%s" .Values.wordpressDb.image.repository .Values.wordpressDb.image.tag | quote }}
+          imagePullPolicy: {{ .Values.wordpressDb.image.pullPolicy }}
+          ports:
+            - name: mysql
+              containerPort: 3306
+              protocol: TCP
+          env:
+            - name: MARIADB_DATABASE
+              value: {{ .Values.wordpressDb.database | quote }}
+            - name: MARIADB_USER
+              value: {{ .Values.wordpressDb.user | quote }}
+            - name: MARIADB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WORDPRESS_DB_PASSWORD
+            # Root is only reachable from inside this pod (probes below); the
+            # application connects with MARIADB_USER, never as root.
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: WORDPRESS_DB_ROOT_PASSWORD
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - exec healthcheck.sh --connect --innodb_initialized
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - exec healthcheck.sh --connect --innodb_initialized
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+          resources:
+            {{- toYaml .Values.wordpressDb.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: wordpress-db-data

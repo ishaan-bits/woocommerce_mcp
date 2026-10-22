@@ -27,6 +27,9 @@ gateway:
   # With the Ingress in front of the dashboard's nginx, the client IP the
   # login throttle should key on is two hops back.
   trustProxy: 2
+  # Public origin of the deployment — rendered into GET /api/settings so the
+  # dashboard prints correct MCP-client connection instructions.
+  publicUrl: "https://mcp.example.com"
   resources:
     requests:
       cpu: 250m
@@ -41,8 +44,11 @@ woocommerceMcp:
     repository: registry.example.com/urumi/woocommerce-mcp
     tag: "0.1.0"
     pullPolicy: IfNotPresent
-  # Real store URL (not a credential) — used because the mock store is off.
-  storeUrl: "https://shop.example.com"
+  # Real store: the in-cluster WordPress deployment below (storeUrl is only
+  # consulted when storeMode="real" and wordpress.enabled=false, i.e. an
+  # externally hosted store).
+  storeMode: "real"
+  storeUrl: ""
   resources:
     requests:
       cpu: 100m
@@ -116,9 +122,41 @@ postgres:
 mockStore:
   enabled: false
 
+# The real store ships with the release: WordPress + MariaDB with pinned
+# images, stateful PVCs and an idempotent wp-cli seed. The WordPress API is
+# reachable only inside the namespace (ClusterIP), never through the Ingress.
+wordpress:
+  enabled: true
+  # Replace with the public storefront origin if the store should be browsed
+  # directly; keep it the Ingress/host-forward origin you actually serve.
+  siteUrl: "https://mcp.example.com"
+  adminEmail: "admin@example.com"
+  persistence:
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+wordpressDb:
+  persistence:
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
 secrets:
   create: false
-  # Required: an externally created Secret containing all seven keys.
+  # Required: an externally created Secret containing all ten keys
+  # (seven base + three WordPress: WORDPRESS_DB_PASSWORD,
+  # WORDPRESS_DB_ROOT_PASSWORD, WORDPRESS_ADMIN_PASSWORD).
   existingSecret: "urumi-gateway-secrets"
 
 ingress:

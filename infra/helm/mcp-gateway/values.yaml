@@ -47,6 +47,11 @@ gateway:
     model: "openai/gpt-oss-120b"       # Groq free-tier default (README, D29)
     baseUrl: ""                        # "" = provider default (api.groq.com)
     requestTimeoutMs: 45000
+  # Externally reachable base URL of this gateway (no path) — rendered into
+  # GATEWAY_PUBLIC_URL so GET /api/settings can print accurate MCP-client
+  # connection instructions. "" = unknown: the endpoint then returns null and
+  # the dashboard shows examples instead of inventing a URL.
+  publicUrl: ""
   # The init container runs `node dist/db/migrate.js` until PostgreSQL accepts
   # connections; migrations are tracked in schema_migrations and re-runs skip.
   migrate:
@@ -67,8 +72,17 @@ woocommerceMcp:
     tag: "0.1.0"
     pullPolicy: IfNotPresent
   port: 8081
-  # Used only when mockStore.enabled=false: URL of the real WooCommerce store
-  # (a URL, not a credential; the consumer key/secret come from the Secret).
+  # Which backing store the woocommerce MCP points at, chosen AT DEPLOY TIME
+  # (this chart writes it into both the MCP's WOOCOMMERCE_STORE_URL and the
+  # gateway's WOOCOMMERCE_STORE_MODE display label together — it is never a
+  # runtime switch and there is no silent fallback):
+  #   "mock" → the in-cluster demo mock (requires mockStore.enabled=true)
+  #   "real" → the in-cluster WordPress store when wordpress.enabled=true,
+  #            otherwise the operator URL in woocommerceMcp.storeUrl
+  storeMode: "mock"
+  # Real store URL (a URL, not a credential; credentials always come from the
+  # Secret). Used only when storeMode="real" and wordpress.enabled=false —
+  # an externally hosted store, e.g. https://shop.example.com.
   storeUrl: ""
   resources:
     requests:
@@ -150,8 +164,9 @@ postgres:
       memory: 512Mi
 
 # Clearly-labelled mock WooCommerce store (services/woocommerce-mcp pattern)
-# used for local demos. Disabled in values-prod.yaml — production injects a
-# real store URL + credentials through the Secret.
+# used for local demos. Disabled in values-prod.yaml — production uses the
+# WordPress store below (or an external storeUrl) and injects credentials
+# through the Secret.
 mockStore:
   enabled: true
   image:
@@ -167,13 +182,72 @@ mockStore:
       cpu: 200m
       memory: 128Mi
 
+# Real WooCommerce store inside the cluster: WordPress + MariaDB, seeded on
+# first start by a wp-cli init container (sample products, two demo orders and
+# the API key the woocommerce MCP authenticates with — idempotent, safe to
+# re-run). Disabled by default; values-local.yaml enables it for demos.
+wordpress:
+  enabled: false
+  image:
+    repository: wordpress
+    tag: "7.1.3-apache"
+    pullPolicy: IfNotPresent
+  # wp-cli image for the init container (runs the idempotent seed script).
+  cliImage:
+    repository: wordpress
+    tag: "cli-2.11.0-php8.3"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  # Browser-facing storefront URL (siteurl/home). For the kind lab use the
+  # port-forward address: kubectl -n urumi port-forward svc/wordpress 8082:80
+  siteUrl: "http://127.0.0.1:8082"
+  siteTitle: "URUMI demo store"
+  adminUser: "admin"
+  adminEmail: "admin@example.local"
+  # Pinned versions installed by the init container (never :latest). The
+  # coreVersion must satisfy the pinned WooCommerce release's
+  # "Requires at least" — WooCommerce 11.2.1 needs WordPress ≥ 7.0.
+  coreVersion: "7.1.3"
+  woocommerceVersion: "11.2.1"
+  persistence:
+    size: 1Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# MariaDB backing the WordPress store (ClusterIP only, same pattern as
+# postgres above; password material comes from the Secret).
+wordpressDb:
+  image:
+    repository: mariadb
+    tag: "11.4"
+    pullPolicy: IfNotPresent
+  database: wordpress
+  user: wordpress
+  persistence:
+    size: 1Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
 # One Secret holds every sensitive value. With create=true the chart renders
 # it from `data` (development placeholders only — see values-local.yaml).
 # Production sets create=false and points existingSecret at a Secret created
 # outside the chart (kubectl create secret …, external-secrets, SOPS, …).
 # Required keys: POSTGRES_PASSWORD, MCP_APP_DB_PASSWORD, MIGRATE_DATABASE_URL,
 # DATABASE_URL, API_KEY_PEPPER, WOOCOMMERCE_CONSUMER_KEY,
-# WOOCOMMERCE_CONSUMER_SECRET.
+# WOOCOMMERCE_CONSUMER_SECRET, and — when wordpress.enabled=true —
+# WORDPRESS_DB_PASSWORD, WORDPRESS_DB_ROOT_PASSWORD, WORDPRESS_ADMIN_PASSWORD.
 # Optional keys: GROQ_API_KEY (Milestone 9 chat agent; the gateway reads it
 # with optional: true, so a Secret without this key boots the same gateway
 # with the agent disabled). Real key material is never a chart value — see

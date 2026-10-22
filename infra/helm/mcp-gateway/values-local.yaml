@@ -15,6 +15,9 @@ gateway:
   service:
     type: NodePort
     nodePort: 30081
+  # What an external MCP client can actually reach: the gateway NodePort.
+  # Feeds GET /api/settings → the dashboard's Settings page.
+  publicUrl: "http://127.0.0.1:30081"
 
 dashboard:
   service:
@@ -37,6 +40,25 @@ secrets:
     API_KEY_PEPPER: "local-dev-only-pepper-not-a-real-secret"
     WOOCOMMERCE_CONSUMER_KEY: "ck_local_dev_placeholder"
     WOOCOMMERCE_CONSUMER_SECRET: "cs_local_dev_placeholder"
+    WORDPRESS_DB_PASSWORD: "local-dev-only-wp-app-password"
+    WORDPRESS_DB_ROOT_PASSWORD: "local-dev-only-mariadb-root-password"
+    WORDPRESS_ADMIN_PASSWORD: "local-dev-only-wp-admin-password"
 
 mockStore:
   enabled: true
+
+# Real WooCommerce store for the demo lab: WordPress + MariaDB in-cluster,
+# seeded by the wp-cli init container (sample catalog, demo orders, and this
+# release's WOOCOMMERCE_CONSUMER_KEY installed as a WooCommerce API key).
+woocommerceMcp:
+  storeMode: "real"
+
+wordpress:
+  enabled: true
+  # Port-forward address of the storefront (see README "Demo walkthrough"):
+  #   kubectl -n urumi port-forward svc/wordpress 8082:80
+  siteUrl: "http://127.0.0.1:8082"
+
+wordpressDb:
+  persistence:
+    size: 1Gi

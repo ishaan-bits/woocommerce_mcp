@@ -1,8 +1,10 @@
-# Helm chart — `mcp-gateway` (Milestones 7–8)
+# Helm chart — `mcp-gateway` (Milestones 7–8 + 10)
 
 One chart deploys the whole stack onto Kubernetes: the gateway, the three MCP
-servers, the dashboard, PostgreSQL (with a PersistentVolumeClaim) and — for
-local demos only — a clearly-labelled mock WooCommerce store. Two value files
+servers, the dashboard, PostgreSQL (with a PersistentVolumeClaim) and — since
+Milestone 10 — a **real WordPress + WooCommerce store** (MariaDB + WordPress,
+chosen at deploy time via `woocommerceMcp.storeMode`) alongside a clearly-labelled
+mock WooCommerce store for offline demos. Two value files
 separate the environments: `values-local.yaml` (kind, NodePorts, tiny
 resources, chart-created dev Secret) and `values-prod.yaml` (explicit image
 tags, gateway/dashboard replicas, persistence, externally supplied Secret,
@@ -19,6 +21,8 @@ any committed file.**
 | `support-mcp` | `urumi/support-mcp:0.1.0` | `support-mcp:8084` | ClusterIP only (hardcoded) |
 | `dashboard` | `urumi/dashboard:0.1.0` | `dashboard:8080` | NodePort 30080 (local) / Ingress (prod) |
 | `postgres` | `postgres:17-alpine` | `postgres:5432` | ClusterIP only; PVC `postgres-data` |
+| `wordpress-db` (real store) | `mariadb:11.4` | `wordpress-db:3306` | ClusterIP only; PVC `wordpress-db-data` |
+| `wordpress` (real store) | `wordpress:7.1.3-apache` (+ `wordpress:cli` init) | `wordpress:80` | ClusterIP only; PVC `wordpress-data`; on when `wordpress.enabled` |
 | `woocommerce-store-mock` (mock) | `node:26.7-alpine` + script in ConfigMap | `woocommerce-store-mock:8090` | ClusterIP only; on when `mockStore.enabled` |
 
 Service names are **bare** (`gateway`, `postgres`, …) exactly as
@@ -111,14 +115,16 @@ mechanism, single platform, idempotent:
 ```bash
 for img in urumi/gateway:0.1.0 urumi/woocommerce-mcp:0.1.0 \
            urumi/inventory-mcp:0.1.0 urumi/support-mcp:0.1.0 \
-           urumi/dashboard:0.1.0 postgres:17-alpine node:26.7-alpine; do
+           urumi/dashboard:0.1.0 postgres:17-alpine node:26.7-alpine \
+           mariadb:11.4 wordpress:7.1.3-apache wordpress:cli; do
   docker save "$img" | docker exec -i urumi-local-control-plane \
     ctr -n k8s.io images import -
 done
 ```
 
 (`node:26.7-alpine` is only the mock store's runtime; skip it if you disable
-the mock.) This adds ≈ 1.9 GB inside the cluster node — images are never
+the mock; the three store images are only needed with `wordpress.enabled`.)
+This adds ≈ 1.9 GB inside the cluster node — images are never
 pulled from a network.
 
 ## Install (local)
@@ -147,10 +153,12 @@ ordering explicitly):
 3. The gateway starts on `0.0.0.0:8080` and refreshes its tool registry. If
    the MCP servers are still starting, `/readyz` stays ready and reports them
    unreachable; the next `tools/list` after `toolCacheTtlMs` discovers them.
-4. `woocommerce-mcp` talks to the mock store (or the real URL from
-   `woocommerceMcp.storeUrl`) using the consumer key/secret from the Secret —
-   the mock holds the **same** secret keys, so it accepts exactly what the
-   server sends.
+4. `woocommerce-mcp` talks to whichever store the deploy-time mode selected —
+   `woocommerceMcp.storeMode: real` → the in-cluster `wordpress` service (the
+   local default since Milestone 10), `mock` → `woocommerce-store-mock` —
+   using the consumer key/secret from the Secret. The mock holds the
+   **same** secret keys, so it accepts exactly what the server sends, and
+   renders where the two settings disagree fail instead of falling back.
 
 ## Secrets and API-key bootstrap
 
@@ -372,10 +380,30 @@ is never part of `check.sh`.
 public host exists); Ingress routing (Kind has no ingress controller — the
 prod Ingress is rendered and dry-run-validated only); NetworkPolicy
 enforcement (Kind's kindnet does not enforce policies — the local values keep
-it off); a real WooCommerce store (the milestone explicitly allows the
-documented mock); multi-replica gateway behaviour (local values use 1
+it off); multi-replica gateway behaviour (local values use 1
 replica; prod values specify 2 with `sessionAffinity: ClientIP` on the
 Service).
+
+### Milestone 10 live verification (real store, 2026-10-22)
+
+Performed on the same cluster with `values-local.yaml` (`woocommerceMcp.storeMode: real`,
+`wordpress.enabled: true`):
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Pods ready | `kubectl -n urumi get pods` | **9/9 Running 1/1** (incl. `wordpress` + `wordpress-db` + mock) |
+| Chart + security gates | `helm lint` (local and prod), `bash scripts/security/assert-helm-security.sh` | lint 0 failures; `ASSERT OK` (7 checks) |
+| Negative renders | `helm template … --set woocommerceMcp.storeMode=mock --set mockStore.enabled=false` (and 2 more) | all 3 fail with the intended messages (no silent fallback) |
+| Init idempotent | `kubectl -n urumi logs deploy/wordpress -c wp-init` | `wordpress-init: store ready` + `.htaccess written`; re-run on a fresh pod: `0 new product(s), api key present` |
+| Probes | numeric `port: 80`, `path: /wp-login.php` | `wordpress 1/1 Running`, `RESTARTS 0` across the liveness window |
+| REST products | authenticated `GET http://wordpress/wp-json/wc/v3/products` (exec from the `woocommerce-mcp` pod; key read from env, never printed) | `HTTP/1.1 200` — 4 products: `URUMI-TEA-001`, `URUMI-CHAI-001`, `URUMI-COF-001`, `URUMI-MUG-001` |
+| REST orders | same, `/wp-json/wc/v3/orders` | 2 completed orders (#14, #15) |
+| Store-mode label | `GET /api/upstreams` via port-forward | `woocommerce  mode: real` |
+| MCP end-to-end | JSON-RPC `tools/call woocommerce_list_products` on `/mcp` | 4 real products, no `isError` |
+| Grant parity (regression) | same session, `tools/call inventory_list_products` with a key that lacks that grant | JSON-RPC `-32003: tool … is not granted to this principal` (server and dashboard indicator agree) |
+| External SDK client | `GATEWAY_URL=… GATEWAY_API_KEY=… node --test apps/gateway/test/external-client.test.ts` | 2/2 pass; explicit printed skip when the env vars are unset |
+
+Full commands and per-requirement evidence: [docs/requirement-matrix.md](../../docs/requirement-matrix.md).
 
 ## Persistence and recovery
 
@@ -396,7 +424,7 @@ Service).
 | Replicas | 1 everywhere | gateway 2, dashboard 2, MCP servers 1, postgres 1 |
 | Resources | tiny (fits a 4-CPU / 6-GiB Mac) | larger requests/limits |
 | Secrets | chart-created, `local-dev-only-…` placeholders | `secrets.create=false`; operator creates `existingSecret` (add optional `GROQ_API_KEY` to enable the chat agent) |
-| Store | in-cluster labelled mock (`mockStore.enabled=true`) | mock off; `woocommerceMcp.storeUrl` = real store + creds from the Secret |
+| Store | `storeMode: "real"` → in-cluster WordPress + WooCommerce (`wordpress.enabled: true`); the labelled mock is also deployed (`mockStore.enabled`) for offline comparison | `storeMode: "real"` with in-cluster WordPress (`wordpress.enabled: true`, PVC 10 Gi) — or set `wordpress.enabled: false` + `woocommerceMcp.storeUrl` for an externally hosted store; creds always from the Secret |
 | Dashboard `/api` | pod nginx proxies to `http://gateway:8080` | `gatewayUpstream: ""` — Ingress owns `/api` |
 | Access | NodePorts + port-forward | Ingress (`/mcp` + `/api` → gateway, `/` → dashboard), TLS left **off** until a real certificate is supplied |
 | Persistence | 1 Gi | 10 Gi (StorageClass name optional) |

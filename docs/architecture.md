@@ -458,13 +458,15 @@ serving **Streamable HTTP at `/mcp`** with these five tools:
 Also implemented: `/healthz` and `/readyz` probes; session lifecycle with capacity cap,
 idle sweep and graceful draining; per-request timeouts via `AbortSignal`; a JSON logger that
 redacts `ck_`/`cs_` credentials; environment validation that fails fast with one issue per
-problem; and a **69-test suite** (`npm test`) that needs **no real store, no Docker and no
+problem; and a **70-test suite** (`npm test`) that needs **no real store, no Docker and no
 network** — a mock WooCommerce REST API plus the official SDK client over loopback exercise
 the full MCP handshake, tool calls, validation failures and upstream error mapping.
 
-**Honest gaps.** The server has **not** been verified against a real WooCommerce store (none
-is available on this machine; see README). Basic auth requires the store to be served over
-HTTPS (D17); `list_orders` accepts a single status per call because that is all the
+**Honest gaps.** The unit suite still runs against the mock by default; the **real-store**
+proof lives in the live checks of [requirement-matrix.md](./requirement-matrix.md) §3
+(Milestone 10: an in-cluster WordPress/WooCommerce verified over authenticated REST and
+through `/mcp`). Basic auth requires the store to be served over
+HTTPS (D17, in-cluster marker per D31); `list_orders` accepts a single status per call because that is all the
 WooCommerce endpoint supports.
 
 ### Implemented in Milestone 2 (verifiable now)
@@ -580,8 +582,10 @@ suite runs 117 tests (108 + the 9 PostgreSQL integration tests).
 
 **Honest gaps.** The seeded data is demo data — nothing here is a real inventory or
 ticketing system, and in-memory state resets when a process restarts (by design for the
-demo; persistence belongs to a real integration). The mock WooCommerce REST store still
-stands in for the paid API, so the "real store" follow-up from Milestone 1 remains open.
+demo; persistence belongs to a real integration). The mock WooCommerce REST store stood in
+for the paid API until Milestone 10 closed that follow-up with a live-verified in-cluster
+WordPress/WooCommerce ([requirement-matrix.md](./requirement-matrix.md) §3); the unit
+suites here still default to the mock.
 The demo users' seed grants were deliberately **not** extended in this milestone: calling
 the new tools as a seeded user requires adding `tools:inventory_*`/`tools:support_*` grants
 on purpose (ops SQL), exactly as migration 001 prescribes — registration and authorization

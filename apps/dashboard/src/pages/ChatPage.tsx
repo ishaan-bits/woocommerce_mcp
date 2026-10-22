@@ -1,115 +1,160 @@
 /**
- * Milestone 9 chat: the browser only ever talks to `POST /api/chat`.
- * The LLM runs server-side inside the gateway; tool calls execute through
- * the gateway's own authorization + audit pipeline with *your* session
- * principal. The provider key never reaches this bundle, and the outcome
- * chips shown under each answer are gateway-computed — model text cannot
- * relabel a failed or denied call as a success.
+ * Chat: the browser only ever talks to `POST /api/chat`. The LLM runs
+ * server-side inside the gateway; tool calls execute through the gateway's
+ * authorization + audit pipeline with *your* session principal. The history
+ * lives in a module-level store so route changes do not wipe the thread.
+ * Tool chips are gateway-computed outcomes — model prose cannot relabel a
+ * failed call as a success.
  */
-import { useState, type FormEvent } from "react";
-import type { ApiClient, ChatToolCall } from "../api/client.ts";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
+import type { ApiClient } from "../api/client.ts";
 import { toFailure } from "../state.ts";
-
-interface ChatMessage {
-  id: number;
-  role: "user" | "assistant";
-  content: string;
-  toolCalls?: ChatToolCall[];
-}
-
-/** How many prior turns we send back (the server bounds this too). */
-const HISTORY_TURNS = 10;
-const MAX_INPUT_CHARS = 4_000;
-
-let nextMessageId = 1;
-
-function toolLabel(call: ChatToolCall): string {
-  switch (call.outcome) {
-    case "success":
-      return "✓";
-    case "denied":
-      return "denied";
-    case "invalid":
-      return "invalid";
-    default:
-      return "failed";
-  }
-}
+import {
+  EXAMPLE_PROMPTS,
+  MAX_INPUT_CHARS,
+  isAbortError,
+  newMessageId,
+  retryTarget,
+  toolChipLabel,
+  toolUpstream,
+  type ChatMessage,
+} from "../lib/chat.ts";
+import {
+  appendChatMessage,
+  getChatError,
+  getChatMessages,
+  setChatError,
+  subscribeChat,
+} from "../lib/chatStore.ts";
+import { upstreamLabel } from "../lib/permissions.ts";
+import { Badge, Banner } from "../components/ui.tsx";
 
 export function ChatPage({ api }: { api: ApiClient }) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messages = useSyncExternalStore(subscribeChat, () => getChatMessages() as ChatMessage[], () => []);
+  const storedError = useSyncExternalStore(subscribeChat, getChatError, () => null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<{ code: string; message: string } | null>(null);
   const [agentMissing, setAgentMissing] = useState(false);
+  const [rounds, setRounds] = useState<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  async function onSubmit(event: FormEvent): Promise<void> {
-    event.preventDefault();
-    const text = input.trim();
-    if (text === "" || busy) {
-      return;
-    }
-    setBusy(true);
-    setError(null);
+  useEffect(
+    () => () => {
+      // Unmount (route change / sign-out): abort any in-flight request.
+      abortRef.current?.abort();
+    },
+    [],
+  );
 
-    const history = messages.slice(-HISTORY_TURNS).map((m) => ({ role: m.role, content: m.content }));
-    const userMessage: ChatMessage = { id: nextMessageId++, role: "user", content: text };
-    setMessages((current) => [...current, userMessage]);
-    setInput("");
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (node !== null) node.scrollTop = node.scrollHeight;
+  }, [messages, busy]);
 
-    try {
-      const response = await api.chat(text, history);
-      setMessages((current) => [
-        ...current,
-        {
-          id: nextMessageId++,
+  const send = useCallback(
+    async (text: string, history: Array<{ role: "user" | "assistant"; content: string }>) => {
+      if (abortRef.current !== null) return; // in-flight guard
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setBusy(true);
+      setChatError(null);
+      appendChatMessage({ id: newMessageId(), role: "user", content: text });
+      try {
+        const response = await api.chat(text, history, controller.signal);
+        appendChatMessage({
+          id: newMessageId(),
           role: "assistant",
           content: response.reply,
           toolCalls: response.tool_calls,
-        },
-      ]);
-      setAgentMissing(false);
-    } catch (caught) {
-      const failure = toFailure(caught);
-      if (failure.code === "agent_not_configured") {
-        setAgentMissing(true);
-      } else {
-        setError(failure);
+          rounds: response.rounds,
+        });
+        setRounds(response.rounds);
+        setAgentMissing(false);
+      } catch (caught) {
+        if (isAbortError(caught)) return; // user pressed Stop — no fabrication
+        const failure = toFailure(caught);
+        if (failure.code === "agent_not_configured") {
+          setAgentMissing(true);
+        } else {
+          setChatError(failure);
+        }
+      } finally {
+        abortRef.current = null;
+        setBusy(false);
       }
-      // The user's message stays in the transcript; nothing is fabricated.
-    } finally {
-      setBusy(false);
-    }
-  }
+    },
+    [api],
+  );
+
+  const onSubmit = (event: FormEvent): void => {
+    event.preventDefault();
+    const text = input.trim();
+    if (text === "" || busy) return;
+    const history = messages.slice(-10).map((m) => ({ role: m.role, content: m.content }));
+    setInput("");
+    void send(text, history);
+  };
+
+  const onRetry = (): void => {
+    if (busy) return;
+    const target = retryTarget(messages);
+    if (target === null) return;
+    void send(target.message, target.history);
+  };
+
+  const onExample = (prompt: string): void => {
+    if (busy) return;
+    const history = messages.slice(-10).map((m) => ({ role: m.role, content: m.content }));
+    void send(prompt, history);
+  };
 
   return (
     <section aria-labelledby="chat-heading">
-      <h1 id="chat-heading">Chat</h1>
+      <div className="row space-between page-head">
+        <h1 id="chat-heading">Chat</h1>
+        {rounds !== null && <span className="muted small">last answer used {rounds} round{rounds === 1 ? "" : "s"}</span>}
+      </div>
 
       {agentMissing && (
-        <div className="banner banner-warn" role="status">
+        <Banner tone="warn">
           <strong>Chat agent not configured.</strong> The gateway has no LLM provider set. Configure{" "}
           <code>GROQ_API_KEY</code> (or <code>LLM_BASE_URL</code> for a local OpenAI-compatible server) in the gateway
           environment and restart it — see <code>.env.example</code>. Nothing is generated in the meantime.
-        </div>
+        </Banner>
       )}
 
-      {error !== null && (
-        <p className="banner banner-error" role="alert">
-          Chat failed: {error.message}
-        </p>
+      {storedError !== null && (
+        <div className="banner banner-error" role="alert">
+          <p>
+            Chat failed: {storedError.message}
+            {storedError.code === "provider_rate_limited" && " The provider is rate limiting requests — try again shortly."}
+            {storedError.code === "provider_timeout" && " The provider timed out — try again."}
+            {storedError.code === "provider_error" && " The provider could not complete the request — try again."}
+          </p>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={onRetry} disabled={busy}>
+            Retry last message
+          </button>
+        </div>
       )}
 
       <div className="card chat-panel">
         <h2 className="sr-only">Conversation</h2>
 
-        <div className="chat-messages" aria-live="polite">
+        <div className="chat-messages" aria-live="polite" ref={scrollRef}>
           {messages.length === 0 && (
             <div className="chat-empty">
               <p className="muted">
-                Ask about your store — e.g. “list my products” or “how many orders are there?”. Tool calls run through
-                the gateway with your permissions and appear under each answer.
+                Ask about your store — tool calls run through the gateway with your permissions and appear under each
+                answer.
               </p>
+              <div className="example-prompts">
+                {EXAMPLE_PROMPTS.map((prompt) => (
+                  <button key={prompt} type="button" className="btn btn-ghost btn-sm example-prompt" onClick={() => onExample(prompt)}>
+                    {prompt}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
           {messages.map((message) => (
@@ -118,20 +163,30 @@ export function ChatPage({ api }: { api: ApiClient }) {
               <p>{message.content}</p>
               {message.toolCalls !== undefined && message.toolCalls.length > 0 && (
                 <ul className="chat-tools" aria-label="Tool calls">
-                  {message.toolCalls.map((call, index) => (
-                    <li key={`${message.id}-${index}`} className={`chat-chip chat-chip-${call.outcome}`}>
-                      <code>{call.name}</code> <span>{toolLabel(call)}</span>
-                      {call.error !== undefined && <span className="chat-chip-error">{call.error}</span>}
-                    </li>
-                  ))}
+                  {message.toolCalls.map((call, index) => {
+                    const upstream = toolUpstream(call.name);
+                    return (
+                      <li key={`${message.id}-${index}`} className={`chat-chip chat-chip-${call.outcome}`} title={call.error}>
+                        <code>{call.name}</code>
+                        {upstream !== null && <span className="muted">{upstreamLabel(upstream)}</span>}
+                        <Badge tone={call.outcome === "success" ? "success" : call.outcome === "denied" ? "warn" : "error"}>
+                          {toolChipLabel(call.outcome)}
+                        </Badge>
+                      </li>
+                    );
+                  })}
                 </ul>
+              )}
+              {message.role === "assistant" && message.rounds !== undefined && (
+                <span className="muted small chat-rounds">{message.rounds} round{message.rounds === 1 ? "" : "s"}</span>
               )}
             </div>
           ))}
           {busy && (
-            <p className="muted chat-loading" role="status">
-              Thinking…
-            </p>
+            <div className="chat-status" role="status">
+              <span className="spinner" aria-hidden="true" />
+              <span className="muted">Thinking…</span>
+            </div>
           )}
         </div>
 
@@ -149,13 +204,19 @@ export function ChatPage({ api }: { api: ApiClient }) {
             disabled={busy}
             aria-disabled={busy}
           />
-          <button type="submit" disabled={busy || input.trim() === ""} aria-disabled={busy || input.trim() === ""}>
-            {busy ? "Sending…" : "Send"}
-          </button>
+          {busy ? (
+            <button type="button" className="btn btn-secondary" onClick={() => abortRef.current?.abort()}>
+              Stop
+            </button>
+          ) : (
+            <button type="submit" className="btn btn-primary" disabled={input.trim() === ""}>
+              Send
+            </button>
+          )}
         </form>
         <p className="muted small">
           Tool calls execute inside the gateway with your role and grants, and each one is audited — the browser never
-          routes tools itself.
+          routes tools itself. Plain text only; nothing is rendered as markdown.
         </p>
       </div>
     </section>

@@ -51,6 +51,22 @@ describe("tool call authorization (C2/C5)", () => {
     assert.match(decision.reason ?? "", /upstream 'inventory' is not granted/);
   });
 
+  test("REGRESSION: grants bind admins too — there is no admin bypass (the dashboard indicator mirrors this)", () => {
+    // principal() defaults to role "admin"; /api/keys also creates admin keys
+    // with empty grants by default. Every call must still pass the grant
+    // checks — the dashboard's tool-permission indicator asserts the same
+    // matrix in apps/dashboard/test/permissions.test.ts (keep in sync).
+    const bareAdmin = principal({ allowedUpstreams: [], allowedTools: [] });
+    assert.equal(bareAdmin.role, "admin");
+    const decision = authorizeToolCall(bareAdmin, "woocommerce_list_products");
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.errorCode, "grant_forbidden");
+    // Write ceiling stays reader-only: a granted admin may call write tools.
+    const granted = principal({ allowedUpstreams: ["woocommerce"], allowedTools: ["tools:woocommerce_create_product"] });
+    assert.equal(authorizeToolCall(granted, "woocommerce_create_product").allowed, true);
+    assert.equal(authorizeToolCall(principal({ role: "reader", allowedUpstreams: ["woocommerce"], allowedTools: ["tools:woocommerce_create_product"] }), "woocommerce_create_product").errorCode, "role_forbidden");
+  });
+
   test("a missing exact tool grant denies even when the upstream is granted", () => {
     const p = principal({ allowedTools: ["tools:woocommerce_list_products"] });
     const decision = authorizeToolCall(p, "woocommerce_get_order");

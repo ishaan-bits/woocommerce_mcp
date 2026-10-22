@@ -2,7 +2,7 @@
   "name": "@mcp/dashboard",
   "version": "0.1.0",
   "private": true,
-  "description": "Urumi MCP gateway dashboard: React UI for overview, tools, upstream toggles, audit and the chat foundation (Milestone 4). Talks only to the gateway's authenticated /api surface.",
+  "description": "Urumi MCP gateway dashboard: B2B developer-platform UI — overview metrics, MCP servers, tool catalogue, chat, audit log, team & API keys, connection settings. Talks only to the gateway's authenticated /api surface.",
   "type": "module",
   "scripts": {
     "dev": "vite",

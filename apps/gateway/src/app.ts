@@ -160,6 +160,8 @@ export function createApp(options: CreateAppOptions): McpApp {
       pepper: config.apiKeyPepper,
       loginLimiter: loginRateLimiter,
       agent: chatAgent,
+      woocommerceStoreMode: config.woocommerceStoreMode,
+      gatewayPublicUrl: config.gatewayPublicUrl,
       now,
     }),
   );

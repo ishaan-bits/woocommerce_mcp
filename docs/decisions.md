@@ -806,3 +806,47 @@ principal.
 the user), and revocation is one key revocation. The cost: chat availability is coupled to
 the caller's session, and a future autonomous agent would need a service principal added
 deliberately.
+
+---
+
+## D31 — Real store: WordPress + WooCommerce inside the same cluster, chosen at deploy time
+
+**Context.** Milestones 1–9 verified `services/woocommerce-mcp` against an in-process mock
+REST store ("no real store exists on this machine"). The remaining credibility gap is the
+real thing: a genuine WordPress + WooCommerce whose REST API the MCP server calls, with no
+paid services and no external hosting.
+
+**Decision.**
+- Extend the existing Helm chart (`infra/helm/mcp-gateway`) with two workloads:
+  `wordpress-db` (MariaDB, PVC-backed) and `wordpress` (official `wordpress:7.1.3-apache`
+  plus a `wordpress:cli` init container that installs version-pinned WordPress core and
+  WooCommerce **11.2.1**, sets pretty permalinks, and idempotently seeds 4 products,
+  2 completed orders and a consumer key).
+- **Backing store is a deploy-time choice, never a runtime guess** — `woocommerceMcp.storeMode`
+  is `mock` or `real`; each combination that cannot work fails the render (`fail` guards +
+  `values.schema.json`). `mock` requires `mockStore.enabled=true`; `real` requires
+  `wordpress.enabled=true` or an explicit `woocommerceMcp.storeUrl`. The gateway carries the
+  same value as `WOOCOMMERCE_STORE_MODE` (display/label only) and the MCP server carries the
+  URL — one source of truth per fact.
+- WooCommerce only accepts Basic auth over HTTPS. In-cluster the store is plain HTTP, so the
+  init container sets `$_SERVER['HTTPS'] = 'on'` for requests whose Host is the `wordpress`
+  service — a local marker, nothing is re-encrypted. Browser traffic to the storefront stays
+  plain HTTP and unaffected.
+- Readiness/liveness probes use **numeric `port: 80`** and `path: /wp-login.php`; `.htaccess`
+  is written by the init script directly (WP-CLI's `rewrite flush --hard` cannot detect
+  Apache from the CLI SAPI) and `AllowOverride All` arrives via a config snippet mounted at
+  `/etc/apache2/conf-enabled/urumi-links.conf`.
+
+**Alternatives.**
+- *Public hosted store / free trial* — excluded: paid or account-bearing services are out of
+  scope, and credentials would leave the cluster.
+- *Mock-only forever* — honest but never proves WooCommerce's real auth, pagination headers,
+  rewrite rules or idempotent seeding; the assignment's credibility requirement needs the real API.
+- *`?rest_route=` query URLs instead of `.htaccess`* — works for core, but store URLs must not
+  contain query strings (architecture §7) and the canonical REST surface is `/wp-json/…`.
+
+**Trade-offs.** Two more workloads and an init container that runs PHP/WP-CLI (heavier than a
+static fixture) in exchange for a genuinely verifiable store; probes and rewrite rules needed
+cluster-specific fixes (numeric port, hand-written `.htaccess`) that are documented where they
+live. The default `npm test` still uses the mock — the real-store evidence is the live checks
+recorded in `docs/requirement-matrix.md` §3.

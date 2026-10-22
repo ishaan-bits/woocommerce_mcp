@@ -8,7 +8,15 @@ import { toFailure } from "./state.ts";
  * written to localStorage/sessionStorage/URLs, and this component discards
  * the value as soon as the request completes (the controlled input resets).
  */
-export function LoginPage({ api, onLoggedIn }: { api: ApiClient; onLoggedIn: (me: MeResponse) => void }) {
+export function LoginPage({
+  api,
+  onLoggedIn,
+  sessionExpired,
+}: {
+  api: ApiClient;
+  onLoggedIn: (me: MeResponse) => void;
+  sessionExpired?: boolean;
+}) {
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +50,11 @@ export function LoginPage({ api, onLoggedIn }: { api: ApiClient; onLoggedIn: (me
     <div className="fullpage">
       <form className="card login-card" onSubmit={(event) => void submit(event)}>
         <h1>Sign in</h1>
+        {sessionExpired === true && (
+          <p className="banner banner-warn" role="status">
+            Your session expired. Sign in again to continue.
+          </p>
+        )}
         <p className="muted">
           Paste a gateway API key (<code>umk_…</code>). It is sent once to <code>POST /api/auth/login</code> and
           exchanged for an HttpOnly session cookie — the key itself is never stored in the browser.
@@ -68,7 +81,7 @@ export function LoginPage({ api, onLoggedIn }: { api: ApiClient; onLoggedIn: (me
             {error}
           </p>
         )}
-        <button type="submit" disabled={busy || key.trim().length === 0}>
+        <button type="submit" className="btn btn-primary" disabled={busy || key.trim().length === 0}>
           {busy ? "Signing in…" : "Sign in"}
         </button>
       </form>

@@ -12,6 +12,11 @@
 #   5. the gateway loses its SSRF allow-list or its pod-level security context
 #   6. the chat-agent key (GROQ_API_KEY) is not optional-secret-sourced, or
 #      any render contains a literal Groq-looking key (Milestone 9 / D29/L4)
+#   7. the WordPress store (Milestone 10 Phase C): the real-store workloads
+#      stay ClusterIP-only, every WORDPRESS_*_PASSWORD arrives via
+#      secretKeyRef (never a literal or ConfigMap value), and the gateway's
+#      WOOCOMMERCE_STORE_MODE label always agrees with the backing store the
+#      woocommerce MCP was actually pointed at (no silent mock/real drift).
 #
 # Usage: scripts/security/assert-helm-security.sh   (from the repo root)
 set -euo pipefail
@@ -31,7 +36,7 @@ helm template urumi "$CHART" -f "$CHART/values-local.yaml" >"$WORKDIR/local.yaml
 helm template urumi "$CHART" -f "$CHART/values-prod.yaml" >"$WORKDIR/prod.yaml"
 
 echo "==> 1. internal MCP services stay ClusterIP (both renders)"
-for name in woocommerce-mcp inventory-mcp support-mcp; do
+for name in woocommerce-mcp inventory-mcp support-mcp wordpress wordpress-db; do
   for render in local prod; do
     type=$(awk -v n="$name" '
       /^kind: / { kind=$2; name=""; type="" }
@@ -106,6 +111,35 @@ for render in local prod; do
     awk '/^kind: ConfigMap$/,/^---$/' "$WORKDIR/$render.yaml" | grep -q 'GROQ_API_KEY:' \
       && fail "$render render: GROQ_API_KEY leaked into the gateway ConfigMap"
   fi
+done
+
+echo "==> 7. WordPress store: secret-sourced passwords + store-mode agreement (M10 / Phase C)"
+for render in local prod; do
+  for key in WORDPRESS_DB_PASSWORD WORDPRESS_DB_ROOT_PASSWORD WORDPRESS_ADMIN_PASSWORD; do
+    # Every workload env entry for the key must be a secretKeyRef (the line
+    # after "- name: KEY" carries valueFrom, never a plain value).
+    awk -v k="$key" '
+      $1 == "-" && $2 == "name:" && $3 == k { getline; if ($1 != "valueFrom:") { print "literal:" $0; exit 1 } }
+    ' "$WORKDIR/$render.yaml" || fail "$render render: $key set as a literal env value"
+    # The key must never appear as a ConfigMap value (credentials in a
+    # ConfigMap are world-readable inside the namespace).
+    awk '/^kind: ConfigMap$/{inmap=1} /^---$/{inmap=0} inmap && $0 ~ /^[ \t]*'"$key"':[ \t]/ {found=1} END{exit !found}' "$WORKDIR/$render.yaml" \
+      && fail "$render render: $key leaked into a ConfigMap"
+    # At least one legitimate secretKeyRef must remain for the key.
+    grep -q "key: $key$" "$WORKDIR/$render.yaml" || fail "$render render: $key lost its secretKeyRef"
+  done
+  # Store-mode label must agree with the URL the woocommerce MCP actually
+  # fetches: a mock URL with a "real" label (or vice versa) is a lie to the
+  # dashboard and a regression of the "label at deploy time" contract.
+  mode=$(grep 'WOOCOMMERCE_STORE_MODE:' "$WORKDIR/$render.yaml" | head -1 | sed 's/.*: *"\(.*\)"/\1/')
+  url=$(grep 'WOOCOMMERCE_STORE_URL:' "$WORKDIR/$render.yaml" | head -1 | sed 's/.*: *"\(.*\)"/\1/')
+  [ -n "$mode" ] || fail "$render render: gateway lost WOOCOMMERCE_STORE_MODE"
+  [ -n "$url" ] || fail "$render render: woocommerce MCP lost WOOCOMMERCE_STORE_URL"
+  case "$url" in
+    *woocommerce-store-mock*) want="mock" ;;
+    *) want="real" ;;
+  esac
+  [ "$mode" = "$want" ] || fail "$render render: store mode '$mode' disagrees with store URL '$url' (expected '$want')"
 done
 
 echo "ASSERT OK: helm security assertions passed (local + prod renders)"

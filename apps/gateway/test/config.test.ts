@@ -317,3 +317,61 @@ describe("gateway configuration (Milestone 9 chat agent)", () => {
     assert.equal(off.llm.key_present, false);
   });
 });
+
+describe("WOOCOMMERCE_STORE_MODE (display label, M10)", () => {
+  test("accepts mock and real, defaults to null when unset", () => {
+    const base = { ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL };
+    assert.equal(loadConfig({ ...base, WOOCOMMERCE_STORE_MODE: "mock" }).woocommerceStoreMode, "mock");
+    assert.equal(loadConfig({ ...base, WOOCOMMERCE_STORE_MODE: "real" }).woocommerceStoreMode, "real");
+    assert.equal(loadConfig(base).woocommerceStoreMode, null);
+    assert.equal(loadConfig({ ...base, WOOCOMMERCE_STORE_MODE: "  " }).woocommerceStoreMode, null);
+  });
+
+  test("anything else fails fast with a named issue", () => {
+    assert.throws(
+      () => loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL, WOOCOMMERCE_STORE_MODE: "prod" }),
+      (error: unknown) =>
+        error instanceof ConfigurationError && error.issues.some((issue) => issue.includes("WOOCOMMERCE_STORE_MODE")),
+    );
+  });
+
+  test("the safe summary carries the label — it is configuration, not a secret", () => {
+    const summary = safeConfigSummary(
+      loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL, WOOCOMMERCE_STORE_MODE: "real" }),
+    );
+    assert.equal(summary.woocommerce_store_mode, "real");
+    assert.equal(safeConfigSummary(loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL })).woocommerce_store_mode, null);
+  });
+});
+
+describe("GATEWAY_PUBLIC_URL (MCP connection instructions, M10)", () => {
+  test("absent or empty means unknown (null) — the dashboard must not invent a URL", () => {
+    const base = { ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL };
+    assert.equal(loadConfig(base).gatewayPublicUrl, null);
+    assert.equal(loadConfig({ ...base, GATEWAY_PUBLIC_URL: " " }).gatewayPublicUrl, null);
+  });
+
+  test("accepts absolute http(s) origins without path, query or fragment", () => {
+    const base = { ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL };
+    assert.equal(
+      loadConfig({ ...base, GATEWAY_PUBLIC_URL: "https://mcp.example.com" }).gatewayPublicUrl,
+      "https://mcp.example.com",
+    );
+    assert.equal(
+      loadConfig({ ...base, GATEWAY_PUBLIC_URL: "http://127.0.0.1:30081" }).gatewayPublicUrl,
+      "http://127.0.0.1:30081",
+    );
+  });
+
+  test("rejects relative, path-bearing or non-http values with a named issue", () => {
+    const base = { ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL };
+    for (const bad of ["mcp.example.com", "https://mcp.example.com/mcp", "ftp://mcp.example.com", "https://x.test/a?b=1"]) {
+      assert.throws(
+        () => loadConfig({ ...base, GATEWAY_PUBLIC_URL: bad }),
+        (error: unknown) =>
+          error instanceof ConfigurationError && error.issues.some((issue) => issue.includes("GATEWAY_PUBLIC_URL")),
+        `expected ${bad} to be rejected`,
+      );
+    }
+  });
+});

@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { type AggregatedTool, type AuditLogEntry, type UpstreamHealth, type UpstreamId, type UserRole } from "@mcp/shared";
-import type { AuditRepository, NewAuditEntry } from "../../src/db/audit-repository.ts";
+import type { AuditFilters, AuditRepository, NewAuditEntry } from "../../src/db/audit-repository.ts";
 import type {
   AuthRepository,
   CreateKeyResult,
+  CreateUserInput,
   KeyMetadata,
   StoredApiKey,
   StoredUser,
+  UpdateUserInput,
+  UserAdminRecord,
 } from "../../src/db/auth-repository.ts";
+import { UserConflictError } from "../../src/db/auth-repository.ts";
 import type { SessionRepository, StoredSession } from "../../src/db/session-repository.ts";
 import type { UpstreamStateRepository } from "../../src/db/upstream-state-repository.ts";
 import type { UpstreamRegistry } from "../../src/upstream-registry.ts";
@@ -148,6 +152,88 @@ export class FakeAuthRepository implements AuthRepository {
     this.guard();
     return this.users.has(userId);
   }
+
+  async listUsers(): Promise<UserAdminRecord[]> {
+    this.guard();
+    return [...this.users.values()]
+      .map((user) => ({
+        ...user,
+        allowedUpstreams: [...user.allowedUpstreams],
+        allowedTools: [...user.allowedTools],
+        createdAt: new Date().toISOString(),
+        activeKeys: this.keyCount(user.id, false),
+        totalKeys: this.keyCount(user.id, true),
+      }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+  }
+
+  async createUser(input: CreateUserInput): Promise<UserAdminRecord> {
+    this.guard();
+    for (const existing of this.users.values()) {
+      if (existing.displayName === input.displayName) {
+        throw new UserConflictError(input.displayName);
+      }
+    }
+    const user: StoredUser = {
+      id: randomUUID(),
+      displayName: input.displayName,
+      role: input.role,
+      allowedUpstreams: [...input.allowedUpstreams],
+      allowedTools: [...input.allowedTools],
+    };
+    this.users.set(user.id, user);
+    return {
+      ...user,
+      allowedUpstreams: [...user.allowedUpstreams],
+      allowedTools: [...user.allowedTools],
+      createdAt: new Date().toISOString(),
+      activeKeys: 0,
+      totalKeys: 0,
+    };
+  }
+
+  async updateUser(userId: string, patch: UpdateUserInput): Promise<UserAdminRecord | null> {
+    this.guard();
+    const existing = this.users.get(userId);
+    if (existing === undefined) {
+      return null;
+    }
+    if (patch.displayName !== undefined) {
+      for (const [otherId, other] of this.users) {
+        if (otherId !== userId && other.displayName === patch.displayName) {
+          throw new UserConflictError(patch.displayName);
+        }
+      }
+    }
+    const updated: StoredUser = {
+      ...existing,
+      ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}),
+      ...(patch.role !== undefined ? { role: patch.role } : {}),
+      ...(patch.allowedUpstreams !== undefined ? { allowedUpstreams: [...patch.allowedUpstreams] } : {}),
+      ...(patch.allowedTools !== undefined ? { allowedTools: [...patch.allowedTools] } : {}),
+    };
+    this.users.set(userId, updated);
+    return {
+      ...updated,
+      allowedUpstreams: [...updated.allowedUpstreams],
+      allowedTools: [...updated.allowedTools],
+      createdAt: new Date().toISOString(),
+      activeKeys: this.keyCount(userId, false),
+      totalKeys: this.keyCount(userId, true),
+    };
+  }
+
+  private keyCount(userId: string, includeRevoked: boolean): number {
+    let count = 0;
+    for (const rows of this.byPrefix.values()) {
+      for (const row of rows) {
+        if (row.user.id === userId && (includeRevoked || row.revokedAt === null)) {
+          count += 1;
+        }
+      }
+    }
+    return count;
+  }
 }
 
 export class FakeAuditRepository implements AuditRepository {
@@ -181,11 +267,24 @@ export class FakeAuditRepository implements AuditRepository {
     });
   }
 
-  async recent(limit: number, beforeId?: string): Promise<AuditLogEntry[]> {
+  async recent(limit: number, beforeId?: string, filters?: AuditFilters): Promise<AuditLogEntry[]> {
     this.guard();
     const before = beforeId === undefined ? Number.MAX_SAFE_INTEGER : Number(beforeId);
+    const matches = (entry: AuditLogEntry): boolean => {
+      if (filters?.action !== undefined && entry.action !== filters.action) return false;
+      if (filters?.outcome !== undefined && entry.outcome !== filters.outcome) return false;
+      if (filters?.userId !== undefined && entry.userId !== filters.userId) return false;
+      if (filters?.upstreamId !== undefined && entry.upstreamId !== filters.upstreamId) return false;
+      if (
+        filters?.tool !== undefined &&
+        (entry.qualifiedName === null || !entry.qualifiedName.toLowerCase().includes(filters.tool.toLowerCase()))
+      ) {
+        return false;
+      }
+      return true;
+    };
     return this.entries
-      .filter((entry) => Number(entry.id) < before)
+      .filter((entry) => Number(entry.id) < before && matches(entry))
       .slice(-limit)
       .reverse()
       .map(({ raw: _raw, ...entry }) => entry);

@@ -7,9 +7,13 @@ import {
   failed,
   loaded,
   loading,
+  makeToast,
   nextAuditLimit,
   projectAuditRow,
   projectAuditRows,
+  pushToast,
+  removeToast,
+  resolveTheme,
   toFailure,
 } from "../src/state.ts";
 
@@ -133,5 +137,40 @@ describe("dashboard state model", () => {
       ]),
       "28",
     );
+  });
+});
+
+describe("toasts (bounded list)", () => {
+  test("makeToast assigns increasing ids and stores tone/message", () => {
+    const a = makeToast("success", "saved");
+    const b = makeToast("error", "nope");
+    assert.equal(a.tone, "success");
+    assert.equal(a.message, "saved");
+    assert.ok(b.id > a.id, "ids increase so React keys stay unique");
+  });
+
+  test("pushToast appends and drops the oldest beyond max", () => {
+    let toasts: ReturnType<typeof makeToast>[] = [];
+    for (let i = 0; i < 6; i++) {
+      toasts = pushToast(toasts, makeToast("info", `t${i}`), 4);
+    }
+    assert.equal(toasts.length, 4);
+    assert.deepEqual(toasts.map((t) => t.message), ["t2", "t3", "t4", "t5"]);
+  });
+
+  test("removeToast removes by id and ignores unknown ids", () => {
+    const a = makeToast("info", "a");
+    const b = makeToast("info", "b");
+    assert.deepEqual(removeToast([a, b], a.id), [b]);
+    assert.deepEqual(removeToast([a, b], 9999), [a, b]);
+  });
+});
+
+describe("theme resolution", () => {
+  test("stored choice wins, else prefers-color-scheme, dark is the fallback", () => {
+    assert.equal(resolveTheme("light", false), "light");
+    assert.equal(resolveTheme("dark", true), "dark");
+    assert.equal(resolveTheme(null, true), "light");
+    assert.equal(resolveTheme(null, false), "dark");
   });
 });

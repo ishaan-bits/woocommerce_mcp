@@ -31,40 +31,49 @@ persisted in PostgreSQL), Milestone 5 complete (independent Inventory and Suppor
 MCP servers, registered with the gateway via configuration only, verified
 process-to-process with no gateway core changes), Milestone 6 complete (five
 production Docker images, multi-stage and non-root, built and container-validated
-locally) and Milestone 7 complete (one Helm chart — gateway, three MCP servers,
+locally), Milestone 7 complete (one Helm chart — gateway, three MCP servers,
 dashboard, PostgreSQL with a PVC and a labelled local mock store — installed and
 end-to-end validated on the kind cluster `urumi-local`, with `values-prod.yaml`
-documenting every operator-supplied production input).**
+documenting every operator-supplied production input), Milestone 8 complete
+(threat-model controls C1–C8 + B1 hardening, each with a failing-if-removed test),
+Milestone 9 complete (LLM chat agent loop through the shared gateway pipeline,
+live-verified on the Groq free tier) and Milestone 10 complete (dashboard
+Team/Settings areas, a tool-permission indicator that mirrors the server's
+authorization exactly, a real WordPress/WooCommerce store inside the same cluster
+live-verified through `/mcp`, an external MCP client compatibility test, and the
+[requirement matrix](./docs/requirement-matrix.md)).**
 
 | Area | Status |
 | --- | --- |
 | Repository layout + npm workspaces | ✅ `npm install` resolves all 6 workspaces |
 | `packages/shared` contract types | ✅ builds, type-checks, imports (5 WooCommerce tool names) |
-| `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 69 tests, no real store needed |
-| Documentation (`docs/`) | ✅ architecture, decisions (D1–D27), threat model, learning guide |
-| Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, tools, upstream toggles), 108 unit tests + 9 real-PostgreSQL integration tests, no Docker needed for the unit suite |
-| Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, working chat (server-side agent, gateway-audited tool calls); 16 tests + typecheck + production build |
+| `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 70 tests; unit tests run against the in-process mock, and since M10 the same server is live-verified against a real in-cluster store (see below) |
+| Documentation (`docs/`) | ✅ architecture, decisions (D1–D31), threat model, learning guide, [requirement matrix](./docs/requirement-matrix.md) |
+| Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, settings, tools, upstream toggles), **261 tests** including the real-PostgreSQL integration suite (which skips with a printed reason without `TEST_DATABASE_URL`), plus an env-gated live external-client test |
+| Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, **Team** (members + API keys) and **Settings** areas, working chat (server-side agent, gateway-audited tool calls), tool-permission indicator mirroring `authorization.ts` exactly; **87 tests** + typecheck + production build |
 | Inventory MCP server | ✅ `list_products` + `adjust_stock` over Streamable HTTP, deterministic 12-item seeded store, 39 tests, registered via `INVENTORY_MCP_URL` (no gateway code changes) |
 | Support MCP server | ✅ `list_tickets` + `create_ticket` over Streamable HTTP, deterministic 8-ticket seeded store, 38 tests, registered via `SUPPORT_MCP_URL` (no gateway code changes) |
 | Docker images | ✅ five multi-stage images (`urumi/<name>:0.1.0`: gateway, three MCP servers, dashboard), non-root, runtime-config only, built and container-tested — see [infra/docker/README.md](./infra/docker/README.md) |
-| Kubernetes / Helm | ✅ one chart (`infra/helm/mcp-gateway`) with `values-local.yaml` + `values-prod.yaml`, installed and e2e-validated on kind `urumi-local` (7 workloads, PVC-backed PostgreSQL, chart/external secrets, port-forward access) — see [infra/helm/README.md](./infra/helm/README.md) |
+| Kubernetes / Helm | ✅ one chart (`infra/helm/mcp-gateway`) with `values-local.yaml` + `values-prod.yaml`, installed and e2e-validated on kind `urumi-local` (9 workloads incl. the real WordPress/WooCommerce store, PVC-backed PostgreSQL, chart/external secrets, port-forward access) — see [infra/helm/README.md](./infra/helm/README.md) |
 | PostgreSQL schema, API keys, audit log | ✅ migrations (001–002), two seeded users, hashed revocable keys, append-only audit incl. upstream-toggle rows, session + override tables (`npm run migrate`; integration-tested against PostgreSQL 17) |
 | LLM / chat agent | ✅ `POST /api/chat` agent loop: Groq (free tier) or local OpenAI-compatible server via `LLM_BASE_URL`; tools from the gateway registry, executed through the shared authz/audit pipeline; disabled cleanly (503) with no key — see [docs/decisions.md D29/D30](./docs/decisions.md). In Kubernetes the key is an optional `GROQ_API_KEY` in the release Secret ([infra/helm/README.md](./infra/helm/README.md) "Enabling the chat agent") |
 
 No feature should be described as working unless `npm run check` proves it. Files in this repo
 are deliberately honest: empty workspaces have **no placeholder endpoints** that could be
-mistaken for finished features. The WooCommerce MCP server is tested against a **mock**
-WooCommerce REST API — it has **not** been verified against a real store (none is available
-on this machine); see [services/woocommerce-mcp/README.md](./services/woocommerce-mcp/README.md).
-The gateway is verified both against **fake in-process MCP upstreams** and — since Milestone 5 —
-against the **real Inventory, Support and WooCommerce MCP server processes** over Streamable
-HTTP (`test/real-upstreams.test.ts`), with the mock REST store still standing in for the paid
-WooCommerce API; see [apps/gateway/README.md](./apps/gateway/README.md). Authentication,
-sessions, upstream toggles and audit logging are
-verified against a **real PostgreSQL 17** in a disposable container via `TEST_DATABASE_URL`
+mistaken for finished features. The WooCommerce MCP server's **unit suites** run against an
+in-process **mock** WooCommerce REST API by default; since Milestone 10 a **real store** runs
+inside the same cluster (WordPress + WooCommerce, Helm-provisioned, no paid services) and was
+live-verified end to end — authenticated REST responses *and* `tools/call` through the
+gateway — with the exact commands and results recorded in the
+[requirement matrix](./docs/requirement-matrix.md) §3. The gateway is verified both against
+**fake in-process MCP upstreams** and — since Milestone 5 — against the **real Inventory,
+Support and WooCommerce MCP server processes** over Streamable HTTP
+(`test/real-upstreams.test.ts`); authentication, sessions, upstream toggles and audit logging
+are verified against a **real PostgreSQL 17** in a disposable container via `TEST_DATABASE_URL`
 (`test/integration/postgres.test.ts`); without that variable the integration suite skips with
-a printed reason, while the 268 tests that need no database (69 + 108 + 14 + 39 + 38) still
-run — 277 tests in total with the database.
+a printed reason, while the tests that need no database still run — **495 tests in total with
+the database** (87 dashboard + 261 gateway + 39 inventory + 38 support + 70 woocommerce),
+482 without it.
 
 ---
 
@@ -141,9 +150,12 @@ mcp/
 | --- | --- | --- |
 | Ollama | optional local LLM (Milestone 9) | optional; Groq free tier is the default plan — configure via `LLM_BASE_URL` |
 
-Also not present: a WooCommerce store. Milestone 1 shipped against a **mock** WooCommerce REST
-API (no store, Docker or network needed); verifying against a real store — a free local
-container or trial store — remains an open follow-up.
+Also not present: an *external/hosted* WooCommerce store (none is needed). Milestone 1
+shipped against a **mock** WooCommerce REST API (no store, Docker or network needed); the
+Milestone 10 chart provisions a **real** WordPress + WooCommerce *inside* the same cluster
+and it was verified live end to end — see
+[requirement-matrix.md §3](./docs/requirement-matrix.md). The labelled mock stays available
+for offline demos.
 
 **Environment status (updated 2026-10-22):** Docker (via Colima), kubectl, kind and Helm are
 installed, the kind cluster `urumi-local` is running, and the Helm chart is deployed there
@@ -256,6 +268,30 @@ reads every credential from a Kubernetes Secret (dev placeholders locally,
 operator-created in production). An API key must be bootstrapped before any
 tool call — exact commands in [infra/helm/README.md](./infra/helm/README.md).
 
+### External MCP clients (Milestone 10)
+
+Anything that speaks MCP over Streamable HTTP can point straight at the
+gateway's `/mcp` endpoint with a `Bearer` API key. Two supported paths:
+
+```bash
+# 1) Live compatibility test — the official MCP TypeScript SDK as an external
+#    client (initialize → tools/list → tools/call) against a running gateway.
+#    Skips with a printed reason when the env vars are unset; the key is read
+#    from the environment and never printed or asserted on.
+kubectl -n urumi port-forward svc/gateway 8080:8080 &
+GATEWAY_URL=http://127.0.0.1:8080 GATEWAY_API_KEY=umk_... \
+  node --test apps/gateway/test/external-client.test.ts
+
+# 2) MCP Inspector (standard GUI client for exploration and debugging):
+npx @modelcontextprotocol/inspector
+#   Connection type:  HTTP
+#   Transport URL:    http://127.0.0.1:8080/mcp   (after the port-forward above)
+#   Headers:          Authorization: Bearer <your gateway API key>
+```
+
+Keys stay out of URLs, shell history files, and the repository — pass them at
+run time only.
+
 ---
 
 ## Roadmap
@@ -272,5 +308,6 @@ tool call — exact commands in [infra/helm/README.md](./infra/helm/README.md).
 | 7 | Kubernetes + Helm | ✅ done: one chart, `values-local.yaml` + `values-prod.yaml`, installed and e2e-validated on kind |
 | 8 | Security hardening | ✅ done: threat-model C1–C8 + B1 hardening implemented and test-verified (SSRF guard, rate/concurrency/limit controls, log scrubbing, ServiceAccounts, host allow-listing) |
 | 9 | Chat agent + LLM | ✅ done: Groq-compatible agent loop through the same gateway path (shared authz/audit pipeline); optional — 503 without a key |
+| 10 | Real store + dashboard overhaul | ✅ done: WordPress/WooCommerce in-cluster (Helm, pinned versions, idempotent seed) live-verified through `/mcp`; Team/Settings dashboard areas; tool-permission indicator mirroring `authorization.ts` (regression-tested on both sides); env-gated external MCP client test + Inspector docs; security assertions; [requirement matrix](./docs/requirement-matrix.md) |
 
 Details and the *why* for each ordering: [docs/architecture.md § 11](./docs/architecture.md).

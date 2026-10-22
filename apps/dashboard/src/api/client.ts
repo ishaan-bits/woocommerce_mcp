@@ -62,11 +62,26 @@ export interface UpstreamStatusView {
   enabled: boolean;
   reachable: boolean;
   last_error: string | null;
+  /** Display label for the woocommerce backing store: "mock" | "real" | null. */
+  mode?: "mock" | "real" | null;
 }
 
 export interface ToolsResponse {
   tools: ToolView[];
   upstreams: Array<{ id: string; enabled: boolean; reachable: boolean; last_error: string | null }>;
+}
+
+export interface UpstreamsResponse {
+  upstreams: UpstreamStatusView[];
+}
+
+export interface SettingsResponse {
+  mcp_endpoint: string | null;
+  mcp_path: string;
+  transport: string;
+  auth: string;
+  session_header: string;
+  chat_enabled: boolean;
 }
 
 /** Raw audit row as the gateway returns it (before view-model projection). */
@@ -89,6 +104,73 @@ export interface AuditResponse {
   entries: AuditEntryRaw[];
 }
 
+export interface UserRecord {
+  id: string;
+  displayName: string;
+  role: "admin" | "reader";
+  allowed_upstreams: string[];
+  allowed_tools: string[];
+  createdAt: string;
+  activeKeys: number;
+  totalKeys: number;
+}
+
+export interface UsersResponse {
+  users: UserRecord[];
+}
+
+export interface CreateUserInput {
+  display_name: string;
+  role: "admin" | "reader";
+  allowed_upstreams?: string[];
+  allowed_tools?: string[];
+}
+
+export interface UpdateUserInput {
+  display_name?: string;
+  role?: "admin" | "reader";
+  allowed_upstreams?: string[];
+  allowed_tools?: string[];
+}
+
+export interface KeyRecord {
+  id: string;
+  keyPrefix: string;
+  userId: string;
+  displayName: string;
+  role: "admin" | "reader";
+  createdAt: string;
+  revokedAt: string | null;
+}
+
+export interface KeysResponse {
+  keys: KeyRecord[];
+}
+
+export interface IssuedKey {
+  id: string;
+  user_id: string;
+  key_prefix: string;
+  created_at: string;
+  revoked_at: string | null;
+  /** Plaintext key — shown EXACTLY ONCE in the UI, never persisted. */
+  key: string;
+}
+
+export interface RevokeKeyResult {
+  id: string;
+  revoked_at: string | null;
+  already_revoked: boolean;
+}
+
+export interface AuditFiltersInput {
+  action?: string;
+  outcome?: string;
+  userId?: string;
+  upstreamId?: string;
+  tool?: string;
+}
+
 /** Milestone 9: gateway-computed tool outcomes — the model cannot override them. */
 export interface ChatToolCall {
   name: string;
@@ -109,10 +191,14 @@ export interface ChatTurn {
 
 async function parseError(response: Response): Promise<ApiError> {
   let code = "error";
+  let message: string | undefined;
   try {
-    const body = (await response.json()) as { error?: unknown };
+    const body = (await response.json()) as { error?: unknown; message?: unknown };
     if (typeof body.error === "string" && body.error.length > 0) {
       code = body.error;
+    }
+    if (typeof body.message === "string" && body.message.length > 0) {
+      message = body.message;
     }
   } catch {
     // Non-JSON error body (proxy/gateway crash): keep the generic code.
@@ -123,7 +209,7 @@ async function parseError(response: Response): Promise<ApiError> {
   if (response.status === 403) {
     return new ForbiddenError(code);
   }
-  return new ApiError(response.status, code);
+  return new ApiError(response.status, code, message);
 }
 
 export function createApiClient(fetchImpl: FetchLike = (...args) => fetch(...args)) {
@@ -161,31 +247,95 @@ export function createApiClient(fetchImpl: FetchLike = (...args) => fetch(...arg
     me(): Promise<MeResponse> {
       return request<MeResponse>("GET", "/me");
     },
+    settings(): Promise<SettingsResponse> {
+      return request<SettingsResponse>("GET", "/settings");
+    },
     tools(): Promise<ToolsResponse> {
       return request<ToolsResponse>("GET", "/tools");
     },
-    upstreams(): Promise<{ upstreams: UpstreamStatusView[] }> {
-      return request<{ upstreams: UpstreamStatusView[] }>("GET", "/upstreams");
+    upstreams(): Promise<UpstreamsResponse> {
+      return request<UpstreamsResponse>("GET", "/upstreams");
     },
     /** Server-enforced, admin-only; ids are validated against the registry upstream. */
     setUpstream(id: string, enabled: boolean): Promise<{ id: string; enabled: boolean; changed: boolean }> {
       return request("POST", `/upstreams/${id}:${enabled ? "enable" : "disable"}`);
     },
-    /** Bounded by the server (limit 1–100, keyset cursor) — never unbounded. */
-    audit(limit: number, before?: string): Promise<AuditResponse> {
+    /**
+     * Bounded by the server (limit 1–100, keyset cursor) — never unbounded.
+     * `filters` are the optional action/outcome/upstreamId/tool/userId query params.
+     */
+    audit(limit: number, before?: string, filters?: AuditFiltersInput): Promise<AuditResponse> {
       const params = new URLSearchParams({ limit: String(limit) });
-      if (before !== undefined) {
+      if (before !== undefined && before !== "") {
         params.set("before", before);
       }
+      if (filters?.action !== undefined && filters.action !== "") {
+        params.set("action", filters.action);
+      }
+      if (filters?.outcome !== undefined && filters.outcome !== "") {
+        params.set("outcome", filters.outcome);
+      }
+      const userId = filters?.userId?.trim();
+      if (userId !== undefined && userId !== "") {
+        params.set("userId", userId);
+      }
+      if (filters?.upstreamId !== undefined && filters.upstreamId !== "") {
+        params.set("upstreamId", filters.upstreamId);
+      }
+      const tool = filters?.tool?.trim();
+      if (tool !== undefined && tool !== "") {
+        params.set("tool", tool);
+      }
       return request<AuditResponse>("GET", `/audit?${params.toString()}`);
+    },
+    users(): Promise<UsersResponse> {
+      return request<UsersResponse>("GET", "/users");
+    },
+    createUser(input: CreateUserInput): Promise<UserRecord> {
+      return request<UserRecord>("POST", "/users", input);
+    },
+    updateUser(id: string, patch: UpdateUserInput): Promise<UserRecord> {
+      return request<UserRecord>("PATCH", `/users/${id}`, patch);
+    },
+    keys(): Promise<KeysResponse> {
+      return request<KeysResponse>("GET", "/keys");
+    },
+    /** Returns the plaintext key EXACTLY ONCE — never persist or log it. */
+    issueKey(userId: string): Promise<IssuedKey> {
+      return request<IssuedKey>("POST", "/keys", { user_id: userId });
+    },
+    revokeKey(id: string): Promise<RevokeKeyResult> {
+      return request<RevokeKeyResult>("POST", `/keys/${id}/revoke`);
     },
     /**
      * Milestone 9: chat with the server-side agent. The LLM key never touches
      * the browser; tool calls are executed by the gateway with *your* session
      * principal. 503 `agent_not_configured` means no provider is set up.
      */
-    chat(message: string, history: ChatTurn[] = []): Promise<ChatResponse> {
-      return request<ChatResponse>("POST", "/chat", { message, history });
+    chat(message: string, history: ChatTurn[] = [], signal?: AbortSignal): Promise<ChatResponse> {
+      const url = "/api/chat";
+      const init: RequestInit = {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message, history }),
+        ...(signal !== undefined ? { signal } : {}),
+      };
+      return (async (): Promise<ChatResponse> => {
+        let response: Response;
+        try {
+          response = await fetchImpl(url, init);
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "AbortError") {
+            throw error;
+          }
+          throw new ApiError(0, "gateway_unreachable", "Gateway unreachable");
+        }
+        if (!response.ok) {
+          throw await parseError(response);
+        }
+        return (await response.json()) as ChatResponse;
+      })();
     },
   };
 }

@@ -26,6 +26,9 @@ export function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     // Chat agent disabled by default so existing suites are unaffected;
     // agent/chat tests enable it explicitly via overrides.
     llm: null,
+    // Store-mode label off by default; upstreams endpoint tests override it.
+    woocommerceStoreMode: null,
+    gatewayPublicUrl: null,
     ...overrides,
   };
 }

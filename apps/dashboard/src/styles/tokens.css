@@ -1,0 +1,142 @@
+/*
+ * Design tokens: color (dark default + light overrides), type scale,
+ * spacing, radii, borders, elevation, focus ring, motion, z-index.
+ * Theme is applied via [data-theme] on <html> (set from localStorage or
+ * prefers-color-scheme by a tiny inline boot script + the App toggle).
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* Color — dark (default) */
+  --bg: #0e1116;
+  --bg-raised: #161b22;
+  --bg-sunken: #0a0d11;
+  --bg-input: #0a0d11;
+  --bg-hover: rgba(110, 170, 255, 0.1);
+  --bg-active: rgba(110, 170, 255, 0.18);
+  --border: #2b3440;
+  --border-strong: #3d4854;
+  --text: #e6edf3;
+  --text-muted: #9aa7b4;
+  --text-faint: #6e7b8a;
+
+  --accent: #58a6ff;
+  --accent-strong: #4d9fec;
+  --accent-fg: #071018;
+
+  --success: #3fb950;
+  --success-fg: #0c1f10;
+  --warn: #d29922;
+  --warn-fg: #221703;
+  --danger: #f85149;
+  --danger-fg: #2a0908;
+  --danger-strong: #da3633;
+  --info: #58a6ff;
+  --info-fg: #071018;
+
+  --badge-neutral-bg: #21262d;
+  --badge-neutral-fg: #9aa7b4;
+  --badge-muted-bg: transparent;
+  --badge-muted-fg: #8b98a5;
+  --badge-admin-bg: #3fb950;
+  --badge-admin-fg: #0c1f10;
+  --badge-member-bg: #388bfd26;
+  --badge-member-fg: #79b8ff;
+
+  --focus: #79b8ff;
+  --overlay: rgba(1, 4, 9, 0.72);
+  --backdrop-blur: 2px;
+
+  /* Type scale */
+  --fs-12: 0.75rem;
+  --fs-13: 0.8125rem;
+  --fs-14: 0.875rem;
+  --fs-16: 1rem;
+  --fs-20: 1.25rem;
+  --fs-24: 1.5rem;
+  --fs-30: 1.875rem;
+  --lh-tight: 1.25;
+  --lh: 1.55;
+
+  /* Spacing scale (4..48) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* Radii, borders, elevation */
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+  --border-w: 1px;
+  --shadow-1: 0 1px 2px rgba(1, 4, 9, 0.4);
+  --shadow-2: 0 8px 24px rgba(1, 4, 9, 0.45);
+  --shadow-overlay: 0 16px 48px rgba(1, 4, 9, 0.6);
+
+  /* Motion */
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Z-index */
+  --z-sticky: 10;
+  --z-drawer: 40;
+  --z-overlay: 50;
+  --z-modal: 60;
+  --z-toast: 70;
+
+  --sidebar-w: 232px;
+  --topbar-h: 56px;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f6f8fa;
+  --bg-raised: #ffffff;
+  --bg-sunken: #eef1f4;
+  --bg-input: #ffffff;
+  --bg-hover: rgba(9, 65, 130, 0.07);
+  --bg-active: rgba(9, 65, 130, 0.13);
+  --border: #d1d9e0;
+  --border-strong: #b6c0ca;
+  --text: #1f2328;
+  --text-muted: #59636e;
+  --text-faint: #818b98;
+
+  --accent: #0969da;
+  --accent-strong: #075bbd;
+  --accent-fg: #ffffff;
+
+  --success: #1a7f37;
+  --success-fg: #ffffff;
+  --warn: #9a6700;
+  --warn-fg: #ffffff;
+  --danger: #cf222e;
+  --danger-fg: #ffffff;
+  --danger-strong: #a40e26;
+  --info: #0969da;
+  --info-fg: #ffffff;
+
+  --badge-neutral-bg: #eaeef2;
+  --badge-neutral-fg: #59636e;
+  --badge-muted-bg: transparent;
+  --badge-muted-fg: #6e7b8a;
+  --badge-admin-bg: #1a7f37;
+  --badge-admin-fg: #ffffff;
+  --badge-member-bg: #0969da1a;
+  --badge-member-fg: #0969da;
+
+  --focus: #0969da;
+  --overlay: rgba(31, 35, 40, 0.5);
+  --shadow-1: 0 1px 2px rgba(31, 35, 40, 0.12);
+  --shadow-2: 0 8px 24px rgba(31, 35, 40, 0.16);
+  --shadow-overlay: 0 16px 48px rgba(31, 35, 40, 0.25);
+}

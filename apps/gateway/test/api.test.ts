@@ -86,7 +86,7 @@ function makeFixture(): Fixture {
   };
 }
 
-function startApi(fx: Fixture): Promise<MiniApp> {
+function startApi(fx: Fixture, options?: { woocommerceStoreMode?: "mock" | "real" | null }): Promise<MiniApp> {
   return startMiniApp((app) => {
     app.use(
       createAuthMiddleware({
@@ -108,6 +108,9 @@ function startApi(fx: Fixture): Promise<MiniApp> {
         registry: fx.registry,
         logger: fx.logger,
         pepper: TEST_PEPPER,
+        ...(options?.woocommerceStoreMode !== undefined
+          ? { woocommerceStoreMode: options.woocommerceStoreMode }
+          : {}),
       }),
     );
     app.get("/raw", (req, res) => {
@@ -613,5 +616,335 @@ describe("dashboard tool/upstream endpoints (D6, D24)", () => {
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.outcome, "error");
     assert.equal(rows[0]?.errorCode, "persist_failed");
+  });
+});
+
+describe("member administration (/api/users, admin-only)", () => {
+  test("GET /users lists members with grants and key counts, never credentials", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    // The fixture issued one key to the admin, none to the reader.
+    const response = await call(active, "GET", "/users", fx.adminKey);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      users: Array<{
+        id: string;
+        displayName: string;
+        role: string;
+        allowedUpstreams: string[];
+        activeKeys: number;
+        totalKeys: number;
+        createdAt: string;
+      }>;
+    };
+    const admin = body.users.find((user) => user.id === ADMIN_ID);
+    const reader = body.users.find((user) => user.id === READER_ID);
+    assert.ok(admin && reader);
+    assert.equal(admin.role, "admin");
+    assert.equal(admin.activeKeys, 1);
+    assert.equal(reader.activeKeys, 1); // reader also got a key in the fixture
+    const serialized = JSON.stringify(body);
+    assert.ok(!serialized.includes("key_hash") && !serialized.includes("umk_"));
+  });
+
+  test("listing members is admin-only: reader gets 403 plus an access_denied row", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    const response = await call(active, "GET", "/users", fx.readerKey);
+    assert.equal(response.status, 403);
+    const denials = fx.auditRepo.byAction("access_denied");
+    assert.equal(denials.length, 1);
+    assert.equal(denials[0]?.outcome, "denied");
+  });
+
+  test("POST /users creates a member, audits user_created, and rejects duplicates", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+
+    const created = await call(active, "POST", "/users", fx.adminKey, {
+      display_name: "member-one",
+      role: "reader",
+      allowed_upstreams: ["woocommerce"],
+      allowed_tools: ["tools:woocommerce_list_products"],
+    });
+    assert.equal(created.status, 201);
+    const record = (await created.json()) as { id: string; displayName: string; activeKeys: number };
+    assert.equal(record.displayName, "member-one");
+    assert.equal(record.activeKeys, 0, "a new member starts with no API keys");
+
+    const createdRows = fx.auditRepo.byAction("user_created");
+    assert.equal(createdRows.length, 1);
+    assert.equal(createdRows[0]?.userId, ADMIN_ID, "the creating admin is the actor");
+    assert.equal(createdRows[0]?.outcome, "success");
+
+    // Duplicate display name → 409, no second row.
+    const duplicate = await call(active, "POST", "/users", fx.adminKey, {
+      display_name: "member-one",
+      role: "reader",
+    });
+    assert.equal(duplicate.status, 409);
+    assert.deepEqual(await duplicate.json(), { error: "display_name_in_use" });
+    assert.equal(fx.auditRepo.byAction("user_created").length, 1);
+  });
+
+  test("POST /users validates role, name and grants server-side", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+
+    const badRole = await call(active, "POST", "/users", fx.adminKey, {
+      display_name: "sneaky",
+      role: "superadmin",
+    });
+    assert.equal(badRole.status, 400);
+
+    const badUpstream = await call(active, "POST", "/users", fx.adminKey, {
+      display_name: "sneaky-two",
+      role: "reader",
+      allowed_upstreams: ["http://evil"],
+    });
+    assert.equal(badUpstream.status, 400);
+
+    const badTool = await call(active, "POST", "/users", fx.adminKey, {
+      display_name: "sneaky-three",
+      role: "reader",
+      allowed_tools: ["woocommerce_list_products"],
+    });
+    assert.equal(badTool.status, 400);
+
+    const shortName = await call(active, "POST", "/users", fx.adminKey, {
+      display_name: "x",
+      role: "reader",
+    });
+    assert.equal(shortName.status, 400);
+
+    assert.equal(fx.auditRepo.byAction("user_created").length, 0);
+    assert.equal((await call(active, "GET", "/users", fx.adminKey)).status, 200);
+  });
+
+  test("POST /users is admin-only: a reader cannot create members", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    const response = await call(active, "POST", "/users", fx.readerKey, {
+      display_name: "privilege-escalation",
+      role: "admin",
+    });
+    assert.equal(response.status, 403);
+    assert.equal(fx.auditRepo.byAction("user_created").length, 0);
+    assert.equal((await call(active, "GET", "/users", fx.adminKey)).status, 200);
+    const listed = (await (await call(active, "GET", "/users", fx.adminKey)).json()) as { users: Array<{ id: string }> };
+    assert.ok(!listed.users.some((user) => user.id === UNKNOWN_ID));
+  });
+
+  test("PATCH /users/:id updates role and grants, audits user_updated, 404s unknown ids", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+
+    const patched = await call(active, "PATCH", `/users/${READER_ID}`, fx.adminKey, {
+      role: "admin",
+      allowed_upstreams: ["woocommerce", "inventory"],
+    });
+    assert.equal(patched.status, 200);
+    const record = (await patched.json()) as { role: string; allowedUpstreams: string[] };
+    assert.equal(record.role, "admin");
+    assert.deepEqual(record.allowedUpstreams, ["woocommerce", "inventory"]);
+    assert.equal(fx.auditRepo.byAction("user_updated").length, 1);
+
+    const unknown = await call(active, "PATCH", `/users/${UNKNOWN_ID}`, fx.adminKey, { role: "reader" });
+    assert.equal(unknown.status, 404);
+
+    const empty = await call(active, "PATCH", `/users/${READER_ID}`, fx.adminKey, {});
+    assert.equal(empty.status, 400);
+
+    const notUuid = await call(active, "PATCH", "/users/not-a-uuid", fx.adminKey, { role: "reader" });
+    assert.equal(notUuid.status, 400);
+  });
+});
+
+describe("audit log filters (GET /api/audit)", () => {
+  async function seedAudit(fx: Fixture): Promise<void> {
+    const rows: Array<Parameters<AuditWriter["record"]>[0]> = [
+      {
+        action: "tool_call",
+        keyId: "key-admin",
+        userId: ADMIN_ID,
+        role: "admin",
+        upstreamId: "woocommerce",
+        toolName: "list_products",
+        qualifiedName: "woocommerce_list_products",
+        outcome: "success",
+        durationMs: 5,
+        errorCode: null,
+      },
+      {
+        action: "tool_call",
+        keyId: "key-reader",
+        userId: READER_ID,
+        role: "reader",
+        upstreamId: "inventory",
+        toolName: "adjust_stock",
+        qualifiedName: "inventory_adjust_stock",
+        outcome: "error",
+        durationMs: 7,
+        errorCode: "upstream_timeout",
+      },
+      {
+        action: "key_revoked",
+        keyId: "key-admin",
+        userId: ADMIN_ID,
+        role: "admin",
+        upstreamId: null,
+        toolName: null,
+        qualifiedName: null,
+        outcome: "success",
+        durationMs: 1,
+        errorCode: null,
+      },
+    ];
+    for (const row of rows) {
+      await fx.audit.record(row);
+    }
+  }
+
+  test("filters return only matching rows; pagination still applies", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    await seedAudit(fx);
+
+    const toolCalls = await call(active, "GET", "/audit?action=tool_call", fx.adminKey);
+    assert.equal(toolCalls.status, 200);
+    const toolBody = (await toolCalls.json()) as { entries: Array<{ action: string }> };
+    assert.equal(toolBody.entries.length, 2);
+    assert.ok(toolBody.entries.every((entry) => entry.action === "tool_call"));
+
+    const failures = await call(active, "GET", "/audit?action=tool_call&outcome=error", fx.adminKey);
+    const failureBody = (await failures.json()) as { entries: Array<{ outcome: string; userId: string | null }> };
+    assert.equal(failureBody.entries.length, 1);
+    assert.equal(failureBody.entries[0]?.outcome, "error");
+    assert.equal(failureBody.entries[0]?.userId, READER_ID);
+
+    const byUser = await call(active, "GET", `/audit?userId=${READER_ID}`, fx.adminKey);
+    const userBody = (await byUser.json()) as { entries: Array<{ userId: string | null }> };
+    assert.ok(userBody.entries.length >= 1);
+    assert.ok(userBody.entries.every((entry) => entry.userId === READER_ID));
+
+    const byUpstream = await call(active, "GET", "/audit?upstreamId=inventory", fx.adminKey);
+    const upstreamBody = (await byUpstream.json()) as { entries: Array<{ upstreamId: string | null }> };
+    assert.equal(upstreamBody.entries.length, 1);
+    assert.equal(upstreamBody.entries[0]?.upstreamId, "inventory");
+
+    const byTool = await call(active, "GET", "/audit?tool=woocommerce_list", fx.adminKey);
+    const toolMatch = (await byTool.json()) as { entries: Array<{ qualifiedName: string | null }> };
+    assert.equal(toolMatch.entries.length, 1);
+    assert.equal(toolMatch.entries[0]?.qualifiedName, "woocommerce_list_products");
+
+    // limit interacts with filters (keyset pagination preserved).
+    const limited = await call(active, "GET", "/audit?action=tool_call&limit=1", fx.adminKey);
+    const limitedBody = (await limited.json()) as { entries: unknown[] };
+    assert.equal(limitedBody.entries.length, 1);
+  });
+
+  test("invalid filter values are rejected with 400 and never reach SQL", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    await seedAudit(fx);
+
+    const badAction = await call(active, "GET", "/audit?action=made_up", fx.adminKey);
+    assert.equal(badAction.status, 400);
+    const badOutcome = await call(active, "GET", "/audit?outcome=maybe", fx.adminKey);
+    assert.equal(badOutcome.status, 400);
+    const badUpstream = await call(active, "GET", "/audit?upstreamId=http", fx.adminKey);
+    assert.equal(badUpstream.status, 400);
+    const badTool = await call(active, "GET", "/audit?tool=", fx.adminKey);
+    assert.equal(badTool.status, 400);
+    const badUser = await call(active, "GET", "/audit?userId=drop%20table", fx.adminKey);
+    assert.equal(badUser.status, 400);
+
+    // Nothing was filtered in — all rows still there.
+    const all = await call(active, "GET", "/audit", fx.adminKey);
+    const allBody = (await all.json()) as { entries: unknown[] };
+    assert.equal(allBody.entries.length, 3);
+  });
+
+  test("audit filters stay admin-only", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    await seedAudit(fx);
+    const response = await call(active, "GET", "/audit?action=tool_call", fx.readerKey);
+    assert.equal(response.status, 403);
+  });
+});
+
+describe("WooCommerce store mode label (GET /api/upstreams)", () => {
+  test("the configured label is exposed on the woocommerce entry only", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx, { woocommerceStoreMode: "mock" });
+    const response = await call(active, "GET", "/upstreams", fx.adminKey);
+    const body = (await response.json()) as { upstreams: Array<{ id: string; mode: string | null }> };
+    assert.equal(body.upstreams.find((entry) => entry.id === "woocommerce")?.mode, "mock");
+    assert.equal(body.upstreams.find((entry) => entry.id === "inventory")?.mode, null);
+    assert.equal(body.upstreams.find((entry) => entry.id === "support")?.mode, null);
+  });
+
+  test("unset mode surfaces as null (no label, no guessing)", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    const response = await call(active, "GET", "/upstreams", fx.adminKey);
+    const body = (await response.json()) as { upstreams: Array<{ id: string; mode: string | null }> };
+    assert.ok(body.upstreams.every((entry) => entry.mode === null));
+  });
+});
+
+describe("connection settings (GET /api/settings)", () => {
+  test("returns the MCP endpoint from deploy config, never a guessed URL", async () => {
+    const fx = makeFixture();
+    active = await startMiniApp((app) => {
+      app.use(
+        createAuthMiddleware({
+          repo: fx.authRepo,
+          sessions: fx.sessions,
+          pepper: TEST_PEPPER,
+          audit: fx.audit,
+          logger: fx.logger,
+        }),
+      );
+      app.use(
+        API_PREFIX,
+        createApiRouter({
+          authRepo: fx.authRepo,
+          auditRepo: fx.auditRepo,
+          audit: fx.audit,
+          sessions: fx.sessions,
+          upstreamState: fx.upstreamState,
+          registry: fx.registry,
+          logger: fx.logger,
+          pepper: TEST_PEPPER,
+          gatewayPublicUrl: "https://mcp.example.com",
+        }),
+      );
+    });
+    const response = await call(active, "GET", "/settings", fx.adminKey);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as Record<string, unknown>;
+    assert.equal(body.mcp_endpoint, "https://mcp.example.com/mcp");
+    assert.equal(body.transport, "streamable-http");
+    assert.equal(body.auth, "bearer");
+    assert.equal(body.chat_enabled, false, "no agent in this fixture");
+    assert.ok(!JSON.stringify(body).includes("umk_"));
+  });
+
+  test("without GATEWAY_PUBLIC_URL the endpoint is null (no invented localhost)", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    const response = await call(active, "GET", "/settings", fx.adminKey);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { mcp_endpoint: string | null; mcp_path: string };
+    assert.equal(body.mcp_endpoint, null);
+    assert.equal(body.mcp_path, "/mcp");
+  });
+
+  test("settings require authentication", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    assert.equal((await call(active, "GET", "/settings")).status, 401);
   });
 });
