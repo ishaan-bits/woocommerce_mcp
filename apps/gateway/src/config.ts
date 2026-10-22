@@ -7,6 +7,7 @@ import {
   type UpstreamConfig,
   type UpstreamId,
 } from "@mcp/shared";
+import type { SessionCookieSecureMode } from "./auth/sessions.ts";
 import { ConfigurationError } from "./errors.ts";
 import type { LogLevel } from "./logger.ts";
 import { hostnameOf, isPrivateAddress } from "./ssrf.ts";
@@ -35,6 +36,14 @@ export interface AppConfig {
   jsonBodyLimit: string;
   /** Trusted proxy hops for client-IP extraction (0 = trust none). */
   trustProxy: number;
+  /**
+   * Session-cookie Secure attribute policy (D33): "auto" sets Secure only
+   * when the login request actually arrived over HTTPS (req.secure, which
+   * follows TRUST_PROXY and X-Forwarded-Proto), "true"/"false" force it.
+   * Auto keeps plain-HTTP local login working in WebKit/Safari, which
+   * rejects Secure cookies set over http even on localhost.
+   */
+  sessionCookieSecure: SessionCookieSecureMode;
   /**
    * Milestone 9 chat agent (D29): null disables the agent entirely (the
    * gateway and dashboard work normally; POST /api/chat returns 503). The
@@ -201,6 +210,15 @@ const envSchema = z.object({
     .min(0, "TRUST_PROXY must be between 0 and 10")
     .max(10, "TRUST_PROXY must be between 0 and 10")
     .default(0),
+  sessionCookieSecure: z
+    .string({ error: 'SESSION_COOKIE_SECURE must be "auto", "true" or "false"' })
+    .trim()
+    .transform((value) => value.toLowerCase())
+    .refine(
+      (value) => value === "auto" || value === "true" || value === "false",
+      'SESSION_COOKIE_SECURE must be "auto", "true" or "false"',
+    )
+    .default("auto"),
   // Milestone 9 chat agent (optional — absent config disables the agent).
   groqApiKey: z.string().optional(),
   groqModel: z
@@ -304,6 +322,7 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     upstreamMaxResponseBytes: trimmed(env, "UPSTREAM_MAX_RESPONSE_BYTES"),
     jsonBodyLimit: trimmed(env, "JSON_BODY_LIMIT"),
     trustProxy: trimmed(env, "TRUST_PROXY"),
+    sessionCookieSecure: trimmed(env, "SESSION_COOKIE_SECURE"),
     groqApiKey: env.GROQ_API_KEY === undefined ? undefined : env.GROQ_API_KEY.trim(),
     groqModel: trimmed(env, "GROQ_MODEL"),
     llmBaseUrl: trimmed(env, "LLM_BASE_URL"),
@@ -338,6 +357,7 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     upstreamMaxResponseBytes: 10 * 1024 * 1024,
     jsonBodyLimit: "100kb",
     trustProxy: 0,
+    sessionCookieSecure: "auto" as SessionCookieSecureMode,
     groqModel: "openai/gpt-oss-120b",
     llmRequestTimeoutMs: 45_000,
     groqApiKey: undefined as string | undefined,
@@ -410,6 +430,7 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     upstreamMaxResponseBytes: data.upstreamMaxResponseBytes,
     jsonBodyLimit: data.jsonBodyLimit,
     trustProxy: data.trustProxy,
+    sessionCookieSecure: data.sessionCookieSecure,
     llm: buildLlmConfig(data.groqApiKey, data.llmBaseUrl, data.groqModel, data.llmRequestTimeoutMs),
     woocommerceStoreMode: data.woocommerceStoreMode === "mock" || data.woocommerceStoreMode === "real" ? data.woocommerceStoreMode : null,
     gatewayPublicUrl: data.gatewayPublicUrl === undefined || data.gatewayPublicUrl === "" ? null : data.gatewayPublicUrl,
@@ -455,6 +476,8 @@ export interface SafeConfigSummary {
   /** Milestone 9: presence only — the key itself is never logged (D29). */
   llm: { configured: boolean; model: string | null; key_present: boolean; base_url: string | null };
   woocommerce_store_mode: "mock" | "real" | null;
+  /** D33: cookie Secure policy in effect (auto | true | false). */
+  session_cookie_secure: SessionCookieSecureMode;
 }
 
 export function safeConfigSummary(config: AppConfig): SafeConfigSummary {
@@ -474,5 +497,6 @@ export function safeConfigSummary(config: AppConfig): SafeConfigSummary {
       base_url: config.llm === null ? null : new URL(config.llm.baseUrl).origin,
     },
     woocommerce_store_mode: config.woocommerceStoreMode,
+    session_cookie_secure: config.sessionCookieSecure,
   };
 }

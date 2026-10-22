@@ -100,6 +100,17 @@ matrix and `docs/decisions.md` rather than from the PDF.
 | Full quality gates re-run | `TEST_DATABASE_URL=… bash scripts/check.sh` → rc 0 "All required checks passed" (incl. 7/7 helm security assertions); **502/502 tests pass** (94+261+39+38+70), 5/5 image builds, `helm lint` 2/2, `npm audit` 0 vulnerabilities, `git diff HEAD` secret scan 0 matches, external-client live suite **2/2** against the deployed gateway |
 | External tool-call still returns real store shape | post-restart `woocommerce_list_products` → 4 products with SKUs `URUMI-TEA-001`, `URUMI-CHAI-001`, `URUMI-COF-001`, `URUMI-MUG-001` (never re-seeded this session) |
 
+## 10. Login / session-expiry fix (continuation milestone: "FIX THE LOGIN")
+
+| Item | Evidence |
+| --- | --- |
+| **Bug fix:** Safari/WebKit login bounced straight back with "Session expired — sign in again to continue." | Root cause (proven by two-engine reproduction *before* touching code): `sessions.ts` set `Secure` unconditionally, and WebKit silently drops a `Secure` cookie delivered on `http://127.0.0.1` — Chromium's localhost exemption had hidden this from every prior automated check. Pre-fix evidence: webkit `loginStatus:200` yet `storedSessionCookies:0` + bounce + two duplicate toasts; chromium control 1/1 OK. Fix (**D33**): `SESSION_COOKIE_SECURE=auto\|true\|false` (default `auto` = `Secure` iff `req.secure`, honouring `TRUST_PROXY`/`X-Forwarded-Proto`) plumbed `config.ts` → `routes.ts` → `sessions.ts` (`sessionSetCookie(token, ttl, secure)`, `sessionClearCookie(secure)`); Helm chart renders it (ConfigMap + schema enum, `values-prod` documents forcing `true` once TLS is enforced). Boot log confirms `"session_cookie_secure":"auto"`. |
+| Session-expiry notice is single-shot and silent on fresh visits | `sessionExpiryShouldNotify()` (dashboard `state.ts`): only `connected` notifies; the 401 handler flips the session ref *synchronously* before React re-renders, so parallel 401s notify once; successful login and logout clear stale toasts (`useToasts().clear`). Pinned by `test/state.test.ts`: checking/anonymous/unreachable → silent, connected → notify, three consecutive 401s → `[true, false, false]`. |
+| Regression tests added (+8 → **510 total**) | `apps/gateway/test/sessions.test.ts` (4: Secure-policy matrix, exact set/clear cookie strings with and without `Secure`, `readCookie` parser fail-closed cases); `test/api.test.ts` (+1: `SESSION_COOKIE_SECURE=true` forces `Secure` on set *and* clear over plain http; tightened: auto-over-http has **no** `Secure`, wrong **and** revoked keys → 401 with **no** `Set-Cookie`, raw key absent from `Set-Cookie` and body); `test/config.test.ts` (+1: default/`TRUE `/`false`/invalid env + boot-log summary); `state.test.ts` (+2, above). |
+| Live proof in **both** engines after redeploy | `.tmp/login-repro.cjs` against `http://127.0.0.1:8088` — chromium **and** webkit, each: invalid key → `loginStatus:401`, `showsErrorBanner:true`, `stillOnSignIn:true`, `storedCookiesAfterFailure:0`; valid key → `200`, one cookie stored (`secure:false`, `httpOnly:true`, `SameSite:Strict`, `Path:/`, 12 h expiry), `#/overview`, `errorBannerStillPresent:false`, `toasts:[]`, `showsSessionExpired:false`; reload stays on `#/overview`. API trace: `401 /api/me` (silent fresh visit) then all `200`. |
+| Live HTTP contract (plain http, `auto`) | login via dashboard proxy **and** direct: 200 + `urumi_session=<…>; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200` (no `Secure`); `/me` with the cookie → 200; wrong key → 401 uniform `{"error":"unauthorized"}` with **no** `Set-Cookie`; logout → 200 + `Max-Age=0` clear cookie. |
+| Full quality gates re-run | `TEST_DATABASE_URL=… bash scripts/check.sh` → rc 0 "All required checks passed"; **510/510 tests** (96 dashboard + 267 gateway + 39 inventory + 38 support + 70 woocommerce), `helm lint` 2/2 (both values files), helm security assertions 7/7, `helm template` renders `SESSION_COOKIE_SECURE` and the schema rejects junk values, diff/staged secret scans 0 matches. |
+
 ## Explicitly not claimed
 
 - **No paid services, no new live LLM spend:** the one allowed Groq end-to-end call
@@ -109,5 +120,11 @@ matrix and `docs/decisions.md` rather than from the PDF.
   real-store proof lives in the live checks of section 3, not in the default `npm test`.
 - **The mock store chart remains** (`mockStore.enabled`) and is clearly labelled
   "Demo mock store" in the dashboard; nothing falls back to it silently.
+- **No authentication or cookie security was weakened to make login "work"** —
+  `HttpOnly`, `SameSite=Strict`, `Path=/`, the 12-hour TTL, sha256-only server storage,
+  key-bound revocation, the uniform 401 body and `/mcp`'s Bearer-only contract are all
+  untouched. The single change is *when* the `Secure` attribute is emitted: exactly when
+  the request arrived over HTTPS (D33 `auto`), because unconditional `Secure` over plain
+  http made login *impossible* in WebKit rather than safer.
 - **No cluster/PVC/DB teardown, no force-push, no secrets in output** — persistent
   data (PostgreSQL PVC, WordPress volume) preserved throughout.

@@ -162,6 +162,7 @@ export function createApp(options: CreateAppOptions): McpApp {
       agent: chatAgent,
       woocommerceStoreMode: config.woocommerceStoreMode,
       gatewayPublicUrl: config.gatewayPublicUrl,
+      sessionCookieSecure: config.sessionCookieSecure,
       now,
     }),
   );

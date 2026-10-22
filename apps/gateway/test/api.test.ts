@@ -86,7 +86,10 @@ function makeFixture(): Fixture {
   };
 }
 
-function startApi(fx: Fixture, options?: { woocommerceStoreMode?: "mock" | "real" | null }): Promise<MiniApp> {
+function startApi(
+  fx: Fixture,
+  options?: { woocommerceStoreMode?: "mock" | "real" | null; sessionCookieSecure?: "auto" | "true" | "false" },
+): Promise<MiniApp> {
   return startMiniApp((app) => {
     app.use(
       createAuthMiddleware({
@@ -110,6 +113,9 @@ function startApi(fx: Fixture, options?: { woocommerceStoreMode?: "mock" | "real
         pepper: TEST_PEPPER,
         ...(options?.woocommerceStoreMode !== undefined
           ? { woocommerceStoreMode: options.woocommerceStoreMode }
+          : {}),
+        ...(options?.sessionCookieSecure !== undefined
+          ? { sessionCookieSecure: options.sessionCookieSecure }
           : {}),
       }),
     );
@@ -352,13 +358,19 @@ describe("dashboard login/session (D23)", () => {
     assert.match(setCookie, /^urumi_session=[A-Za-z0-9_-]+;/);
     assert.ok(setCookie.includes("HttpOnly"));
     assert.ok(setCookie.includes("SameSite=Strict"));
-    assert.ok(setCookie.includes("Secure"));
     assert.ok(setCookie.includes("Path=/"));
     assert.ok(setCookie.includes("Max-Age=43200"));
+    // D33: over plain http with the default "auto" policy the Secure
+    // attribute must be ABSENT — WebKit/Safari silently drops the cookie
+    // if Secure is set on an http:// response (the session-expiry bug).
+    assert.ok(!setCookie.includes("Secure"), "auto over http must not set Secure");
+    // The raw API key never appears in the cookie or the response body.
+    assert.ok(!setCookie.includes(fx.adminKey), "Set-Cookie must not echo the key");
 
     const body = (await response.json()) as Record<string, unknown>;
     assert.equal(body.user_id, ADMIN_ID);
     assert.equal(body.role, "admin");
+    assert.ok(!JSON.stringify(body).includes(fx.adminKey), "login body must not echo the key");
 
     // The browser token is stored hashed and bound to the key; the plaintext
     // key appears nowhere in the session store.
@@ -394,11 +406,37 @@ describe("dashboard login/session (D23)", () => {
     const clearCookie = logout.headers.get("set-cookie") ?? "";
     assert.ok(clearCookie.startsWith("urumi_session=;"));
     assert.ok(clearCookie.includes("Max-Age=0"));
+    // D33: the clearing cookie mirrors the same Secure policy (auto + http).
+    assert.ok(!clearCookie.includes("Secure"));
     assert.equal(fx.sessions.size, 0);
 
     const after = await callWithCookie(active, "GET", "/me", cookie);
     assert.equal(after.status, 401);
     assert.deepEqual(await after.json(), { error: "unauthorized" });
+  });
+
+  test("SESSION_COOKIE_SECURE=true forces Secure on set and clear (HTTPS production mode)", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx, { sessionCookieSecure: "true" });
+
+    const { response, setCookie } = await login(active, fx.adminKey);
+    assert.equal(response.status, 200);
+    assert.ok(setCookie !== null);
+    assert.ok(setCookie.includes("Secure"));
+    assert.ok(setCookie.includes("HttpOnly"));
+    assert.ok(!setCookie.includes(fx.adminKey));
+    const cookie = setCookie.split(";")[0] ?? "";
+
+    // The forced-Secure cookie still round-trips at the HTTP layer.
+    const me = await callWithCookie(active, "GET", "/me", cookie);
+    assert.equal(me.status, 200);
+
+    const logout = await callWithCookie(active, "POST", "/auth/logout", cookie);
+    assert.equal(logout.status, 200);
+    const clearCookie = logout.headers.get("set-cookie") ?? "";
+    assert.ok(clearCookie.startsWith("urumi_session=;"));
+    assert.ok(clearCookie.includes("Max-Age=0"));
+    assert.ok(clearCookie.includes("Secure"));
   });
 
   test("a wrong or revoked key cannot log in: 401, uniform body, auth_failed row", async () => {
@@ -408,12 +446,14 @@ describe("dashboard login/session (D23)", () => {
     const unknown = `umk_${"A".repeat(43)}`;
     const wrong = await login(active, unknown);
     assert.equal(wrong.response.status, 401);
+    assert.equal(wrong.setCookie, null, "a failed login must not set any cookie");
     assert.deepEqual(await wrong.response.json(), { error: "unauthorized" });
 
     const revoked = fx.authRepo.issueKey(READER_ID, TEST_PEPPER);
     fx.authRepo.revokeByKeyId(revoked.keyId);
     const revokedLogin = await login(active, revoked.key);
     assert.equal(revokedLogin.response.status, 401);
+    assert.equal(revokedLogin.setCookie, null, "a revoked key must not set any cookie");
     assert.deepEqual(await revokedLogin.response.json(), { error: "unauthorized" });
 
     const failures = fx.auditRepo.byAction("auth_failed");

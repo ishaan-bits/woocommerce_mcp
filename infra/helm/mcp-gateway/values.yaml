@@ -37,6 +37,12 @@ gateway:
   # Trusted proxy hops for client-IP extraction (login throttle): 1 = the
   # dashboard's nginx; values-prod overrides to 2 when the Ingress sits first.
   trustProxy: 1
+  # Session-cookie Secure attribute policy (D33): "auto" adds Secure only
+  # when the login request actually arrived over HTTPS (TRUST_PROXY +
+  # X-Forwarded-Proto), so plain-HTTP local login also works in Safari/WebKit,
+  # which rejects Secure cookies set over http even on localhost.
+  # "true" / "false" force the attribute (set "true" once TLS is enforced).
+  sessionCookieSecure: "auto"
   # --- Milestone 9 chat agent (D29) -------------------------------------------
   # Non-sensitive LLM settings rendered into the gateway ConfigMap. The
   # provider key is NOT a chart value: it is the optional `GROQ_API_KEY` key

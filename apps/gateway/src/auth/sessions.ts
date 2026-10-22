@@ -45,17 +45,34 @@ export function readCookie(cookieHeader: string | undefined, name: string): stri
 }
 
 /**
- * Secure attributes for the session cookie (D23 / threat model):
+ * Secure attribute policy for the session cookie (D23 / threat model / D33):
  * - HttpOnly: JavaScript (and therefore any XSS payload) cannot read it;
  * - SameSite=Strict: the browser never attaches it to cross-site requests;
- * - Secure: only sent over https (localhost counts as a trustworthy origin,
- *   so this works in local development and behind the M7 ingress TLS);
+ * - Secure: only sent over https — but a Secure cookie SET over plain http is
+ *   rejected outright by WebKit/Safari (even on localhost, which Chrome and
+ *   Firefox treat as trustworthy), so the attribute must follow the actual
+ *   scheme of the request unless an operator forces it (SESSION_COOKIE_SECURE);
  * - no Domain attribute: host-only cookie, cannot leak to sibling hosts.
  */
-export function sessionSetCookie(token: string, maxAgeSeconds: number): string {
-  return `${SESSION_COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}; Secure`;
+export type SessionCookieSecureMode = "auto" | "true" | "false";
+
+/** Resolve the Secure flag for one request: mode + whether the request arrived over HTTPS. */
+export function cookieSecureRequested(mode: SessionCookieSecureMode, requestIsSecure: boolean): boolean {
+  if (mode === "true") {
+    return true;
+  }
+  if (mode === "false") {
+    return false;
+  }
+  return requestIsSecure;
 }
 
-export function sessionClearCookie(): string {
-  return `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure`;
+export function sessionSetCookie(token: string, maxAgeSeconds: number, secure: boolean): string {
+  const base = `${SESSION_COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`;
+  return secure ? `${base}; Secure` : base;
+}
+
+export function sessionClearCookie(secure: boolean): string {
+  const base = `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`;
+  return secure ? `${base}; Secure` : base;
 }

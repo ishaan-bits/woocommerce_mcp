@@ -35,6 +35,7 @@ describe("gateway configuration", () => {
     assert.equal(config.upstreamMaxResponseBytes, 10 * 1024 * 1024);
     assert.equal(config.jsonBodyLimit, "100kb");
     assert.equal(config.trustProxy, 0);
+    assert.equal(config.sessionCookieSecure, "auto");
   });
 
   test("requires at least one upstream URL", () => {
@@ -238,6 +239,23 @@ describe("gateway configuration (C4 SSRF + C7 limits)", () => {
     assert.throws(
       () => loadConfig({ ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL, TRUST_PROXY: "-1" }),
       /TRUST_PROXY must be between 0 and 10/,
+    );
+  });
+
+  test("SESSION_COOKIE_SECURE: defaults to auto, accepts true/false (case-insensitive), rejects junk", () => {
+    const base = { ...REQUIRED_ENV, WOOCOMMERCE_MCP_URL: VALID_URL };
+    assert.equal(loadConfig(base).sessionCookieSecure, "auto");
+    assert.equal(loadConfig({ ...base, SESSION_COOKIE_SECURE: "" }).sessionCookieSecure, "auto");
+    assert.equal(loadConfig({ ...base, SESSION_COOKIE_SECURE: " TRUE " }).sessionCookieSecure, "true");
+    assert.equal(loadConfig({ ...base, SESSION_COOKIE_SECURE: "false" }).sessionCookieSecure, "false");
+    assert.throws(
+      () => loadConfig({ ...base, SESSION_COOKIE_SECURE: "yes" }),
+      /SESSION_COOKIE_SECURE must be/,
+    );
+    assert.equal(safeConfigSummary(loadConfig(base)).session_cookie_secure, "auto");
+    assert.equal(
+      safeConfigSummary(loadConfig({ ...base, SESSION_COOKIE_SECURE: "true" })).session_cookie_secure,
+      "true",
     );
   });
 });

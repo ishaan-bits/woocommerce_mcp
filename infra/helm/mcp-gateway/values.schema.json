@@ -26,6 +26,7 @@
         "loginMaxFailuresPerIp": { "type": "integer", "minimum": 0, "maximum": 1000 },
         "loginFailureWindowMs": { "type": "integer", "minimum": 1000 },
         "trustProxy": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "sessionCookieSecure": { "type": "string", "enum": ["auto", "true", "false"] },
         "llm": {
           "type": "object",
           "properties": {

@@ -49,8 +49,8 @@ live-verified through `/mcp`, an external MCP client compatibility test, and the
 | `packages/shared` contract types | ✅ builds, type-checks, imports (5 WooCommerce tool names) |
 | `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 70 tests; unit tests run against the in-process mock, and since M10 the same server is live-verified against a real in-cluster store (see below) |
 | Documentation (`docs/`) | ✅ architecture, decisions (D1–D32), threat model, learning guide, [requirement matrix](./docs/requirement-matrix.md) |
-| Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, settings, tools, upstream toggles), **261 tests** including the real-PostgreSQL integration suite (which skips with a printed reason without `TEST_DATABASE_URL`), plus an env-gated live external-client test |
-| Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, **Team** (members + API keys) and **Settings** areas, working chat (server-side agent, gateway-audited tool calls), tool-permission indicator mirroring `authorization.ts` exactly; **94 tests** + typecheck + production build |
+| Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, settings, tools, upstream toggles), **267 tests** including the real-PostgreSQL integration suite (which skips with a printed reason without `TEST_DATABASE_URL`), plus an env-gated live external-client test |
+| Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, **Team** (members + API keys) and **Settings** areas, working chat (server-side agent, gateway-audited tool calls), tool-permission indicator mirroring `authorization.ts` exactly; **96 tests** + typecheck + production build |
 | Inventory MCP server | ✅ `list_products` + `adjust_stock` over Streamable HTTP, deterministic 12-item seeded store, 39 tests, registered via `INVENTORY_MCP_URL` (no gateway code changes) |
 | Support MCP server | ✅ `list_tickets` + `create_ticket` over Streamable HTTP, deterministic 8-ticket seeded store, 38 tests, registered via `SUPPORT_MCP_URL` (no gateway code changes) |
 | Docker images | ✅ five multi-stage images (`urumi/<name>:0.1.0`: gateway, three MCP servers, dashboard), non-root, runtime-config only, built and container-tested — see [infra/docker/README.md](./infra/docker/README.md) |
@@ -71,9 +71,9 @@ Support and WooCommerce MCP server processes** over Streamable HTTP
 (`test/real-upstreams.test.ts`); authentication, sessions, upstream toggles and audit logging
 are verified against a **real PostgreSQL 17** in a disposable container via `TEST_DATABASE_URL`
 (`test/integration/postgres.test.ts`); without that variable the integration suite skips with
-a printed reason, while the tests that need no database still run — **502 tests in total with
-the database** (94 dashboard + 261 gateway + 39 inventory + 38 support + 70 woocommerce),
-489 without it.
+a printed reason, while the tests that need no database still run — **510 tests in total with
+the database** (96 dashboard + 267 gateway + 39 inventory + 38 support + 70 woocommerce),
+497 without it.
 
 ---
 
@@ -267,6 +267,50 @@ ClusterIP-only services, stores database state in a PersistentVolumeClaim, and
 reads every credential from a Kubernetes Secret (dev placeholders locally,
 operator-created in production). An API key must be bootstrapped before any
 tool call — exact commands in [infra/helm/README.md](./infra/helm/README.md).
+
+### Local URLs, login flow, and troubleshooting
+
+Use the exact addresses below — nothing serves on plain `http://127.0.0.1`
+(port 80), so a port-less address is never the app:
+
+| What | URL |
+| --- | --- |
+| Dashboard (browser login) | `http://127.0.0.1:8088` |
+| Gateway REST + health (curl) | `http://127.0.0.1:8080` |
+| MCP endpoint (Bearer `Authorization` only — cookies are ignored here) | `http://127.0.0.1:8080/mcp` |
+
+Port-forwards die whenever the forwarded pods restart; restore them with:
+
+```bash
+kubectl -n urumi port-forward svc/dashboard 8088:8080 &
+kubectl -n urumi port-forward svc/gateway 8080:8080 &
+```
+
+**Expected login flow.** Open `http://127.0.0.1:8088` → the sign-in form
+(a silent `GET /api/me` → 401 on a fresh visit is normal and shows no message)
+→ paste a gateway API key (`umk_…`, sent once in the JSON body of
+`POST /api/auth/login`, never stored in the browser) → 200 + the
+`urumi_session` cookie (`HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`,
+plus `Secure` whenever the request arrived over HTTPS — `SESSION_COOKIE_SECURE=auto`,
+D33) → the app lands on `#/overview` and later `/api/*` calls answer 200.
+A reload stays signed in for the cookie's 12-hour lifetime.
+
+**When it does not work:**
+
+| Symptom | Meaning | Fix |
+| --- | --- | --- |
+| Banner "That key was rejected (unknown, malformed or revoked)." | Wrong/revoked key: login 401, no cookie set | Re-issue or re-copy the key (bootstrap commands above) |
+| Toast "Session expired — sign in again to continue." once + the sign-in banner | Cookie died mid-use (12 h TTL or key revoked) | Sign in again; a *repeated* toast would be a regression (D33 tests) |
+| "Gateway unreachable — is it running?" | Port-forward died (pod restarted) | Run the two `port-forward` commands above |
+| Login works in Chrome/Firefox but loops in Safari | Secure cookie set over plain http (fixed by D33 `auto`) | `kubectl -n urumi logs deploy/gateway \| grep session_cookie_secure` → expect `"auto"` |
+
+Safe checks that never print keys or cookies:
+
+```bash
+curl -s http://127.0.0.1:8080/healthz        # {"status":"ok"}
+curl -s http://127.0.0.1:8080/readyz         # 200
+kubectl -n urumi logs deploy/gateway --tail=30   # config_loaded lists session_cookie_secure
+```
 
 ### External MCP clients (Milestone 10)
 

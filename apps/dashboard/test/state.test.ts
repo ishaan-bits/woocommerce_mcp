@@ -14,6 +14,7 @@ import {
   pushToast,
   removeToast,
   resolveTheme,
+  sessionExpiryShouldNotify,
   toFailure,
 } from "../src/state.ts";
 
@@ -163,6 +164,33 @@ describe("toasts (bounded list)", () => {
     const b = makeToast("info", "b");
     assert.deepEqual(removeToast([a, b], a.id), [b]);
     assert.deepEqual(removeToast([a, b], 9999), [a, b]);
+  });
+});
+
+describe("session expiry notification (D33)", () => {
+  test("only a connected session notifies on 401 — fresh checks and repeats stay silent", () => {
+    // Mid-flight first check: no toast, no bounce.
+    assert.equal(sessionExpiryShouldNotify("checking"), false);
+    // The state checkSession lands on when there is no cookie: silent.
+    assert.equal(sessionExpiryShouldNotify("anonymous"), false);
+    // Gateway down: a distinct state, not an expiry story.
+    assert.equal(sessionExpiryShouldNotify("unreachable"), false);
+    // Cookie died mid-use: tell the user exactly once.
+    assert.equal(sessionExpiryShouldNotify("connected"), true);
+  });
+
+  test("consecutive 401s in the same tick notify once (connected → anonymous → silent)", () => {
+    // Simulates two parallel page loads both hitting 401 before React
+    // re-renders: the handler flips the status ref synchronously after
+    // the first one, so the second decision sees "anonymous".
+    let status = "connected";
+    const notifications: boolean[] = [];
+    for (let i = 0; i < 3; i++) {
+      const notify = sessionExpiryShouldNotify(status);
+      notifications.push(notify);
+      if (notify) status = "anonymous";
+    }
+    assert.deepEqual(notifications, [true, false, false]);
   });
 });
 

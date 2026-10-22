@@ -158,9 +158,9 @@ when unset.*
   `apps/gateway/src/api/routes.ts`, `test/api.test.ts`).
 - Basic UX for failure: distinguish loading / empty / error / 401 (re-login) / 403
   (not permitted) / gateway-unreachable (`apps/dashboard/src/state.ts`).
-- Browser auth done right: key exchanged once in a JSON body → `HttpOnly; SameSite=Strict;
-  Secure` cookie with a random token, only its sha256 stored server-side (D23,
-  `apps/gateway/src/auth/sessions.ts`).
+- Browser auth done right: key exchanged once in a JSON body → `HttpOnly; SameSite=Strict`
+  cookie with a random token (`Secure` when served over HTTPS, D33), only its sha256
+  stored server-side (D23, `apps/gateway/src/auth/sessions.ts`).
 - Keyset pagination and redacted rendering: the audit viewer never asks for an unbounded
   page and projects rows through a whitelist before the DOM sees them.
 

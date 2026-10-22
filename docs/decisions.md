@@ -487,6 +487,8 @@ fail closed (`503`, same posture as C6 write-ahead). 12 hours is a fixed TTL wit
 "remember me" and no sliding refresh — chosen for an admin tool, not a consumer app.
 `Secure` is set even in dev (localhost counts as trustworthy); a browser that refuses
 `Secure` cookies over plain HTTP would need a dev exception we deliberately did not add.
+*(Superseded by **D33** below: WebKit/Safari does refuse — even on `http://127.0.0.1`,
+proven live — so the Secure flag now follows the request scheme by default.)*
 Cookie auth is honored under `/api` only, which is a narrower exception than "all non-MCP
 routes" and is asserted by tests (`test/auth-middleware.test.ts`).
 
@@ -895,3 +897,48 @@ never executed before (the skeleton bug hid it).
 legitimately renamed (accepted: they fail with explicit messages), and the live UI proof is
 a scripted check rather than an automated `npm test` gate (accepted: it needs the deployed
 bundle and a session, recorded as live evidence in `docs/requirement-matrix.md` §9).
+
+## D33 — Session cookie `Secure` follows the request scheme (`SESSION_COOKIE_SECURE`)
+
+**Context.** Live browser verification (Chromium *and* WebKit/Safari against the same
+plain-HTTP local stack) reproduced the login loop: `POST /api/auth/login` answered 200, but
+WebKit silently **dropped** the `Secure` cookie set on an `http://127.0.0.1` response —
+Chromium accepts it via its localhost exemption, which is why every earlier automated check
+passed. The dashboard then received 401 on every follow-up `/api/*` call, toasted "Session
+expired — sign in again to continue." (twice — parallel 401s hit an un-flipped session ref)
+and bounced back to the sign-in page. D23's trade-off explicitly assumed localhost always
+counts as trustworthy; WebKit disproves that.
+
+**Decision.** The `Secure` attribute on `urumi_session` (set *and* cleared) is computed per
+request from `SESSION_COOKIE_SECURE`:
+
+- `auto` (default): `Secure` only when the request actually arrived over HTTPS
+  (`req.secure`, which honours `TRUST_PROXY` + `X-Forwarded-Proto`, so a TLS-terminating
+  ingress still gets `Secure` in production);
+- `true` / `false`: force it either way (the Helm chart exposes
+  `gateway.sessionCookieSecure`, rendered into the gateway ConfigMap; `values-prod.yaml`
+  documents flipping to `true` once `ingress.tls` is enforced).
+
+Everything else about the cookie is unchanged (`HttpOnly`, `SameSite=Strict`, `Path=/`,
+12-hour TTL, sha256 stored server-side, key-bound revocation, `/mcp` still Bearer-only).
+The dashboard expiry toast was made single-shot in the same pass: the 401 handler flips the
+session ref *synchronously* before React re-renders, so parallel 401s notify exactly once,
+fresh unauthenticated checks notify never, and a successful login/logout clears stale
+toasts.
+
+**Alternatives.** (a) Keep `Secure` unconditional and special-case the browser — rejected:
+WebKit gives no warning, it just drops the cookie. (b) Drop `Secure` everywhere — rejected:
+production must keep it under HTTPS; `auto` re-derives it from the actual scheme instead.
+(c) User-agent sniff for WebKit and skip `Secure` only for it — rejected: sniffing rots,
+and the fact that matters is the scheme, which the server already knows.
+
+**Trade-offs.** `auto` means a plain-HTTP deployment gets a non-`Secure` cookie — correct
+(the channel is not encrypted; a `Secure` cookie would make login impossible anyway), and
+the Helm values document forcing `true` once TLS is on for defence in depth. Regression
+coverage: `test/sessions.test.ts` (policy matrix + exact cookie strings), `test/api.test.ts`
+(auto-over-http has no `Secure`; `SESSION_COOKIE_SECURE=true` forces it on set and clear;
+failed logins set no cookie; no raw key in cookie or body), `test/config.test.ts` (env
+parsing + boot-log summary), dashboard `test/state.test.ts` (expiry notification:
+connected → once; anonymous/checking/unreachable → never). Live proof in both engines:
+invalid key → 401 banner + 0 cookies; valid key → 200, cookie stored (`secure:false` over
+http), `#/overview`, zero expiry toasts, survives reload.

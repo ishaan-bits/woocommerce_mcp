@@ -23,6 +23,8 @@ export function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     upstreamMaxResponseBytes: 10 * 1024 * 1024,
     jsonBodyLimit: "100kb",
     trustProxy: 0,
+    // D33: default harness behaviour matches production default ("auto").
+    sessionCookieSecure: "auto",
     // Chat agent disabled by default so existing suites are unaffected;
     // agent/chat tests enable it explicitly via overrides.
     llm: null,

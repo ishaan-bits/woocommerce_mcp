@@ -136,6 +136,26 @@ export function removeToast(toasts: readonly Toast[], id: number): Toast[] {
   return toasts.filter((toast) => toast.id !== id);
 }
 
+/* Session expiry (D33) -------------------------------------------------------- */
+
+/**
+ * Should a 401 from the API turn into the "session expired" transition
+ * (anonymous session + one toast)? Only when the session was CONNECTED:
+ *
+ * - connected → yes (the cookie died mid-use — tell the user once);
+ * - anonymous → no (fresh page loads and parallel 401s must NOT repeat
+ *   the notice — this is what used to double-toast after login);
+ * - checking / unreachable → no (the state machine is mid-flight; the
+ *   caller that owns those states resolves it).
+ *
+ * Pure and synchronous so two 401s fired in the same tick (before React
+ * re-renders) both get the honest answer from the ref: the first one
+ * flips the ref immediately, the second one stays silent.
+ */
+export function sessionExpiryShouldNotify(status: string): boolean {
+  return status === "connected";
+}
+
 /* Theme ---------------------------------------------------------------------- */
 
 export type Theme = "dark" | "light";

@@ -27,6 +27,11 @@ gateway:
   # With the Ingress in front of the dashboard's nginx, the client IP the
   # login throttle should key on is two hops back.
   trustProxy: 2
+  # D33: "auto" already yields Secure whenever the edge serves HTTPS (ingress
+  # sets X-Forwarded-Proto: https and TRUST_PROXY is on). Keep "auto" while
+  # TLS is off — a Secure cookie over plain http is rejected by browsers and
+  # would break login. Switch to "true" once ingress.tls is enforced.
+  sessionCookieSecure: "auto"
   # Public origin of the deployment — rendered into GET /api/settings so the
   # dashboard prints correct MCP-client connection instructions.
   publicUrl: "https://mcp.example.com"

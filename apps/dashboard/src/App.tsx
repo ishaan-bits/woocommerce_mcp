@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ApiClient, MeResponse } from "./api/client.ts";
-import { toFailure, resolveTheme, readStoredTheme, storeTheme, type Theme } from "./state.ts";
+import { toFailure, resolveTheme, readStoredTheme, sessionExpiryShouldNotify, storeTheme, type Theme } from "./state.ts";
 import { LoginPage } from "./LoginPage.tsx";
 import { OverviewPage } from "./pages/OverviewPage.tsx";
 import { ToolsPage } from "./pages/ToolsPage.tsx";
@@ -43,22 +43,28 @@ export function App({ api }: { api: ApiClient }) {
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>(() => resolveTheme(readStoredTheme(), prefersLight()));
-  const { toasts, push, dismiss } = useToasts();
+  const { toasts, push, dismiss, clear } = useToasts();
   const sessionRef = useRef(session);
   sessionRef.current = session;
 
   // All page-level calls go through the tracked client: it feeds the
   // connection pill from real API outcomes and converts any 401 into a
-  // session-expired transition (never a silently stale page).
+  // session-expired transition (never a silently stale page). D33: the ref
+  // flips BEFORE the state update so two 401s arriving in the same tick
+  // (parallel page loads) notify exactly once, and a 401 while already
+  // anonymous (e.g. the first unauthenticated check) stays silent.
   const tracked = useMemo(() => trackApi(api), [api]);
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
       const current = sessionRef.current;
-      if (current.status === "connected") {
-        push("info", "Session expired — sign in again to continue.");
-        setSession({ status: "anonymous", expired: true });
+      if (!sessionExpiryShouldNotify(current.status)) {
+        return;
       }
+      const next: Session = { status: "anonymous", expired: true };
+      sessionRef.current = next;
+      setSession(next);
+      push("info", "Session expired — sign in again to continue.");
     });
     return () => setUnauthorizedHandler(null);
   }, [push]);
@@ -126,6 +132,9 @@ export function App({ api }: { api: ApiClient }) {
   const pill = connectionStatus(connection, Date.now());
 
   const onLoggedIn = (me: MeResponse): void => {
+    // A successful login starts clean: any stale error/expiry toast from
+    // before must not linger over the new session.
+    clear();
     setLogoutError(null);
     setSession({ status: "connected", me });
     window.location.hash = routeHash("overview");
@@ -136,6 +145,7 @@ export function App({ api }: { api: ApiClient }) {
     setLogoutError(null);
     try {
       await api.logout();
+      clear();
       setSession({ status: "anonymous", expired: false });
     } catch (error) {
       const failure = toFailure(error);

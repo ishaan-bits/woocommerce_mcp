@@ -40,7 +40,14 @@ export function useToasts() {
     [dismiss],
   );
 
-  return { toasts, push, dismiss };
+  /** Drop every visible toast and cancel their timers (login/logout transitions). */
+  const clear = useCallback(() => {
+    for (const timer of timers.current.values()) clearTimeout(timer);
+    timers.current.clear();
+    setToasts([]);
+  }, []);
+
+  return { toasts, push, dismiss, clear };
 }
 
 export function Toasts({ toasts, onDismiss }: { toasts: readonly Toast[]; onDismiss: (id: number) => void }) {

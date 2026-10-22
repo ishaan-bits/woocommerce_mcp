@@ -87,9 +87,13 @@ Rules implied by the diagram:
 - The pepper is a separate Kubernetes Secret from the database credentials.
 - Revocation sets `revoked_at`; the hash row stays for audit continuity.
 - Rotation: issue a new key, revoke the old one — both keys may briefly coexist.
-- **Browser sessions (Milestone 4, D23):** the dashboard exchanges a key (JSON body only,
-  never a URL) for an opaque 32-byte token delivered as `HttpOnly; SameSite=Strict;
-  Secure` cookie; only `sha256(token)` is stored server-side (`web_sessions`, 12-hour
+- **Browser sessions (Milestone 4, D23; Secure policy D33):** the dashboard exchanges a
+  key (JSON body only,
+  never a URL) for an opaque 32-byte token delivered as `HttpOnly; SameSite=Strict`
+  cookie — plus `Secure` whenever the login request arrived over HTTPS
+  (`SESSION_COOKIE_SECURE=auto`; a Secure cookie set over plain http is silently
+  rejected by WebKit/Safari, so forcing it unconditionally *breaks* local login rather
+  than hardening it); only `sha256(token)` is stored server-side (`web_sessions`, 12-hour
   TTL), bound to the key's user, and re-validated against the key's `revoked_at` on every
   request — revoking a key ends its sessions. The plaintext key never enters
   `localStorage`/`sessionStorage`/URLs/logs, and no credential of any kind exists in the

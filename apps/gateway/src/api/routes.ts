@@ -7,6 +7,7 @@ import { authorizeAdminApi } from "../auth/authorization.ts";
 import { generateApiKey } from "../auth/keys.ts";
 import { principalOf } from "../auth/middleware.ts";
 import {
+  cookieSecureRequested,
   createSessionToken,
   hashSessionToken,
   readCookie,
@@ -54,6 +55,11 @@ export interface ApiRouterDeps {
    * to render accurate MCP-client connection instructions. null = unknown.
    */
   gatewayPublicUrl?: string | null;
+  /**
+   * Secure-flag policy for the session cookie (D33): undefined = "auto"
+   * (Secure only when the request arrived over HTTPS).
+   */
+  sessionCookieSecure?: "auto" | "true" | "false";
   now?: () => number;
 }
 
@@ -302,7 +308,14 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
       return;
     }
 
-    res.setHeader("Set-Cookie", sessionSetCookie(token, Math.floor(SESSION_TTL_MS / 1000)));
+    res.setHeader(
+      "Set-Cookie",
+      sessionSetCookie(
+        token,
+        Math.floor(SESSION_TTL_MS / 1000),
+        cookieSecureRequested(deps.sessionCookieSecure ?? "auto", req.secure === true),
+      ),
+    );
     res.json(meBody(result.principal));
   });
 
@@ -318,7 +331,10 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
         return;
       }
     }
-    res.setHeader("Set-Cookie", sessionClearCookie());
+    res.setHeader(
+      "Set-Cookie",
+      sessionClearCookie(cookieSecureRequested(deps.sessionCookieSecure ?? "auto", req.secure === true)),
+    );
     res.json({ ok: true });
   });
 
