@@ -25,6 +25,12 @@ export interface FakeUpstream {
   origin: string;
   mcpUrl: string;
   calls: Array<{ name: string; args: Record<string, unknown> }>;
+  /**
+   * Authorization-relevant headers observed on /mcp requests (D34 wire
+   * check): the Authorization header plus any x-* custom header, so a test
+   * can prove the gateway attached the admin-entered credential.
+   */
+  seenAuthHeaders: Array<Record<string, string>>;
   close(): Promise<void>;
 }
 
@@ -44,6 +50,7 @@ export async function startFakeUpstream(options: {
   const name = options.name ?? "fake-upstream";
   const tools = options.tools;
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const seenAuthHeaders: Array<Record<string, string>> = [];
   let closed = false;
 
   function makeServer(): Server {
@@ -82,6 +89,16 @@ export async function startFakeUpstream(options: {
   app.use(express.json({ limit: "1mb" }));
 
   app.post("/mcp", async (req, res) => {
+    const observed: Record<string, string> = {};
+    if (typeof req.headers.authorization === "string") {
+      observed.authorization = req.headers.authorization;
+    }
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (key.startsWith("x-") && typeof value === "string") {
+        observed[key] = value;
+      }
+    }
+    seenAuthHeaders.push(observed);
     const server = makeServer();
     try {
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -119,6 +136,7 @@ export async function startFakeUpstream(options: {
     origin,
     mcpUrl: `${origin}/mcp`,
     calls,
+    seenAuthHeaders,
     async close(): Promise<void> {
       if (closed) {
         return;

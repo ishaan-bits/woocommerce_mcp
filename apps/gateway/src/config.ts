@@ -11,6 +11,7 @@ import type { SessionCookieSecureMode } from "./auth/sessions.ts";
 import { ConfigurationError } from "./errors.ts";
 import type { LogLevel } from "./logger.ts";
 import { hostnameOf, isPrivateAddress } from "./ssrf.ts";
+import { decodeCredentialKey } from "./upstream-credentials.ts";
 
 export interface AppConfig {
   host: string;
@@ -18,6 +19,10 @@ export interface AppConfig {
   toolCacheTtlMs: number;
   logLevel: LogLevel;
   upstreams: UpstreamConfig[];
+  /** Per-call timeout applied to every upstream (env UPSTREAM_TIMEOUT_MS). */
+  upstreamTimeoutMs: number;
+  /** Per-connect timeout applied to every upstream (UPSTREAM_CONNECT_TIMEOUT_MS). */
+  upstreamConnectTimeoutMs: number;
   apiKeyPepper: string;
   databaseUrl: string;
   /** C4: hosts (or "*") permitted to resolve to non-routable addresses. */
@@ -66,6 +71,21 @@ export interface AppConfig {
    * instead of inventing a URL.
    */
   gatewayPublicUrl: string | null;
+  /**
+   * Milestone 11: TLS requirement for ADMIN-REGISTERED dynamic upstream URLs
+   * (D34). "allow-http" is the local default (in-cluster demos are plain
+   * http behind ClusterIP); values-prod sets "https-only" so a production
+   * admin cannot point the gateway at an unencrypted endpoint. Fixed
+   * deploy-time upstream URLs are unaffected — they are operator config.
+   */
+  dynamicUpstreamTlsPolicy: "allow-http" | "https-only";
+  /**
+   * Milestone 11 (D34): AES-256-GCM key for dynamic upstream credentials.
+   * null = no vault: creating a credential fails closed and the gateway
+   * refuses to boot if encrypted rows already exist. Presence only is ever
+   * logged; the key itself never appears anywhere.
+   */
+  dynamicUpstreamCredentialKey: Buffer | null;
 }
 
 /** Server-side LLM provider settings for the chat agent (Milestone 9). */
@@ -120,6 +140,50 @@ const mcpUrlSchema = z
     },
     "must not contain a query string or fragment",
   );
+
+export interface UpstreamUrlPolicy {
+  /** C4: hosts (or "*") permitted to resolve to non-routable addresses. */
+  allowedPrivateHosts: readonly string[];
+  /** D34: when true only https:// URLs are accepted (dynamic TLS policy). */
+  requireTls?: boolean;
+}
+
+export type UpstreamUrlValidation =
+  | { ok: true; /** validated string exactly as supplied */ url: string; /** URL.toString() for storage */ normalized: string }
+  | { ok: false; issues: string[] };
+
+/**
+ * One validation path for upstream MCP URLs, shared by deploy-time env
+ * config (requireTls never set) and admin-registered dynamic servers
+ * (requireTls from DYNAMIC_UPSTREAM_TLS_POLICY, D34): scheme, no embedded
+ * credentials, no query/fragment, and the C4 non-routable-address guard.
+ */
+export function validateUpstreamUrlValue(raw: string, policy: UpstreamUrlPolicy): UpstreamUrlValidation {
+  const schemaResult = mcpUrlSchema.safeParse(raw);
+  if (!schemaResult.success) {
+    return { ok: false, issues: schemaResult.error.issues.map((issue) => issue.message) };
+  }
+  const issues: string[] = [];
+  const url = new URL(schemaResult.data);
+  if (policy.requireTls === true && url.protocol !== "https:") {
+    issues.push('must use https:// (DYNAMIC_UPSTREAM_TLS_POLICY is "https-only")');
+  }
+  const host = hostnameOf(url);
+  const allowAll = policy.allowedPrivateHosts.includes("*");
+  if (
+    !allowAll &&
+    isPrivateAddress(host) &&
+    !policy.allowedPrivateHosts.some((entry) => entry.toLowerCase() === host.toLowerCase())
+  ) {
+    issues.push(
+      `points at non-routable address '${host}'; allow-list it via UPSTREAM_ALLOWED_PRIVATE_HOSTS or use a routable address`,
+    );
+  }
+  if (issues.length > 0) {
+    return { ok: false, issues };
+  }
+  return { ok: true, url: schemaResult.data, normalized: url.toString() };
+}
 
 const envSchema = z.object({
   host: z
@@ -276,6 +340,19 @@ const envSchema = z.object({
       "GATEWAY_PUBLIC_URL must be an absolute http:// or https:// URL without path, query or fragment",
     )
     .optional(),
+  // Milestone 11 (D34): TLS policy for admin-registered dynamic upstreams.
+  dynamicUpstreamTlsPolicy: z
+    .string()
+    .trim()
+    .transform((value) => value.toLowerCase())
+    .refine(
+      (value) => value === "" || value === "allow-http" || value === "https-only",
+      'DYNAMIC_UPSTREAM_TLS_POLICY must be "allow-http" or "https-only"',
+    )
+    .optional(),
+  // Milestone 11 (D34): AES-256-GCM key for dynamic upstream credentials.
+  // Validated (base64, 32 bytes) after parse so failures join the issue list.
+  upstreamCredentialKey: z.string().optional(),
   apiKeyPepper: z
     .string({
       error: "API_KEY_PEPPER is required and must be at least 16 characters",
@@ -329,13 +406,28 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     llmRequestTimeoutMs: trimmed(env, "LLM_REQUEST_TIMEOUT_MS"),
     woocommerceStoreMode: trimmed(env, "WOOCOMMERCE_STORE_MODE"),
     gatewayPublicUrl: trimmed(env, "GATEWAY_PUBLIC_URL"),
-    apiKeyPepper: trimmed(env, "API_KEY_PEPPER"),
-    databaseUrl: trimmed(env, "DATABASE_URL"),
+    dynamicUpstreamTlsPolicy: trimmed(env, "DYNAMIC_UPSTREAM_TLS_POLICY"),
+    upstreamCredentialKey:
+      env.UPSTREAM_CREDENTIAL_KEY === undefined ? undefined : env.UPSTREAM_CREDENTIAL_KEY.trim(),
+    apiKeyPepper: env.API_KEY_PEPPER,
+    databaseUrl: env.DATABASE_URL,
   });
 
   const issues: string[] = [];
   if (!parsed.success) {
     issues.push(...parsed.error.issues.map((issue) => issue.message));
+  }
+
+  // Milestone 11 (D34): decode the credential-encryption key last so a bad
+  // value joins every other configuration issue in one fail-fast report.
+  let dynamicUpstreamCredentialKey: Buffer | null = null;
+  if (parsed.success && parsed.data.upstreamCredentialKey !== undefined) {
+    const decoded = decodeCredentialKey(parsed.data.upstreamCredentialKey);
+    if (decoded.ok) {
+      dynamicUpstreamCredentialKey = decoded.key;
+    } else {
+      issues.push(decoded.error);
+    }
   }
 
   const upstreams: UpstreamConfig[] = [];
@@ -364,10 +456,11 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     llmBaseUrl: undefined as string | undefined,
     woocommerceStoreMode: undefined as string | undefined,
     gatewayPublicUrl: undefined as string | undefined,
+    dynamicUpstreamTlsPolicy: "allow-http" as "allow-http" | "https-only",
+    dynamicUpstreamCredentialKey: null as Buffer | null,
   };
   const data = parsed.success ? parsed.data : fallback;
   const allowedPrivateHosts = data.upstreamAllowedPrivateHosts;
-  const allowAll = allowedPrivateHosts.includes("*");
 
   for (const upstreamId of UPSTREAM_IDS) {
     const envKey = UPSTREAM_URL_ENV[upstreamId];
@@ -375,28 +468,14 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     if (raw === undefined) {
       continue;
     }
-    const result = mcpUrlSchema.safeParse(raw);
-    if (!result.success) {
-      issues.push(`${envKey} ${result.error.issues.map((issue) => issue.message).join("; ")}`);
-      continue;
-    }
-    // C4 load-time check: a literal non-routable address is refused at boot
-    // unless allow-listed. DNS names are checked again at connect time.
-    const url = new URL(result.data);
-    const host = hostnameOf(url);
-    if (
-      !allowAll &&
-      isPrivateAddress(host) &&
-      !allowedPrivateHosts.some((entry) => entry.toLowerCase() === host.toLowerCase())
-    ) {
-      issues.push(
-        `${envKey} points at non-routable address '${host}'; allow-list it via UPSTREAM_ALLOWED_PRIVATE_HOSTS or use a routable address`,
-      );
+    const result = validateUpstreamUrlValue(raw, { allowedPrivateHosts });
+    if (!result.ok) {
+      issues.push(`${envKey} ${result.issues.join("; ")}`);
       continue;
     }
     upstreams.push({
       id: upstreamId,
-      baseUrl: result.data,
+      baseUrl: result.url,
       enabled: true,
       timeoutMs: data.timeoutMs,
       connectTimeoutMs: data.connectTimeoutMs,
@@ -419,6 +498,8 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     toolCacheTtlMs: data.toolCacheTtlMs,
     logLevel: data.logLevel,
     upstreams,
+    upstreamTimeoutMs: data.timeoutMs,
+    upstreamConnectTimeoutMs: data.connectTimeoutMs,
     apiKeyPepper: data.apiKeyPepper,
     databaseUrl: data.databaseUrl,
     upstreamAllowedPrivateHosts: allowedPrivateHosts,
@@ -434,6 +515,8 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     llm: buildLlmConfig(data.groqApiKey, data.llmBaseUrl, data.groqModel, data.llmRequestTimeoutMs),
     woocommerceStoreMode: data.woocommerceStoreMode === "mock" || data.woocommerceStoreMode === "real" ? data.woocommerceStoreMode : null,
     gatewayPublicUrl: data.gatewayPublicUrl === undefined || data.gatewayPublicUrl === "" ? null : data.gatewayPublicUrl,
+    dynamicUpstreamTlsPolicy: data.dynamicUpstreamTlsPolicy === "https-only" ? "https-only" : "allow-http",
+    dynamicUpstreamCredentialKey,
   };
 }
 
@@ -472,12 +555,16 @@ export interface SafeConfigSummary {
   port: number;
   tool_cache_ttl_ms: number;
   log_level: LogLevel;
-  upstreams: Array<{ id: UpstreamId; origin: string }>;
+  upstreams: Array<{ id: string; origin: string }>;
   /** Milestone 9: presence only — the key itself is never logged (D29). */
   llm: { configured: boolean; model: string | null; key_present: boolean; base_url: string | null };
   woocommerce_store_mode: "mock" | "real" | null;
   /** D33: cookie Secure policy in effect (auto | true | false). */
   session_cookie_secure: SessionCookieSecureMode;
+  /** D34: TLS policy applied to admin-registered upstream URLs. */
+  dynamic_upstream_tls_policy: "allow-http" | "https-only";
+  /** D34: presence only — the credential key itself is never logged. */
+  upstream_credential_key_present: boolean;
 }
 
 export function safeConfigSummary(config: AppConfig): SafeConfigSummary {
@@ -498,5 +585,7 @@ export function safeConfigSummary(config: AppConfig): SafeConfigSummary {
     },
     woocommerce_store_mode: config.woocommerceStoreMode,
     session_cookie_secure: config.sessionCookieSecure,
+    dynamic_upstream_tls_policy: config.dynamicUpstreamTlsPolicy,
+    upstream_credential_key_present: config.dynamicUpstreamCredentialKey !== null,
   };
 }

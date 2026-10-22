@@ -5,21 +5,24 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { API_PREFIX } from "@mcp/shared";
 import type { Express, NextFunction, Request, Response } from "express";
-import { createChatAgent } from "./agent/agent.ts";
+import { createChatAgent, type ChatAgentOptions } from "./agent/agent.ts";
 import { OpenAiCompatProvider, type ChatProvider } from "./agent/provider.ts";
 import { createApiRouter } from "./api/routes.ts";
 import { createAuditWriter } from "./audit.ts";
 import { createAuthMiddleware, principalOf } from "./auth/middleware.ts";
 import { authorizeToolCall } from "./auth/authorization.ts";
+import { unionUpstreamIds } from "./routing.ts";
 import type { AppConfig } from "./config.ts";
 import type { AuditRepository } from "./db/audit-repository.ts";
 import type { AuthRepository } from "./db/auth-repository.ts";
+import type { DynamicUpstreamRepository } from "./db/dynamic-upstream-repository.ts";
 import type { SessionRepository } from "./db/session-repository.ts";
 import type { UpstreamStateRepository } from "./db/upstream-state-repository.ts";
 import { createTokenBucketLimiter, type TokenBucketLimiter } from "./limits.ts";
 import type { Logger } from "./logger.ts";
 import { createGatewayMcpServer, PERMISSION_DENIED } from "./mcp-server.ts";
 import type { UpstreamRegistry } from "./upstream-registry.ts";
+import type { CredentialVault } from "./upstream-credentials.ts";
 
 export const DEFAULT_MAX_SESSIONS = 100;
 export const DEFAULT_SESSION_IDLE_MS = 30 * 60_000;
@@ -33,6 +36,12 @@ export interface CreateAppOptions {
   /** Dashboard sessions (D23) and persisted upstream toggles (D24). */
   sessionRepo: SessionRepository;
   upstreamStateRepo: UpstreamStateRepository;
+  /**
+   * Milestone 11 (D34): admin-registered upstream CRUD + credential vault.
+   * Undefined in older harnesses = feature unavailable (routes answer 503).
+   */
+  dynamicUpstreamRepo?: DynamicUpstreamRepository;
+  credentialVault?: CredentialVault | null;
   maxSessions?: number;
   sessionIdleMs?: number;
   sweepIntervalMs?: number;
@@ -42,6 +51,11 @@ export interface CreateAppOptions {
    * undefined and the OpenAI-compatible client is built from config.llm.
    */
   provider?: ChatProvider;
+  /**
+   * Chat-agent tunables (retry policy, budgets). Tests inject deterministic
+   * wait/random functions; production uses the bounded defaults.
+   */
+  agentOptions?: Omit<ChatAgentOptions, "provider" | "registry" | "logger" | "audit" | "rateLimiter">;
 }
 
 export interface McpApp {
@@ -144,6 +158,7 @@ export function createApp(options: CreateAppOptions): McpApp {
           logger,
           audit,
           rateLimiter: toolCallRateLimiter,
+          ...options.agentOptions,
         })
       : null;
 
@@ -155,6 +170,8 @@ export function createApp(options: CreateAppOptions): McpApp {
       audit,
       sessions: sessionRepo,
       upstreamState: upstreamStateRepo,
+      dynamicUpstreams: options.dynamicUpstreamRepo,
+      credentialVault: options.credentialVault ?? null,
       registry,
       logger,
       pepper: config.apiKeyPepper,
@@ -163,6 +180,10 @@ export function createApp(options: CreateAppOptions): McpApp {
       woocommerceStoreMode: config.woocommerceStoreMode,
       gatewayPublicUrl: config.gatewayPublicUrl,
       sessionCookieSecure: config.sessionCookieSecure,
+      dynamicUpstreamTlsPolicy: config.dynamicUpstreamTlsPolicy,
+      upstreamAllowedPrivateHosts: config.upstreamAllowedPrivateHosts,
+      upstreamTimeoutMs: config.upstreamTimeoutMs,
+      upstreamConnectTimeoutMs: config.upstreamConnectTimeoutMs,
       now,
     }),
   );
@@ -266,7 +287,10 @@ export function createApp(options: CreateAppOptions): McpApp {
           logger,
           audit,
           principal,
-          authorize: authorizeToolCall.bind(null, principal),
+          // Fixed ∪ live ids (D34) so dynamic tools are grant checked exactly
+          // like fixed ones — and an unconfigured fixed id still fails closed.
+          authorize: (qualifiedName) =>
+            authorizeToolCall(principal, qualifiedName, unionUpstreamIds(registry.upstreamIds())),
           rateLimiter: toolCallRateLimiter,
         });
         await server.connect(transport);

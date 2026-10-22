@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type AggregatedTool, type AuditLogEntry, type UpstreamHealth, type UpstreamId, type UserRole } from "@mcp/shared";
+import { type AggregatedTool, type AuditLogEntry, type UpstreamConfig, type UpstreamHealth, type UserRole } from "@mcp/shared";
 import type { AuditFilters, AuditRepository, NewAuditEntry } from "../../src/db/audit-repository.ts";
 import type {
   AuthRepository,
@@ -12,9 +12,16 @@ import type {
   UserAdminRecord,
 } from "../../src/db/auth-repository.ts";
 import { UserConflictError } from "../../src/db/auth-repository.ts";
+import {
+  DuplicateUpstreamUrlError,
+  type DynamicUpstreamRecord,
+  type DynamicUpstreamRepository,
+  type DynamicUpstreamWrite,
+} from "../../src/db/dynamic-upstream-repository.ts";
 import type { SessionRepository, StoredSession } from "../../src/db/session-repository.ts";
 import type { UpstreamStateRepository } from "../../src/db/upstream-state-repository.ts";
 import type { UpstreamRegistry } from "../../src/upstream-registry.ts";
+import type { UpstreamCredential } from "../../src/upstream-credentials.ts";
 import { generateApiKey } from "../../src/auth/keys.ts";
 
 /**
@@ -83,7 +90,12 @@ export class FakeAuthRepository implements AuthRepository {
 
   async findByPrefix(keyPrefix: string): Promise<StoredApiKey[]> {
     this.guard();
-    return [...(this.byPrefix.get(keyPrefix) ?? [])];
+    // Resolve the user LIVE (like the PostgreSQL JOIN in verify), so a
+    // grant/role update applies to already-issued keys immediately.
+    return [...(this.byPrefix.get(keyPrefix) ?? [])].map((row) => ({
+      ...row,
+      user: this.users.get(row.user.id) ?? row.user,
+    }));
   }
 
   async findKeyById(keyId: string): Promise<StoredApiKey | null> {
@@ -91,7 +103,7 @@ export class FakeAuthRepository implements AuthRepository {
     for (const rows of this.byPrefix.values()) {
       for (const row of rows) {
         if (row.id === keyId) {
-          return { ...row, user: row.user };
+          return { ...row, user: this.users.get(row.user.id) ?? row.user };
         }
       }
     }
@@ -146,6 +158,10 @@ export class FakeAuthRepository implements AuthRepository {
       }
     }
     return out;
+  }
+
+  async listKeysForUser(userId: string): Promise<KeyMetadata[]> {
+    return (await this.listKeys()).filter((key) => key.userId === userId);
   }
 
   async userExists(userId: string): Promise<boolean> {
@@ -257,7 +273,7 @@ export class FakeAuditRepository implements AuditRepository {
       keyId: entry.keyId,
       userId: entry.userId,
       role: entry.role as UserRole | null,
-      upstreamId: entry.upstreamId as UpstreamId | null,
+      upstreamId: entry.upstreamId,
       toolName: entry.toolName,
       qualifiedName: entry.qualifiedName,
       outcome: entry.outcome,
@@ -367,7 +383,7 @@ export class FakeUpstreamStateRepository implements UpstreamStateRepository {
 }
 
 export interface FakeRegistryEntry {
-  id: UpstreamId;
+  id: string;
   enabled: boolean;
   reachable?: boolean;
   lastErrorMessage?: string | null;
@@ -376,13 +392,16 @@ export interface FakeRegistryEntry {
 
 /**
  * Registry stand-in for REST-layer tests: mirrors the real contract
- * (enable gating in listAggregatedTools, health(), setEnabled) without any
- * MCP client or network. MCP-path behaviour of the *real* registry is covered
- * by the mcp- and authz- suites through the gateway harness.
+ * (enable gating in listAggregatedTools, health(), setEnabled, and the
+ * Milestone 11 dynamic add/remove surface) without any MCP client or
+ * network. MCP-path behaviour of the *real* registry is covered by the
+ * mcp- and authz- suites through the gateway harness.
  */
 export class FakeUpstreamRegistry implements UpstreamRegistry {
   readonly entries: FakeRegistryEntry[];
-  readonly toggles: Array<{ id: UpstreamId; enabled: boolean }> = [];
+  readonly toggles: Array<{ id: string; enabled: boolean }> = [];
+  /** Configs passed to addOrUpdateServer (D34), in call order. */
+  readonly registered: Array<{ config: UpstreamConfig; credential: UpstreamCredential | null }> = [];
 
   constructor(entries: FakeRegistryEntry[]) {
     this.entries = entries;
@@ -409,6 +428,29 @@ export class FakeUpstreamRegistry implements UpstreamRegistry {
     }));
   }
 
+  upstreamIds(): readonly string[] {
+    return this.entries.map((entry) => entry.id);
+  }
+
+  async addOrUpdateServer(config: UpstreamConfig, credential: UpstreamCredential | null): Promise<void> {
+    this.registered.push({ config, credential });
+    const entry = this.entries.find((candidate) => candidate.id === config.id);
+    if (entry !== undefined) {
+      entry.enabled = config.enabled;
+      return;
+    }
+    this.entries.push({ id: config.id, enabled: config.enabled, reachable: false });
+  }
+
+  async removeServer(upstreamId: string): Promise<boolean> {
+    const index = this.entries.findIndex((candidate) => candidate.id === upstreamId);
+    if (index === -1) {
+      return false;
+    }
+    this.entries.splice(index, 1);
+    return true;
+  }
+
   setEnabled(upstreamId: string, enabled: boolean): boolean {
     const entry = this.entries.find((candidate) => candidate.id === upstreamId);
     if (entry === undefined) {
@@ -422,4 +464,111 @@ export class FakeUpstreamRegistry implements UpstreamRegistry {
   async refresh(): Promise<void> {}
 
   async close(): Promise<void> {}
+}
+
+/**
+ * In-memory dynamic_upstreams table (D34): same contract as the PostgreSQL
+ * repository, including unique-URL enforcement. `down = true` simulates a
+ * database outage for fail-closed tests.
+ */
+export class FakeDynamicUpstreamRepository implements DynamicUpstreamRepository {
+  private readonly rows = new Map<string, DynamicUpstreamRecord>();
+  down = false;
+
+  private guard(): void {
+    if (this.down) {
+      throw new Error("fake dynamic upstream repository is down");
+    }
+  }
+
+  private copy(row: DynamicUpstreamRecord): DynamicUpstreamRecord {
+    return { ...row, credentialCipher: row.credentialCipher === null ? null : Buffer.from(row.credentialCipher) };
+  }
+
+  async list(): Promise<DynamicUpstreamRecord[]> {
+    this.guard();
+    return [...this.rows.values()].map((row) => this.copy(row));
+  }
+
+  async findById(id: string): Promise<DynamicUpstreamRecord | null> {
+    this.guard();
+    const row = this.rows.get(id);
+    return row === undefined ? null : this.copy(row);
+  }
+
+  async findByUrl(url: string): Promise<DynamicUpstreamRecord | null> {
+    this.guard();
+    for (const row of this.rows.values()) {
+      if (row.url === url) {
+        return this.copy(row);
+      }
+    }
+    return null;
+  }
+
+  async create(id: string, input: DynamicUpstreamWrite, createdBy: string | null): Promise<DynamicUpstreamRecord> {
+    this.guard();
+    for (const row of this.rows.values()) {
+      if (row.url === input.url) {
+        throw new DuplicateUpstreamUrlError();
+      }
+    }
+    const stamp = new Date().toISOString();
+    const row: DynamicUpstreamRecord = {
+      id,
+      name: input.name,
+      url: input.url,
+      enabled: input.enabled,
+      credentialMode: input.credentialMode,
+      credentialHeaderName: input.credentialHeaderName,
+      credentialCipher: input.credentialCipher === null ? null : Buffer.from(input.credentialCipher),
+      createdAt: stamp,
+      updatedAt: stamp,
+    };
+    void createdBy;
+    this.rows.set(id, row);
+    return this.copy(row);
+  }
+
+  async update(id: string, input: DynamicUpstreamWrite, updatedBy: string | null): Promise<DynamicUpstreamRecord | null> {
+    this.guard();
+    const existing = this.rows.get(id);
+    if (existing === undefined) {
+      return null;
+    }
+    for (const row of this.rows.values()) {
+      if (row.id !== id && row.url === input.url) {
+        throw new DuplicateUpstreamUrlError();
+      }
+    }
+    const updated: DynamicUpstreamRecord = {
+      ...existing,
+      name: input.name,
+      url: input.url,
+      enabled: input.enabled,
+      credentialMode: input.credentialMode,
+      credentialHeaderName: input.credentialHeaderName,
+      credentialCipher: input.credentialCipher === null ? null : Buffer.from(input.credentialCipher),
+      updatedAt: new Date().toISOString(),
+    };
+    void updatedBy;
+    this.rows.set(id, updated);
+    return this.copy(updated);
+  }
+
+  async delete(id: string): Promise<boolean> {
+    this.guard();
+    return this.rows.delete(id);
+  }
+
+  async setEnabled(id: string, enabled: boolean, updatedBy: string | null): Promise<boolean> {
+    this.guard();
+    const row = this.rows.get(id);
+    if (row === undefined) {
+      return false;
+    }
+    this.rows.set(id, { ...row, enabled, updatedAt: new Date().toISOString() });
+    void updatedBy;
+    return true;
+  }
 }

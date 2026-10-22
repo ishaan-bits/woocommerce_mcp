@@ -8,8 +8,15 @@ import type { ChatMessage } from "./chat.ts";
 
 type Listener = () => void;
 
+export interface ChatErrorState {
+  code: string;
+  message: string;
+  /** Provider-requested wait before a retry (seconds), when the server knew. */
+  retryAfterSeconds?: number;
+}
+
 let messages: ChatMessage[] = [];
-let lastError: { code: string; message: string } | null = null;
+let lastError: ChatErrorState | null = null;
 const listeners = new Set<Listener>();
 
 function emit(): void {
@@ -20,7 +27,7 @@ export function getChatMessages(): readonly ChatMessage[] {
   return messages;
 }
 
-export function getChatError(): { code: string; message: string } | null {
+export function getChatError(): ChatErrorState | null {
   return lastError;
 }
 
@@ -41,7 +48,7 @@ export function setChatMessages(next: ChatMessage[]): void {
   emit();
 }
 
-export function setChatError(error: { code: string; message: string } | null): void {
+export function setChatError(error: ChatErrorState | null): void {
   lastError = error;
   emit();
 }

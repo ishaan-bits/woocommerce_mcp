@@ -74,6 +74,29 @@ export function toolChipLabel(outcome: string): string {
   }
 }
 
+/** Shown when a turn dies after tools already ran — never fabricates a reply. */
+export const PARTIAL_TURN_TEXT =
+  "This turn stopped before the model replied — the tool calls below already ran.";
+
+/**
+ * The assistant message that preserves partial tool state when a chat turn
+ * fails partway through: the chips stay visible in the thread, and because
+ * it is an *assistant* message the retry target still resolves to the failed
+ * user turn (with history that precedes it — nothing is re-sent twice).
+ */
+export function partialTurnMessage(
+  toolCalls: NonNullable<ChatMessage["toolCalls"]>,
+  rounds?: number,
+): ChatMessage {
+  return {
+    id: newMessageId(),
+    role: "assistant",
+    content: PARTIAL_TURN_TEXT,
+    toolCalls,
+    ...(rounds !== undefined ? { rounds } : {}),
+  };
+}
+
 /** Upstream id parsed from a qualified tool name, or null when unparseable. */
 export function toolUpstream(name: string): string | null {
   return parseToolName(name)?.upstreamId ?? null;

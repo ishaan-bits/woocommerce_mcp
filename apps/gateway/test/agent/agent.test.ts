@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { ApiKeyPrincipal } from "@mcp/shared";
-import { AgentInputError, createChatAgent, type ChatAgent } from "../../src/agent/agent.ts";
+import { AgentInputError, AgentTurnError, createChatAgent, type ChatAgent, type ChatAgentOptions } from "../../src/agent/agent.ts";
 import { OpenAiCompatProvider, ProviderError } from "../../src/agent/provider.ts";
 import { createAuditWriter } from "../../src/audit.ts";
 import { createLogger } from "../../src/logger.ts";
@@ -109,6 +109,7 @@ async function fixture(options: {
   woocommerceUrl?: string;
   totalBudgetMs?: number;
   maxToolRounds?: number;
+  agentOptions?: Omit<ChatAgentOptions, "provider" | "registry" | "logger" | "audit" | "rateLimiter">;
 }): Promise<AgentFixture> {
   const fakes = new Map<string, FakeUpstream>();
   const woocommerce = await startFakeUpstream({ name: "woocommerce-fake", tools: WOOCOMMERCE_TOOLS });
@@ -140,6 +141,7 @@ async function fixture(options: {
     audit,
     ...(options.totalBudgetMs !== undefined ? { totalBudgetMs: options.totalBudgetMs } : {}),
     ...(options.maxToolRounds !== undefined ? { maxToolRounds: options.maxToolRounds } : {}),
+    ...options.agentOptions,
   });
 
   return {
@@ -522,6 +524,9 @@ describe("chat agent — provider failures and secrets", () => {
   test("provider errors propagate without executing anything", async () => {
     const f = await fixture({
       turns: [{ error: new ProviderError("rate_limited", "rate limited", 429) }],
+      // Retries are covered separately below; this asserts first-attempt
+      // failure semantics exactly as before (nothing executes).
+      agentOptions: { maxProviderAttempts: 1 },
     });
     try {
       await assert.rejects(
@@ -882,6 +887,197 @@ describe("chat agent — client-supplied history cannot re-execute or inject", (
         result.toolCalls,
         [{ name: "woocommerce_list_products", outcome: "success" }],
       );
+    } finally {
+      await f.close();
+    }
+  });
+});
+
+describe("chat agent — bounded provider retries (transient rate limits)", () => {
+  test("a 429 with Retry-After is retried after the provider's window and the turn recovers", async () => {
+    const waits: number[] = [];
+    const f = await fixture({
+      turns: [
+        { error: new ProviderError("rate_limited", "rate limited", 429, 1_200) },
+        { toolCalls: [{ name: "woocommerce_list_products", arguments: {} }] },
+        { content: "Recovered." },
+      ],
+      agentOptions: {
+        wait: async (ms) => {
+          waits.push(ms);
+        },
+        random: () => 0,
+      },
+    });
+    try {
+      const result = await f.agent.run({ message: "list products" }, ADMIN);
+      assert.equal(result.reply, "Recovered.");
+      // The provider asked for 1.2s — the agent waited exactly that long.
+      assert.deepEqual(waits, [1_200]);
+      assert.equal(f.provider.requests.length, 3);
+      // The tool ran exactly once: a provider retry never re-executes tools.
+      assert.equal(toolRows(f.auditRepo).length, 1);
+      assert.equal(f.fakes.get("woocommerce")?.calls.length, 1);
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("without provider metadata the agent backs off with bounded jitter", async () => {
+    const waits: number[] = [];
+    const f = await fixture({
+      turns: [
+        { error: new ProviderError("rate_limited", "rate limited", 429) },
+        { content: "Recovered." },
+      ],
+      agentOptions: {
+        wait: async (ms) => {
+          waits.push(ms);
+        },
+        random: () => 1,
+      },
+    });
+    try {
+      const result = await f.agent.run({ message: "hi" }, ADMIN);
+      assert.equal(result.reply, "Recovered.");
+      // Exponential base 300ms + full jitter ceiling 150ms (random=1).
+      assert.deepEqual(waits, [450]);
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("retries are bounded: exhaustion surfaces the rate limit without executing anything", async () => {
+    const waits: number[] = [];
+    const f = await fixture({
+      turns: [
+        { error: new ProviderError("rate_limited", "rate limited", 429) },
+        { error: new ProviderError("rate_limited", "rate limited", 429) },
+        { error: new ProviderError("rate_limited", "rate limited", 429) },
+      ],
+      agentOptions: {
+        wait: async (ms) => {
+          waits.push(ms);
+        },
+        random: () => 0,
+      },
+    });
+    try {
+      await assert.rejects(
+        () => f.agent.run({ message: "hi" }, ADMIN),
+        (error: unknown) => error instanceof ProviderError && error.kind === "rate_limited",
+      );
+      // 3 attempts, 2 waits — never an unbounded loop, never a tool call.
+      assert.equal(f.provider.requests.length, 3);
+      assert.equal(waits.length, 2);
+      assert.equal(toolRows(f.auditRepo).length, 0);
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("a Retry-After window longer than one request may wait is respected: no retry into a closed window", async () => {
+    const waits: number[] = [];
+    const f = await fixture({
+      turns: [{ error: new ProviderError("rate_limited", "rate limited", 429, 60_000) }],
+      agentOptions: {
+        wait: async (ms) => {
+          waits.push(ms);
+        },
+        random: () => 0,
+      },
+    });
+    try {
+      await assert.rejects(
+        () => f.agent.run({ message: "hi" }, ADMIN),
+        (error: unknown) =>
+          error instanceof ProviderError &&
+          error.kind === "rate_limited" &&
+          // The provider's real window is preserved for an honest wait hint.
+          error.retryAfterMs === 60_000,
+      );
+      assert.equal(f.provider.requests.length, 1);
+      assert.deepEqual(waits, []);
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("only certainly-unprocessed failures are retried (no automatic duplicate token spend)", async () => {
+    // Connection-level failure (request never delivered): retried, recovers.
+    const blipWaits: number[] = [];
+    const blip = await fixture({
+      turns: [
+        { error: new ProviderError("unavailable", "LLM provider unreachable") },
+        { content: "Back." },
+      ],
+      agentOptions: {
+        wait: async (ms) => {
+          blipWaits.push(ms);
+        },
+        random: () => 0,
+      },
+    });
+    try {
+      const result = await blip.agent.run({ message: "hi" }, ADMIN);
+      assert.equal(result.reply, "Back.");
+      assert.equal(blip.provider.requests.length, 2);
+      assert.deepEqual(blipWaits, [300]);
+    } finally {
+      await blip.close();
+    }
+
+    // HTTP 5xx, timeouts and rejections may have been processed or billed:
+    // never retried (a wait here would fail the test).
+    for (const error of [
+      new ProviderError("unavailable", "LLM provider returned HTTP 502", 502),
+      new ProviderError("timeout", "LLM provider request timed out"),
+      new ProviderError("rejected", "LLM provider rejected the configured credentials", 401),
+    ]) {
+      const f = await fixture({
+        turns: [{ error }],
+        agentOptions: {
+          wait: async () => {
+            throw new Error("must not wait");
+          },
+        },
+      });
+      try {
+        await assert.rejects(() => f.agent.run({ message: "hi" }, ADMIN));
+        assert.equal(f.provider.requests.length, 1);
+      } finally {
+        await f.close();
+      }
+    }
+  });
+
+  test("a provider failure after tool execution preserves the partial turn and never re-runs the tools", async () => {
+    const f = await fixture({
+      turns: [
+        { toolCalls: [{ name: "woocommerce_list_products", arguments: {} }] },
+        { error: new ProviderError("rate_limited", "rate limited", 429) },
+        { error: new ProviderError("rate_limited", "rate limited", 429) },
+        { error: new ProviderError("rate_limited", "rate limited", 429) },
+      ],
+      agentOptions: {
+        wait: async () => undefined,
+        random: () => 0,
+      },
+    });
+    try {
+      await assert.rejects(
+        () => f.agent.run({ message: "list products" }, ADMIN),
+        (error: unknown) =>
+          error instanceof AgentTurnError &&
+          error.kind === "rate_limited" &&
+          error.rounds === 1 &&
+          error.toolCalls.length === 1 &&
+          error.toolCalls[0]?.outcome === "success",
+      );
+      // The successful tool call survives the failure as state — and stays a
+      // single execution across every provider retry.
+      assert.equal(toolRows(f.auditRepo).length, 1);
+      assert.equal(f.fakes.get("woocommerce")?.calls.length, 1);
     } finally {
       await f.close();
     }

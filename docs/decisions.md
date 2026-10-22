@@ -942,3 +942,102 @@ parsing + boot-log summary), dashboard `test/state.test.ts` (expiry notification
 connected → once; anonymous/checking/unreachable → never). Live proof in both engines:
 invalid key → 401 banner + 0 cookies; valid key → 200, cookie stored (`secure:false` over
 http), `#/overview`, zero expiry toasts, survives reload.
+
+## D34 — Admin-managed dynamic upstreams with an AES-256-GCM credential vault
+
+**Context.** The assignment (G1/A3) requires admins to add, edit, disable and remove
+upstream MCP servers **by URL with an optional static credential (header or bearer)**,
+while the member stories (M4) and the threat model (C3) require that members never see
+or need those credentials and that nothing sensitive lands in the database unencrypted
+(stand-out 6). Until Milestone 11 the registry was deploy-time configuration only
+(`UPSTREAM_*_MCP_URL`), which also meant the gateway genuinely "held only URLs" — a
+claim the threat model could make safely then and must not make now.
+
+**Decision.**
+1. **A second registry source**: fixed env-configured upstreams stay exactly as they
+   were; admin-registered servers live in the `dynamic_upstreams` table (migration
+   `004`, unique URL, enable flag) and are merged into the live registry at boot and on
+   every CRUD call (`addOrUpdateServer` / `removeServer`), with immediate tool
+   re-discovery. Fixed ids refuse edit/delete (`409 upstream_not_configured` for
+   unconfigured fixed ids, `400 unknown_upstream` for unknown ones) so deploy-time
+   topology cannot be silently rewritten from the UI.
+2. **Credentials are encrypted at rest** (stand-out 6): AES-256-GCM under
+   `UPSTREAM_CREDENTIAL_KEY` (32 random bytes in the release Secret), with the
+   ciphertext **AAD-bound to the upstream id** so a row cannot be moved between
+   upstreams. Plaintext exists only in process memory on the outbound hop; the API
+   returns `has_credential`/`credential_mode` booleans and admin-only URLs (C4), logs
+   and audit rows never carry either. Updates are three-state (omit = unchanged,
+   `null` = clear, object = replace). Without a configured vault the feature fails
+   **closed** (`503`) rather than storing anything.
+3. **The same security envelope as everything else**: admin-only routes, C4 SSRF
+   validation of admin-entered URLs (private-address classifier + allow-list), the
+   shared authorization/audit pipeline, and member views that see status but not URLs.
+
+**Alternatives considered.** Plaintext credentials in the DB like most control planes —
+rejected (assignment stand-out 6 explicitly grades encryption at rest). A separate
+secret per upstream as Kubernetes Secrets — rejected: admins must self-serve from the
+dashboard without kubectl. Per-tenant KMS — rejected (₹0 constraint, no paid services).
+
+**Trade-offs.** The gateway process now holds upstream secrets (it must, to
+authenticate) — the threat model's C3 was rewritten to say exactly this instead of the
+old "gateway holds only URLs". Losing `UPSTREAM_CREDENTIAL_KEY` means losing the stored
+credentials (documented: re-enter them; URLs and grants survive). Coverage:
+`test/upstream-credentials.test.ts` (round-trip, AAD binding, fail-closed, header
+derivation), `test/upstream-crud.test.ts` (CRUD, unique URL, redaction, three-state
+patch, golden-path tool discovery with grants still gating members),
+`test/integration/postgres.test.ts` (real tables), plus the live Phase 1 walkthrough
+(create-with-credential → discovered tools → redacted member view → delete).
+
+## D35 — Chat reliability: bounded provider retries honouring `Retry-After`, and provider availability is not gateway health
+
+**Context.** Intermittent chat failure reproduced from the browser: after two successful
+tool-using turns (`woocommerce_list_products`, then `woocommerce_list_orders`), a later
+turn failed with the provider rate-limit message while the topbar simultaneously showed
+"Gateway unreachable — last call failed" — although the gateway and the WooCommerce
+upstream were both healthy. Three independent defects: (a) the pill was fed by *every*
+API rejection, so a well-formed 429 from the gateway's own `/api/chat` mapping looked like
+connectivity loss; (b) the provider adapter discarded `Retry-After`/reset metadata and the
+agent loop made exactly one attempt per round, so a single transient HTTP 429 failed the
+whole turn instantly; (c) "Retry last message" appended the failed user message a second
+time and error bodies dropped the tool state of a turn that had already executed tools.
+
+**Decision.**
+1. **The pill tracks gateway connectivity only.** Network failures and gateway 5xx mark it
+   unreachable; provider-side codes (`provider_rate_limited`, `provider_timeout`,
+   `provider_error`, `agent_not_configured`) leave it "Connected" — provider availability
+   belongs to the chat banner, never to the gateway health indicator.
+2. **Bounded, provider-aware retries in the agent loop** (`maxProviderAttempts`, default 3).
+   Only *certainly unprocessed* failures are retried: HTTP 429 (rejected pre-generation)
+   and connection-level unavailability. Timeouts, HTTP 5xx and rejections are never retried
+   — a request that may have been processed or billed is never re-sent automatically
+   (no duplicate token spend, no double tool execution — tools run only after a successful
+   completion). The provider's `Retry-After` (or reset metadata) is honoured exactly when
+   short (≤ 3 s and request-budget-feasible); otherwise exponential backoff with full
+   jitter applies; a window longer than the cap means **no retry inside the request** —
+   the error surfaces with `retry_after_seconds` (+ `Retry-After` header) so the user gets
+   "You can retry in about N s" and a safe manual retry. Retries are logged as
+   `chat_provider_retry` (kind/attempt/wait only).
+3. **Partial turn state survives failure.** A provider failure after tool execution throws
+   `AgentTurnError` carrying the gateway-computed tool reports; 429/502/504 bodies return
+   them, the UI keeps the chips visible as an explicit "turn stopped early" assistant
+   message, and "Retry last message" re-sends exactly the failed user turn — the history
+   is plain `{role, content}` wire shape, so prior turns' tool calls can never be
+   re-executed by a retry (regression-tested).
+
+**Alternatives considered.** Synthesising a 200 "partial" reply on provider failure —
+rejected: hides genuine provider outages. Retrying every failure class — rejected: timeouts
+and 5xx may have consumed billed tokens. Sleeping out long `Retry-After` windows inside the
+request — rejected: holds the request (and its 60 s budget) hostage and invites retry
+storms. Putting retries inside the provider adapter — rejected: the agent owns the total
+budget and tool-state bookkeeping, and keeping policy in the agent keeps it testable
+against the scripted double.
+
+**Trade-offs.** A turn that fails *after* its tools ran will re-run those tools if the user
+retries the message — resuming mid-turn would require tool-role history, which the wire
+contract deliberately forbids (client-supplied history cannot re-execute anything). The
+chips make that visible instead of silent. Coverage: gateway `test/agent/provider.test.ts`
+(metadata parsing), `test/agent/agent.test.ts` (bounded retries, recovery, exhaustion,
+closed-window bail, partial state, exactly-once tool execution), `test/chat-api.test.ts`
+(Retry-After + chips on the wire, in-request recovery), dashboard
+`test/connection.test.ts` (provider vs connectivity) and `test/chat.test.ts` +
+`test/client.test.ts` (retry target + error details).

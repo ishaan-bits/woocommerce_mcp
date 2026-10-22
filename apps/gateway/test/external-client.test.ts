@@ -109,5 +109,42 @@ describe(
         await client.close();
       }
     });
+
+    test("DoD D6: one session reaches TWO different upstreams (two-upstream prompt)", async () => {
+      const { client } = await connect();
+      try {
+        const { tools } = await client.listTools();
+        const prefixes = new Set(tools.map((tool) => tool.name.split("_")[0]));
+        assert.ok(prefixes.size >= 2, "the key must see tools from at least two upstreams");
+
+        // The demo prompt: "compare products and orders" style — one question,
+        // tools from two upstreams, one session, one key. The demo member key
+        // is granted both reads; a denial here means the key lacks grants.
+        const calls: Array<[string, string]> = [
+          ["woocommerce_list_products", "woocommerce"],
+          ["inventory_list_products", "inventory"],
+        ];
+        const reached = new Set<string>();
+        for (const [name, upstream] of calls) {
+          if (!tools.some((tool) => tool.name === name)) continue;
+          const result = await client.callTool({ name, arguments: {} });
+          if (result.isError === true) {
+            const message = firstText(result);
+            assert.ok(
+              !/not granted|denied/i.test(message),
+              `the demo key must be granted ${name} for the two-upstream prompt — got: ${message}`,
+            );
+            assert.fail(`${name} failed on a live gateway: ${message}`);
+          }
+          reached.add(upstream);
+        }
+        assert.ok(
+          reached.has("woocommerce") && reached.has("inventory"),
+          `expected calls to both upstreams in one session, reached: ${JSON.stringify([...reached])}`,
+        );
+      } finally {
+        await client.close();
+      }
+    });
   },
 );

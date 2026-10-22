@@ -110,6 +110,8 @@ describe("POST /api/chat", () => {
       const harness = await startGatewayHarness({
         provider: new ScriptedProvider([{ error: new ProviderError("rate_limited", "rate limited", 429) }]),
         config: LLM_CONFIG,
+        // Mapping (not retry behaviour) is under test here.
+        agentOptions: { maxProviderAttempts: 1 },
       });
       try {
         const { status, json } = await chatJson(harness.origin, harness.adminKey, { message: "hi" });
@@ -132,6 +134,61 @@ describe("POST /api/chat", () => {
       } finally {
         await harness.close();
       }
+    }
+  });
+
+  test("a rate-limited turn that already ran tools reports Retry-After and keeps the partial tool chips", async () => {
+    const provider = new ScriptedProvider([
+      { toolCalls: [{ name: "woocommerce_list_products", arguments: { page: 1 } }] },
+      // 60s window > the 3s in-request cap: surfaces immediately, no retry.
+      { error: new ProviderError("rate_limited", "rate limited", 429, 60_000) },
+    ]);
+    const harness = await startGatewayHarness({ provider, config: LLM_CONFIG });
+    try {
+      const response = await fetch(`${harness.origin}/api/chat`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${harness.adminKey}`,
+        },
+        body: JSON.stringify({ message: "list products" }),
+      });
+      const json = (await response.json()) as Record<string, unknown>;
+      assert.equal(response.status, 429);
+      assert.equal(json.error, "provider_rate_limited");
+      assert.equal(response.headers.get("retry-after"), "60");
+      assert.equal(json.retry_after_seconds, 60);
+      const chips = json.tool_calls as Array<{ name: string; outcome: string }>;
+      assert.deepEqual(chips, [{ name: "woocommerce_list_products", outcome: "success" }]);
+      assert.equal(json.rounds, 1);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("a transient rate limit recovers in-request with a bounded retry — the user never sees a failure", async () => {
+    const waits: number[] = [];
+    const provider = new ScriptedProvider([
+      { error: new ProviderError("rate_limited", "rate limited", 429) },
+      { content: "Recovered after a transient rate limit." },
+    ]);
+    const harness = await startGatewayHarness({
+      provider,
+      config: LLM_CONFIG,
+      agentOptions: {
+        wait: async (ms) => {
+          waits.push(ms);
+        },
+        random: () => 0,
+      },
+    });
+    try {
+      const { status, json } = await chatJson(harness.origin, harness.adminKey, { message: "hi" });
+      assert.equal(status, 200);
+      assert.equal(json.reply, "Recovered after a transient rate limit.");
+      assert.deepEqual(waits, [300]);
+    } finally {
+      await harness.close();
     }
   });
 

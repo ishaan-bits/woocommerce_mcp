@@ -43,6 +43,9 @@ gateway:
   # which rejects Secure cookies set over http even on localhost.
   # "true" / "false" force the attribute (set "true" once TLS is enforced).
   sessionCookieSecure: "auto"
+  # TLS policy for admin-registered (D34) upstream URLs: "https-only" refuses
+  # http:// at registration; "allow-http" is for local kind only (demo servers).
+  dynamicUpstreamTlsPolicy: "https-only"
   # --- Milestone 9 chat agent (D29) -------------------------------------------
   # Non-sensitive LLM settings rendered into the gateway ConfigMap. The
   # provider key is NOT a chart value: it is the optional `GROQ_API_KEY` key
@@ -265,12 +268,17 @@ secrets:
   data: {}
 
 # Ingress: routes one host — /mcp and /api → gateway, / → dashboard
-# (docs/architecture.md §8). TLS is an integration point only: supply a real
-# certificate (e.g. cert-manager) before enabling it.
+# (docs/architecture.md §8). When storefrontHost is set, a second host routes
+# / → the WordPress storefront (wordpress.enabled must be true). TLS is an
+# integration point only: supply a real certificate (e.g. cert-manager) before
+# enabling it.
 ingress:
   enabled: false
   className: nginx
   host: ""
+  # Optional second hostname for the WooCommerce storefront, e.g.
+  # "shop.example.com". Empty = no storefront rule is rendered.
+  storefrontHost: ""
   annotations: {}
   tls:
     enabled: false

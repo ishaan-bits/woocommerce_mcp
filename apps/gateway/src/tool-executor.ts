@@ -5,7 +5,7 @@ import type { AuthzDecision } from "./auth/authorization.ts";
 import { ArgumentValidationError, isGatewayError } from "./errors.ts";
 import type { TokenBucketLimiter } from "./limits.ts";
 import type { Logger } from "./logger.ts";
-import { parseToolName } from "./routing.ts";
+import { parseToolName, unionUpstreamIds } from "./routing.ts";
 import type { UpstreamRegistry } from "./upstream-registry.ts";
 
 /**
@@ -64,7 +64,7 @@ export async function executeToolCall(
 ): Promise<ToolCallOutcome> {
   const { registry, logger, audit, principal, authorize, rateLimiter } = options;
   const startedAt = Date.now();
-  const parsed = parseToolName(qualifiedName);
+  const parsed = parseToolName(qualifiedName, unionUpstreamIds(registry.upstreamIds()));
 
   // C6 / §5.4: exactly one audit row per execution attempt, written
   // (awaited) before the caller sees the outcome.

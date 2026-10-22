@@ -8,12 +8,14 @@
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import type { ApiClient } from "../api/client.ts";
+import { ApiError } from "../api/client.ts";
 import { toFailure } from "../state.ts";
 import {
   EXAMPLE_PROMPTS,
   MAX_INPUT_CHARS,
   isAbortError,
   newMessageId,
+  partialTurnMessage,
   retryTarget,
   toolChipLabel,
   toolUpstream,
@@ -53,13 +55,21 @@ export function ChatPage({ api }: { api: ApiClient }) {
   }, [messages, busy]);
 
   const send = useCallback(
-    async (text: string, history: Array<{ role: "user" | "assistant"; content: string }>) => {
+    async (
+      text: string,
+      history: Array<{ role: "user" | "assistant"; content: string }>,
+      options: { retry?: boolean } = {},
+    ) => {
       if (abortRef.current !== null) return; // in-flight guard
       const controller = new AbortController();
       abortRef.current = controller;
       setBusy(true);
       setChatError(null);
-      appendChatMessage({ id: newMessageId(), role: "user", content: text });
+      // A retry re-sends the failed turn's own message — it already lives in
+      // the thread, so appending it again would duplicate the conversation.
+      if (options.retry !== true) {
+        appendChatMessage({ id: newMessageId(), role: "user", content: text });
+      }
       try {
         const response = await api.chat(text, history, controller.signal);
         appendChatMessage({
@@ -77,7 +87,16 @@ export function ChatPage({ api }: { api: ApiClient }) {
         if (failure.code === "agent_not_configured") {
           setAgentMissing(true);
         } else {
-          setChatError(failure);
+          // A turn that failed after some tool calls ran keeps its
+          // gateway-computed chips visible — nothing is silently lost.
+          const details = caught instanceof ApiError ? caught.details : undefined;
+          if (details?.tool_calls !== undefined && details.tool_calls.length > 0) {
+            appendChatMessage(partialTurnMessage(details.tool_calls, details.rounds));
+          }
+          setChatError({
+            ...failure,
+            ...(details?.retry_after_seconds !== undefined ? { retryAfterSeconds: details.retry_after_seconds } : {}),
+          });
         }
       } finally {
         abortRef.current = null;
@@ -100,7 +119,7 @@ export function ChatPage({ api }: { api: ApiClient }) {
     if (busy) return;
     const target = retryTarget(messages);
     if (target === null) return;
-    void send(target.message, target.history);
+    void send(target.message, target.history, { retry: true });
   };
 
   const onExample = (prompt: string): void => {
@@ -128,9 +147,7 @@ export function ChatPage({ api }: { api: ApiClient }) {
         <div className="banner banner-error" role="alert">
           <p>
             Chat failed: {storedError.message}
-            {storedError.code === "provider_rate_limited" && " The provider is rate limiting requests — try again shortly."}
-            {storedError.code === "provider_timeout" && " The provider timed out — try again."}
-            {storedError.code === "provider_error" && " The provider could not complete the request — try again."}
+            {storedError.retryAfterSeconds !== undefined && ` You can retry in about ${storedError.retryAfterSeconds}s.`}
           </p>
           <button type="button" className="btn btn-secondary btn-sm" onClick={onRetry} disabled={busy}>
             Retry last message

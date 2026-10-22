@@ -13,6 +13,7 @@ import { createAuthMiddleware, principalOf } from "../../src/auth/middleware.ts"
 import { generateApiKey } from "../../src/auth/keys.ts";
 import { createDatabaseDeps, type DatabaseDeps } from "../../src/db/index.ts";
 import { UserConflictError } from "../../src/db/auth-repository.ts";
+import { DuplicateUpstreamUrlError } from "../../src/db/dynamic-upstream-repository.ts";
 import { runMigrations } from "../../src/db/migrate.ts";
 import { createLogger, type Logger } from "../../src/logger.ts";
 import { applyUpstreamOverrides, createUpstreamRegistry } from "../../src/upstream-registry.ts";
@@ -105,7 +106,13 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
     const applied = await admin.query<{ filename: string }>(`SELECT filename FROM schema_migrations`);
     assert.deepEqual(
       applied.rows.map((row) => row.filename),
-      ["001_init.sql", "002_dashboard.sql", "003_user_admin.sql"],
+      [
+        "001_init.sql",
+        "002_dashboard.sql",
+        "003_user_admin.sql",
+        "004_dynamic_upstreams.sql",
+        "005_demo_grants.sql",
+      ],
     );
 
     const tables = await admin.query<{ regclass: string | null }>(
@@ -113,7 +120,7 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
     );
     assert.equal(tables.rows[0]?.regclass, "users");
     const more = await Promise.all(
-      ["api_keys", "audit_log", "web_sessions", "upstream_overrides"].map((table) =>
+      ["api_keys", "audit_log", "web_sessions", "upstream_overrides", "dynamic_upstreams"].map((table) =>
         admin.query<{ regclass: string | null }>(`SELECT to_regclass('public.${table}')::text AS regclass`),
       ),
     );
@@ -122,27 +129,51 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
       "audit_log",
       "web_sessions",
       "upstream_overrides",
+      "dynamic_upstreams",
     ]);
 
-    const users = await admin.query<{ display_name: string; role: string; allowed_tools: string[] }>(
-      `SELECT display_name, role, allowed_tools FROM users ORDER BY display_name`,
+    const users = await admin.query<{
+      display_name: string;
+      role: string;
+      allowed_upstreams: string[];
+      allowed_tools: string[];
+    }>(
+      `SELECT display_name, role, allowed_upstreams, allowed_tools FROM users ORDER BY display_name`,
     );
     assert.deepEqual(users.rows, [
       {
         display_name: "admin-demo",
         role: "admin",
+        // 001_init.sql seeded this order; 005 only touched allowed_tools, so
+        // the upstream array keeps its original order.
+        allowed_upstreams: ["woocommerce", "inventory", "support"],
+        // 005_demo_grants.sql rewrites allowed_tools as a sorted DISTINCT
+        // union of the 001 seeds plus the inventory/support tools (X3).
         allowed_tools: [
-          "tools:woocommerce_list_products",
+          "tools:inventory_adjust_stock",
+          "tools:inventory_list_products",
+          "tools:support_create_ticket",
+          "tools:support_list_tickets",
           "tools:woocommerce_create_product",
-          "tools:woocommerce_list_orders",
           "tools:woocommerce_get_order",
+          "tools:woocommerce_list_orders",
+          "tools:woocommerce_list_products",
           "tools:woocommerce_update_order_status",
         ],
       },
       {
         display_name: "reader-demo",
         role: "reader",
-        allowed_tools: ["tools:woocommerce_list_products", "tools:woocommerce_list_orders", "tools:woocommerce_get_order"],
+        // 005_demo_grants.sql adds inventory + support as a sorted DISTINCT
+        // union (X3/X4); the reader keeps only read-only tools.
+        allowed_upstreams: ["inventory", "support", "woocommerce"],
+        allowed_tools: [
+          "tools:inventory_list_products",
+          "tools:support_list_tickets",
+          "tools:woocommerce_get_order",
+          "tools:woocommerce_list_orders",
+          "tools:woocommerce_list_products",
+        ],
       },
     ]);
   });
@@ -212,6 +243,18 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
     const forbidden = await call("GET", "/api/keys", issued.key);
     assert.equal(forbidden.status, 403);
     assert.deepEqual(await forbidden.json(), { error: "forbidden" });
+
+    // Self-serve (M1/X4): the reader mints their OWN key through the real
+    // SQL path and lists exactly their two keys (admin-issued + self-serve).
+    const selfServe = await call("POST", "/api/me/keys", issued.key);
+    assert.equal(selfServe.status, 201);
+    const ownKey = (await selfServe.json()) as { key: string; user_id: string };
+    assert.equal(ownKey.user_id, READER_ID);
+    const ownList = await call("GET", "/api/me/keys", issued.key);
+    assert.equal(ownList.status, 200);
+    const ownBody = (await ownList.json()) as { keys: unknown[] };
+    assert.equal(ownBody.keys.length, 2, "reader owns the admin-issued key and the self-serve one");
+    assert.ok(!JSON.stringify(ownBody).includes(ownKey.key), "listing never echoes plaintext");
 
     // Stored schema: no plaintext column, no plaintext value anywhere.
     const columns = await admin.query<{ column_name: string }>(
@@ -798,6 +841,85 @@ describe("PostgreSQL integration (real database)", { skip: RUN ? false : SKIP_RE
       await registry.close();
       await admin.query(`DELETE FROM upstream_overrides`);
     }
+  });
+
+  test("dynamic upstream CRUD, unique-URL enforcement and audit actions run against the real tables (D34)", async () => {
+    const repo = deps.dynamicUpstreamRepo;
+    const cipher = Buffer.alloc(48, 3);
+    const created = await repo.create(
+      "acme-lab",
+      {
+        name: "Acme Lab",
+        url: "https://lab.example.test/mcp",
+        enabled: true,
+        credentialMode: "bearer",
+        credentialHeaderName: null,
+        credentialCipher: cipher,
+      },
+      "11111111-1111-4111-8111-111111111111",
+    );
+    assert.equal(created.id, "acme-lab");
+    const fetched = await repo.findById("acme-lab");
+    assert.equal(fetched?.name, "Acme Lab");
+    assert.deepEqual(fetched?.credentialCipher, cipher, "ciphertext round-trips as bytes");
+
+    // Same URL under a different id is rejected by the unique index.
+    await assert.rejects(
+      () =>
+        repo.create(
+          "acme-lab-2",
+          {
+            name: "Copy",
+            url: "https://lab.example.test/mcp",
+            enabled: true,
+            credentialMode: null,
+            credentialHeaderName: null,
+            credentialCipher: null,
+          },
+          null,
+        ),
+      (error: unknown) => error instanceof DuplicateUpstreamUrlError,
+    );
+
+    assert.equal(await repo.setEnabled("acme-lab", false, null), true);
+    assert.equal((await repo.findById("acme-lab"))?.enabled, false);
+    assert.equal(await repo.findByUrl("https://lab.example.test/mcp").then((row) => row?.id), "acme-lab");
+
+    const updated = await repo.update(
+      "acme-lab",
+      {
+        name: "Acme Lab 2",
+        url: "https://lab2.example.test/mcp",
+        enabled: true,
+        credentialMode: null,
+        credentialHeaderName: null,
+        credentialCipher: null,
+      },
+      null,
+    );
+    assert.equal(updated?.name, "Acme Lab 2");
+    assert.equal(updated?.credentialCipher, null, "update can clear the stored credential");
+
+    assert.equal(await repo.delete("acme-lab"), true);
+    assert.equal(await repo.findById("acme-lab"), null);
+    assert.equal(await repo.delete("acme-lab"), false, "second delete is a no-op");
+
+    // The audit CHECK accepts the M11 actions and stores the dynamic id.
+    await deps.auditRepo.append({
+      action: "upstream_created",
+      keyId: null,
+      userId: "11111111-1111-4111-8111-111111111111",
+      role: "admin",
+      upstreamId: "acme-lab",
+      toolName: null,
+      qualifiedName: null,
+      outcome: "success",
+      durationMs: 1,
+      errorCode: null,
+    });
+    const recent = await deps.auditRepo.recent(1);
+    assert.equal(recent[0]?.action, "upstream_created");
+    assert.equal(recent[0]?.upstreamId, "acme-lab");
   });
 
   test("a failing migration rolls back and records nothing in schema_migrations (C6)", async () => {

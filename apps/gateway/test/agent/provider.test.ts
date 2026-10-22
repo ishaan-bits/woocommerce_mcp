@@ -8,6 +8,7 @@ import {
   argumentsWereMalformed,
   OpenAiCompatProvider,
   parseChatCompletion,
+  parseRetryAfterMs,
   ProviderError,
 } from "../../src/agent/provider.ts";
 import type { LlmConfig } from "../../src/config.ts";
@@ -239,6 +240,68 @@ describe("parseChatCompletion", () => {
   test("rejects shapes that are not chat completions", () => {
     for (const payload of [null, 42, {}, { choices: [] }, { choices: [{ message: "nope" }] }]) {
       assert.throws(() => parseChatCompletion(payload), (error: unknown) => error instanceof ProviderError);
+    }
+  });
+});
+
+describe("provider rate-limit metadata (Retry-After / reset)", () => {
+  function fetchWithHeaders(status: number, body: unknown, headers: Record<string, string>) {
+    return async (): Promise<Response> =>
+      new Response(typeof body === "string" ? body : JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json", ...headers },
+      });
+  }
+
+  test("a 429 with Retry-After (delta-seconds) carries it as retryAfterMs", async () => {
+    const provider = new OpenAiCompatProvider(
+      config(),
+      fetchWithHeaders(429, { error: "rate_limit" }, { "retry-after": "17" }),
+    );
+    await assert.rejects(
+      () => provider.complete({ messages: [{ role: "user", content: "hi" }], tools: [], timeoutMs: 1_000 }),
+      (error: unknown) =>
+        error instanceof ProviderError && error.kind === "rate_limited" && error.status === 429 && error.retryAfterMs === 17_000,
+    );
+  });
+
+  test("Retry-After as an HTTP-date becomes the delta until that moment", async () => {
+    // The wire date has second resolution, so the derived delta is 24–25s.
+    const date = new Date(Date.now() + 25_000).toUTCString();
+    const provider = new OpenAiCompatProvider(config(), fetchWithHeaders(429, {}, { "retry-after": date }));
+    await assert.rejects(
+      () => provider.complete({ messages: [{ role: "user", content: "hi" }], tools: [], timeoutMs: 1_000 }),
+      (error: unknown) =>
+        error instanceof ProviderError &&
+        error.retryAfterMs !== undefined &&
+        error.retryAfterMs >= 23_000 &&
+        error.retryAfterMs <= 25_000,
+    );
+  });
+
+  test("x-ratelimit reset headers are honoured as fallbacks; absent metadata stays undefined", () => {
+    assert.equal(parseRetryAfterMs(new Headers({ "x-ratelimit-reset-seconds": "2.5" })), 2_500);
+    assert.equal(parseRetryAfterMs(new Headers({ "x-ratelimit-reset": "8" })), 8_000);
+    const nowMs = Date.parse("2026-10-22T12:00:00Z"); // fixed instant — deterministic delta
+    // A unix-epoch reset becomes the delta until that moment.
+    assert.equal(
+      parseRetryAfterMs(new Headers({ "x-ratelimit-reset": String(nowMs / 1_000 + 40) }), nowMs),
+      40_000,
+    );
+    assert.equal(parseRetryAfterMs(new Headers()), undefined);
+    assert.equal(parseRetryAfterMs(new Headers({ "retry-after": "soon" })), undefined);
+    // Past dates and zero/negative waits mean "retry now is fine" → agent backoff.
+    assert.equal(parseRetryAfterMs(new Headers({ "retry-after": "0" })), undefined);
+    assert.equal(parseRetryAfterMs(new Headers({ "retry-after": "Thu, 01 Jan 1970 00:00:00 GMT" }), nowMs), undefined);
+  });
+
+  test("non-429 failures carry no wait metadata", async () => {
+    for (const status of [500, 502, 401]) {
+      const provider = new OpenAiCompatProvider(config(), fetchWithHeaders(status, {}, {}));
+      await assert.rejects(
+        () => provider.complete({ messages: [{ role: "user", content: "hi" }], tools: [], timeoutMs: 1_000 }),
+        (error: unknown) => error instanceof ProviderError && error.retryAfterMs === undefined,
+      );
     }
   });
 });

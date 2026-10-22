@@ -14,6 +14,9 @@ export const AUDIT_ACTIONS: readonly string[] = [
   "upstream_disabled",
   "user_created",
   "user_updated",
+  "upstream_created",
+  "upstream_updated",
+  "upstream_deleted",
 ];
 
 export const AUDIT_OUTCOMES: readonly string[] = ["success", "error", "timeout", "denied"];

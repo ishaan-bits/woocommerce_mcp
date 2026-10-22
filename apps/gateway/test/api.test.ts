@@ -277,6 +277,76 @@ describe("admin API (/api, C2)", () => {
     assert.ok(!JSON.stringify(body).includes(fx.adminKey));
   });
 
+  test("self-serve POST /me/keys issues a working key for the caller only (M1)", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+
+    // A reader can mint a key for THEMSELVES without admin rights.
+    const created = await call(active, "POST", "/me/keys", fx.readerKey);
+    assert.equal(created.status, 201);
+    const body = (await created.json()) as { id: string; key: string; key_prefix: string; user_id: string };
+    assert.ok(looksLikeApiKey(body.key));
+    assert.equal(body.user_id, READER_ID);
+    assert.equal(body.key_prefix, body.key.slice(0, 12));
+
+    // Stored material never contains the plaintext.
+    const rows = await fx.authRepo.findByPrefix(body.key_prefix);
+    assert.equal(rows.length, 1);
+    assert.ok(!JSON.stringify(rows).includes(body.key));
+
+    // The audit row is written and does not carry the plaintext.
+    const creation = fx.auditRepo.byAction("key_created");
+    assert.equal(creation.length, 1);
+    assert.equal(creation[0]?.userId, READER_ID);
+    assert.ok(!JSON.stringify(creation).includes(body.key));
+
+    // The issued key authenticates immediately as the reader.
+    const me = await fetch(`${active.origin}/raw`, { headers: { authorization: `Bearer ${body.key}` } });
+    assert.equal(me.status, 200);
+    const principal = ((await me.json()) as { principal: { userId: string; role: string } | null }).principal;
+    assert.equal(principal?.userId, READER_ID);
+    assert.equal(principal?.role, "reader");
+  });
+
+  test("POST /me/keys requires authentication", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    const response = await call(active, "POST", "/me/keys");
+    assert.equal(response.status, 401);
+    assert.deepEqual(await response.json(), { error: "unauthorized" });
+    assert.equal(fx.auditRepo.byAction("key_created").length, 0);
+  });
+
+  test("GET /me/keys lists only the caller's own keys, without hashes or plaintext", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+
+    // Admin mints one key for the reader via the admin route; reader mints
+    // their own via self-serve. The reader's listing must include both of
+    // THEIR keys and none of the admin's.
+    const forReader = await call(active, "POST", "/keys", fx.adminKey, { user_id: READER_ID });
+    assert.equal(forReader.status, 201);
+    const own = await call(active, "POST", "/me/keys", fx.readerKey);
+    assert.equal(own.status, 201);
+
+    const listing = await call(active, "GET", "/me/keys", fx.readerKey);
+    assert.equal(listing.status, 200);
+    const body = (await listing.json()) as { keys: Array<{ id: string; key_prefix: string }> };
+    // Reader now owns: the fixture-seeded key + the admin-minted one + the
+    // self-serve one. All three are theirs; none of the admin's.
+    assert.equal(body.keys.length, 3);
+    for (const key of body.keys) {
+      assert.ok(!("key" in key));
+      assert.ok(!("keyHash" in key));
+      assert.ok(!("userId" in key));
+    }
+    const adminListing = await call(active, "GET", "/me/keys", fx.adminKey);
+    const adminBody = (await adminListing.json()) as { keys: unknown[] };
+    assert.equal(adminBody.keys.length, 1, "admin sees only their own key, not the reader's");
+    assert.ok(!JSON.stringify(body).includes(fx.readerKey));
+    assert.ok(!JSON.stringify(body).includes(fx.adminKey));
+  });
+
   test("GET /audit enforces the limit/before contract and returns newest first", async () => {
     const fx = makeFixture();
     active = await startApi(fx);

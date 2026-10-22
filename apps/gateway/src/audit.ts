@@ -1,4 +1,4 @@
-import type { AuditAction, AuditLogEntry, ToolCallOutcome, UpstreamId, UserRole } from "@mcp/shared";
+import type { AuditAction, AuditLogEntry, ToolCallOutcome, UserRole } from "@mcp/shared";
 import type { AuditRepository, NewAuditEntry } from "./db/audit-repository.ts";
 import type { Logger } from "./logger.ts";
 
@@ -42,7 +42,7 @@ export interface AuditWriter {
     principalKey: string | null;
     userId: string | null;
     role: UserRole | null;
-    upstreamId: UpstreamId | null;
+    upstreamId: string | null;
     toolName: string | null;
     qualifiedName: string;
     outcome: ToolCallOutcome;

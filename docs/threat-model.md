@@ -136,22 +136,38 @@ row), and the `403` + `access_denied` rows against real PostgreSQL in
 
 ### C3 — Upstream credential isolation (protects A1)
 
-- WooCommerce consumer key/secret exist **only** as env vars inside the `woocommerce-mcp` Pod,
-  mounted from a Kubernetes Secret.
-- They are never sent to the gateway, never returned by any API, never logged (log scrubbing
-  for `ck_`/`cs_` prefixes — and, since Milestone 8, for `sk_`/`umk_` keys, `Bearer` tokens,
-  `postgres://` URLs, session-cookie values and JSON `authorization` fields in **both** the
-  gateway and woocommerce-mcp loggers), never in the dashboard bundle.
-- The gateway holds only the *URL* of the WooCommerce MCP server, not store credentials.
-- Store API keys get the **minimum WooCommerce permission** that works (`read` vs `read/write`
-  split if two keys are feasible).
+There are **two classes** of upstream credential, and neither is ever visible to a member:
 
-**Status: implemented (Milestones 3–8). Verified by:** `test/logger.test.ts` (gateway:
-"redacts credential-looking strings", "redacts postgres URLs, session cookies and
-authorization fields (C3)"), `services/woocommerce-mcp/test/logger.test.ts` (parity test
-covering `umk_`/`sk_`/`Bearer`/postgres/authorization), `test/audit.test.ts` ("No failure
-row ever carries a full key"), `test/auth-keys.test.ts` (stored material never contains
-plaintext), and the M8 demo script's live grep of gateway logs (`scripts/security-demo.sh`).
+1. **Store credentials** (WooCommerce consumer key/secret) exist **only** as env vars
+   inside the `woocommerce-mcp` Pod, mounted from a Kubernetes Secret.
+2. **Admin-entered static credentials** for dynamic upstreams (Milestone 11, D34) are
+   held by the gateway: AES-256-GCM ciphertext in PostgreSQL (`UPSTREAM_CREDENTIAL_KEY`,
+   32-byte key in the release Secret), AAD-bound to the upstream id. Plaintext exists
+   only in gateway memory on the outbound hop to that upstream.
+
+- They are never sent to the browser, never returned by any API (`has_credential` /
+  `credential_mode` booleans only, URLs admin-only per C4), never logged (log scrubbing
+  for `ck_`/`cs_` prefixes — and, since Milestone 8, for `sk_`/`umk_` keys, `Bearer`
+  tokens, `postgres://` URLs, session-cookie values and JSON `authorization` fields in
+  **both** the gateway and woocommerce-mcp loggers), never in the dashboard bundle.
+- **What a member can do with a credential they never see:** exactly what their *own*
+  grants allow — call granted tools through the gateway, which authenticates to the
+  upstream with the stored credential. The member's key authenticates them to the
+  **gateway** only; it is never forwarded upstream. A member cannot read, replay or
+  extract the upstream credential, cannot register or edit upstreams (admin-only), and
+  cannot reach the upstream's network (ClusterIP-only services, gateway-mediated).
+- Store API keys get the **minimum WooCommerce permission** that works (`read` vs
+  `read/write` split if two keys are feasible).
+
+**Status: implemented (Milestones 3–8 + Milestone 11 D34). Verified by:**
+`test/logger.test.ts` (gateway: "redacts credential-looking strings", "redacts postgres
+URLs, session cookies and authorization fields (C3)"),
+`services/woocommerce-mcp/test/logger.test.ts` (parity test covering `umk_`/`sk_`/
+`Bearer`/postgres/authorization), `test/audit.test.ts` ("No failure row ever carries a
+full key"), `test/auth-keys.test.ts` (stored material never contains plaintext),
+`test/upstream-credentials.test.ts` (ciphertext-only storage, AAD binding, fail-closed),
+`test/upstream-crud.test.ts` (responses/logs redacted), and the M8 demo script's live
+grep of gateway logs (`scripts/security-demo.sh`).
 
 ### C4 — URL validation / SSRF prevention (protects A6)
 
@@ -277,7 +293,12 @@ with a structured error while other upstreams keep working"), `test/limits.test.
 rate_limited", "the rate limit is per key: another principal is unaffected", "oversized
 request bodies are refused with 413", "a second concurrent call to the same upstream
 fails with busy while the first completes"), plus the C4 response-cap tests in
-`test/ssrf.test.ts`.
+`test/ssrf.test.ts`. **Live drill (Milestone 11 Phase 4, 2026-10-22):** the
+`inventory-mcp` upstream was taken down in-cluster (deployment scaled to 0; the literal
+`kubectl delete pod` variant is in `docs/demo-runbook.md` T9) — only `inventory_*` tools
+failed (structured *"upstream 'inventory' is unreachable"*), `woocommerce_*` kept serving
+real store data, `/api/upstreams` showed `reachable:false` with a `last_error`, and
+service resumed after restore. In-process twin: `test/dod-flow.test.ts` "D9".
 
 ### C8 — Supporting controls
 
@@ -323,6 +344,61 @@ containment, round/history bounds, exactly-one audit rows, no `gsk_` in outputs)
 `/mcp`), `test/config.test.ts` (agent off by default; summary logs presence only).
 
 ---
+
+## 3c. Threat scenarios the assignment calls out (PDF deliverable)
+
+The assignment asks for a short note on four specific scenarios. Each is answered by
+controls above; here they are side by side.
+
+**1. Shared upstream credentials — what can a member do with a credential they never
+see?** The upstream credential belongs to the *platform*, not to the member. When a
+member calls a granted tool, the gateway attaches the stored credential on the final
+hop to the upstream (or the upstream server holds its own store keys, as
+`woocommerce-mcp` does). The member's own key authenticates them to the **gateway**
+only. So a member can do exactly what their grants allow through the gateway — and
+nothing else: they cannot read the credential (API returns booleans only; DB holds
+AES-256-GCM ciphertext; logs scrub), cannot use it against the upstream directly
+(ClusterIP-only services, no external exposure — W4), cannot add or edit upstreams
+(admin-only), and cannot smuggle it out through tool results (upstream responses are
+sanitized, B3). Evidence: C3, `upstream-credentials.test.ts`, `upstream-crud.test.ts`.
+
+**2. Why client tokens are not passed through to upstream servers.** Two different
+credentials serve two different trust boundaries, and conflating them would destroy
+auditability and blast-radius control. The client's `umk_…` key identifies the caller
+*to the gateway* (hash+pepper storage, revocable, per-user). Upstreams would gain
+nothing from it and would suddenly need to understand our auth scheme; worse, a
+compromised upstream could replay caller keys against the gateway. So the gateway
+**terminates** client authentication, authorizes the call against that principal's
+grants, then authenticates to the upstream with the *upstream's* credential. The only
+caller-derived artifact an upstream ever sees is the (optional, static) shared upstream
+credential — never a client token. Evidence: `tool-executor.ts` (single pipeline),
+`test/real-upstreams.test.ts` (real servers see only their own configured auth),
+`agent.test.ts` ("no provider credential or internal URL appears in responses").
+
+**3. Untrusted upstreams — tool descriptions written to manipulate the model.** A
+registered upstream (even an admin-added one) controls its tool **names and
+descriptions**, which are untrusted input. Mitigations: the system prompt fixes the
+rules and is never rewritten from tool data; tool *outputs* are fed back only as `tool`
+messages and explicitly labelled untrusted; authorization is re-checked at execution
+time against the human principal, so a hostile description cannot grant itself a write
+tool; schema validation of arguments happens in the gateway regardless of what the
+description claims; and every executed call is audited, so a manipulated model shows up
+as a trail of attributed calls. Prompt-injection containment is regression-tested
+(`agent.test.ts` "injected tool output cannot escalate: a following write call is still
+denied"). Residual risk is documented: a malicious upstream can still *lie in its
+outputs* — the containment goal is that lying cannot escalate authority.
+
+**4. What one team member can do to another.** Members are peers in role but isolated
+in identity: each has their own keys (self-served, revocable — M1/T7), and every API
+scopes by the authenticated principal — `GET /api/me/keys` lists only the caller's own
+keys, member management and key issuance/revoke for *others* are admin-only, and audit
+rows attribute actions to the actor. A member cannot revoke, read or impersonate
+another member's key; at most they can consume shared capacity (bounded by per-key rate
+limits and per-upstream concurrency caps, C7). Admins can act on members' keys — that
+is the admin role's purpose, and every such action is audited (`key_revoked` names the
+revoked key and the acting admin). Evidence: `api.test.ts` (self-serve scoping),
+`dod-flow.test.ts` D7/D10, `permissions.test.ts` / `authorization.test.ts` ("grants
+bind admins too").
 
 ## 4. Threat → control map
 
@@ -371,3 +447,13 @@ The security milestone is complete when every control C1–C7 has:
 
 Milestone 8 satisfies all four criteria for the remaining controls (C3, C4, C7, C8
 and the B1/B3 hardening); C1, C2, C5 and C6 were completed in Milestones 3–4.
+
+**Milestone 11 Phase 4 adds the two-user evidence walk** in
+[`docs/demo-runbook.md`](./demo-runbook.md): the same controls exercised *by the two
+demo principals* on the live cluster (2026-10-22) — member key revoked and rejected on
+the next call (C1), write tools denied to the member while granted to the admin (C2/C5),
+member never sees upstream credentials (C3), a dead upstream isolated (C7), and every
+call attributed in the audit log (C6). Each runbook step names its evidence status; the
+LLM-dependent chat steps are explicitly **not** marked verified this pass (provider
+quota), and the dashboard's `last_error` wording for dead upstreams remains a known
+cosmetic gap.

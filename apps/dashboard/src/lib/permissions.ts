@@ -105,7 +105,12 @@ export function roleLabel(role: string): string {
 }
 
 /** Short human label for an upstream id. */
-export function upstreamLabel(id: string): string {
+export function upstreamLabel(id: string, displayName?: string): string {
+  // Admin-registered servers (M11) carry their own name; fixed env servers
+  // keep their friendly deploy-time label.
+  if (displayName !== undefined && displayName !== "" && displayName !== id) {
+    return displayName;
+  }
   return id === "woocommerce" ? "WooCommerce" : id === "inventory" ? "Inventory" : id === "support" ? "Support" : id;
 }
 

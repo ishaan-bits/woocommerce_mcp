@@ -4,6 +4,10 @@
  * - `trackApi` wraps the client so every authenticated call records the last
  *   successful timestamp (the topbar "connected" pill is derived from real
  *   API success, never a fake health probe — /healthz is not proxied).
+ * - Only genuine connectivity trouble (network failures, gateway 5xx) marks
+ *   the gateway unreachable. An LLM-provider rate limit or outage reported
+ *   by a healthy gateway keeps the pill "Connected" — provider availability
+ *   is shown in the chat banner instead, never conflated with gateway health.
  * - Any 401 (UnauthorizedError) from a tracked call flips the app back to
  *   the login screen with a "session expired" note.
  *
@@ -12,7 +16,7 @@
  */
 
 import type { ApiClient } from "../api/client.ts";
-import { UnauthorizedError } from "../api/client.ts";
+import { ApiError, UnauthorizedError } from "../api/client.ts";
 
 export interface ConnectionState {
   lastSuccessAt: number | null;
@@ -38,6 +42,13 @@ export function subscribeConnection(listener: Listener): () => void {
   return () => {
     listeners.delete(listener);
   };
+}
+
+/** Test-only reset; the UI never calls this. */
+export function resetConnection(): void {
+  state = { lastSuccessAt: null, lastFailureAt: null };
+  unauthorizedHandler = null;
+  emit();
 }
 
 export function setUnauthorizedHandler(handler: (() => void) | null): void {
@@ -82,6 +93,34 @@ function isAbort(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { name?: string }).name === "AbortError";
 }
 
+/**
+ * Codes that mean "the gateway answered; something beyond it is unavailable"
+ * (LLM provider busy/timeout/down, agent not configured). These say nothing
+ * about gateway connectivity — the pill must not claim "unreachable" for them.
+ */
+const PROVIDER_SIDE_CODES = new Set([
+  "provider_rate_limited",
+  "provider_timeout",
+  "provider_error",
+  "agent_not_configured",
+]);
+
+/**
+ * True when the call failed DESPITE a healthy gateway (an application-level
+ * answer, typically provider availability). False for real connectivity
+ * trouble: network failures (`gateway_unreachable`, status 0) and gateway
+ * server errors (5xx `internal_error` and friends).
+ */
+function isGatewayStillReachable(error: unknown): boolean {
+  if (!(error instanceof ApiError)) {
+    return false;
+  }
+  if (error.code === "gateway_unreachable") {
+    return false;
+  }
+  return PROVIDER_SIDE_CODES.has(error.code) || error.status < 500;
+}
+
 /** Wrap a client so successes/failures feed the pill and 401s expire the session. */
 export function trackApi(api: ApiClient): ApiClient {
   const wrap = <T,>(promise: Promise<T>): Promise<T> =>
@@ -93,8 +132,11 @@ export function trackApi(api: ApiClient): ApiClient {
       (error: unknown) => {
         if (error instanceof UnauthorizedError) {
           unauthorizedHandler?.();
-        } else if (!isAbort(error)) {
-          // A user-initiated Stop/abort is not a gateway failure.
+        } else if (!isAbort(error) && !isGatewayStillReachable(error)) {
+          // A user-initiated Stop/abort is not a gateway failure. Neither is
+          // an LLM-provider rate limit or outage reported by a healthy
+          // gateway — provider availability is a separate concern from
+          // gateway connectivity (the chat banner shows provider errors).
           noteApiFailure();
         }
         throw error;

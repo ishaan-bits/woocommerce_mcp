@@ -10,6 +10,8 @@ export function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     toolCacheTtlMs: 60_000,
     logLevel: "error",
     upstreams: [],
+    upstreamTimeoutMs: 10_000,
+    upstreamConnectTimeoutMs: 3_000,
     apiKeyPepper: TEST_PEPPER,
     databaseUrl: TEST_DATABASE_URL,
     upstreamAllowedPrivateHosts: [],
@@ -31,6 +33,8 @@ export function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     // Store-mode label off by default; upstreams endpoint tests override it.
     woocommerceStoreMode: null,
     gatewayPublicUrl: null,
+    dynamicUpstreamTlsPolicy: "allow-http",
+    dynamicUpstreamCredentialKey: null,
     ...overrides,
   };
 }

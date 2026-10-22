@@ -312,7 +312,7 @@ different client tomorrow.
 | **Pod** | The smallest deployable unit: one or more containers sharing a network and filesystem. | Each service runs in its own Pod so it can fail, restart and scale independently. |
 | **Deployment** | Declares "keep N copies of this Pod running, rolling-update them safely". | `replicas: 2` for the gateway later; `1` for MCP servers initially. |
 | **Service** | Stable virtual IP + DNS name that load-balances to a set of Pods (which may be replaced any moment). | `gateway` → `:8080`, `woocommerce-mcp` → `:8081`, `postgres` → `:5432`. Pod IPs are never hardcoded. |
-| **Ingress** | Routes external HTTP(S) traffic to Services by hostname/path; usually terminates TLS. | One host: `/mcp` and `/api` → gateway, `/` → dashboard. |
+| **Ingress** | Routes external HTTP(S) traffic to Services by hostname/path; usually terminates TLS. | Two hosts (local domain approach): `dashboard.urumi.test` — `/mcp` + `/api` → gateway, `/` → dashboard; `shop.urumi.test` — `/` → wordpress. TLS left off locally (plain http on `:18080` via one `ingress-nginx` port-forward); prod points `ingress.host` at real DNS + certificates. |
 | **Secret** | A small object holding sensitive data, mounted as files or env vars. | WooCommerce consumer key/secret, `API_KEY_PEPPER`, database password, (later) LLM key. Never in git, never in the image. |
 | **ConfigMap** | Non-sensitive configuration. | ports, timeouts, upstream URLs. |
 | **PersistentVolume / PVC** | Storage that survives a Pod restart. | PostgreSQL data. |
@@ -329,6 +329,21 @@ installed on the cluster (release `urumi`, namespace `urumi`): every service nam
 table above exists as a real Kubernetes Service. Operational detail — install commands,
 secrets bootstrap, verification results, local-vs-prod differences and cleanup — lives in
 [infra/helm/README.md](../infra/helm/README.md).
+
+**Local domain approach (Milestone 11):** the kind cluster runs the community
+`ingress-nginx` controller (chart 4.15.1) in namespace `ingress-nginx`, and the chart's
+Ingress gives the demo two stable hostnames (`dashboard.urumi.test`, `shop.urumi.test`) —
+a single `kubectl port-forward` to the controller plus `/etc/hosts` entries (or
+`curl --resolve`) makes them work from the laptop. WordPress's `home`/`siteurl` and
+product GUIDs are rewritten to the storefront host on every boot (idempotent), and a
+tiny mu-plugin forces canonical redirects onto that URL, so links never leak stale
+internal addresses. The plain port-forward path keeps working as a fallback.
+
+The whole system's definition-of-done walkthrough — storefront checkout → order
+visibility → chat/tool calls → external MCP client → key revocation → upstream
+disable → dead-upstream isolation → audit attribution → restart persistence — is a
+reproducible script in [`docs/demo-runbook.md`](./demo-runbook.md), with each step's
+evidence status (live / automated / manual / blocked) recorded there.
 
 ---
 
@@ -430,6 +445,15 @@ Key points for the interview:
   (`{id, type:"function", function:{name, arguments}}`) on every follow-up round —
   strict providers (Groq) reject the internal parsed shape with HTTP 400. Regression
   tests assert the exact outbound JSON (`test/agent/agent.test.ts`).
+- Provider failures are handled without lying about health or spending tokens twice
+  (D35). Transient 429s and connection blips are retried in-request — bounded attempts,
+  `Retry-After` honoured when short, jittered backoff otherwise — but timeouts, 5xx and
+  rejections are never retried (they may have been processed/billed). A still-failing
+  provider surfaces `429/502/504` with `retry_after_seconds` and the gateway-computed
+  tool chips of any partially-completed turn; the dashboard keeps those chips visible,
+  offers "Retry last message" (which re-sends exactly the failed user turn), and keeps
+  the topbar "Connected" pill for *gateway* connectivity only — an LLM-provider rate
+  limit never marks the gateway or a healthy WooCommerce upstream as unreachable.
 
 ---
 
@@ -657,3 +681,52 @@ Nothing in this repository should be described as "working" unless a check in
 
 Each stage ends with a reviewable demo; none of them starts before the previous one is
 explained back in your own words.
+
+---
+
+## 12. System design and tradeoffs
+
+*The PDF deliverable: a short note on architecture choices, how tool aggregation,
+routing and failure handling work, and what changes for production. Each choice is
+expanded above; this section states the tradeoff in one breath.*
+
+**Architecture choices.** One **gateway that is both an MCP server and an MCP
+client** (§3) is the whole design bet: every consumer — dashboard chat, IDE
+clients, scripts — enters through one authenticated endpoint, and upstream
+credentials live on the far side of that choke point (C3). The tradeoff is a
+single fat component instead of a thin proxy per upstream; the payoff is *one*
+place where authentication, authorization, rate limiting, auditing and routing
+are enforced identically (D30: `executeToolCall` is shared by `/mcp` and chat),
+so nothing can grow a privileged back door. Upstreams are ordinary MCP servers
+over Streamable HTTP (§3.3), deliberately independent processes: Inventory and
+Support were added later **without touching gateway core code** (Milestone 5),
+at the cost of per-service operational surface. The dashboard is a static SPA
+over the same REST/`/api` surface — no second backend to secure.
+
+**Aggregation, routing and failure handling.** Discovery is cached
+(`toolCacheTtlMs`) and aggregated into one `tools/list` under
+**qualified names** `<upstream>_<tool>` (§5.3) — we chose name-mangling over
+namespaces/endpoints-per-upstream because it keeps *one* MCP endpoint (PDF
+requirement) and makes collision handling mechanical (longest-prefix parse,
+§5.4). Failures are **structural, never contagious**: per-upstream connect/call
+timeouts, bounded concurrency (semaphore), capped responses (C4), and dead or
+slow upstreams failing only their own tools while `tools/list` keeps serving the
+cached catalogue (C7, `mcp-failure.test.ts`). The tradeoff: a dead upstream's
+tools stay listed (stale-but-honest) rather than vanishing — calls fail with a
+clear "unreachable" instead of an empty catalogue silently shrinking.
+
+**What changes for production.** DNS: the local `*.test` hosts + one
+port-forward become real DNS records pointing at the Ingress, with TLS at the
+controller (`ingress.tls`, `SESSION_COOKIE_SECURE=true` — D33). Storage class:
+the local kind default becomes the VPS's default StorageClass; PVCs and their
+`helm.sh/resource-policy=keep` guard stay as-is. Secrets: local dev placeholders
+in `values-local.yaml` are replaced by operator-pre-created Secrets referenced by
+`secretKeyRef` — `values-prod.yaml` intentionally renders **no** Secret manifest
+(assertion 3). Replicas: gateway goes 1→2 with `sessionAffinity: ClientIP`
+(`values-prod.yaml`); sessions are server-side rows, so this works without sticky
+cookies beyond client affinity. Everything else — images, chart, migrations,
+network posture (ClusterIP-only internals) — is identical between the two values
+files, which is exactly why Helm was mandatory. The one *unverified* part of the
+production story is the VPS deployment itself: the steps are written in
+`infra/helm/README.md` "Deploying to a future VPS" and were deliberately not
+executed (no spend, no provisioned host).

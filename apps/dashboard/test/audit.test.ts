@@ -57,6 +57,9 @@ describe("audit filter query builder", () => {
       "upstream_disabled",
       "user_created",
       "user_updated",
+      "upstream_created",
+      "upstream_updated",
+      "upstream_deleted",
     ]);
     assert.deepEqual(AUDIT_OUTCOMES, ["success", "error", "timeout", "denied"]);
     assert.deepEqual(UPSTREAM_FILTER_IDS, ["woocommerce", "inventory", "support"]);

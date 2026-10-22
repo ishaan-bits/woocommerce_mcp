@@ -7,6 +7,8 @@ import {
   isAbortError,
   MAX_INPUT_CHARS,
   newMessageId,
+  PARTIAL_TURN_TEXT,
+  partialTurnMessage,
   resetMessageIds,
   retryTarget,
   toolChipLabel,
@@ -64,6 +66,51 @@ describe("chat helpers", () => {
     assert.deepEqual(target.history, []);
     assert.equal(retryTarget([]), null);
     assert.equal(retryTarget([msg(1, "assistant", "orphan")]), null);
+  });
+
+  test("REGRESSION: a retry re-sends only the failed user turn — never prior tool state or conversation copies", () => {
+    const messages = [
+      msg(1, "user", "list products"),
+      msg(2, "assistant", "here they are", {
+        toolCalls: [{ name: "woocommerce_list_products", outcome: "success" }],
+      }),
+      msg(3, "user", "now the orders"),
+    ];
+    const target = retryTarget(messages);
+    assert.ok(target !== null);
+    // The failed turn itself is not duplicated into the history…
+    assert.equal(target.message, "now the orders");
+    assert.deepEqual(target.history, [
+      { role: "user", content: "list products" },
+      { role: "assistant", content: "here they are" },
+    ]);
+    // …and prior tool calls are content-only on the wire: a retry cannot
+    // re-execute them (no tool entries, no tool_calls in history).
+    for (const turn of target.history) {
+      assert.deepEqual(Object.keys(turn).sort(), ["content", "role"]);
+    }
+    const wire = JSON.stringify(target);
+    assert.ok(!wire.includes("tool_calls"), "history never carries tool-call state");
+    assert.ok(!wire.includes("woocommerce_list_products"), "history never carries tool names");
+  });
+
+  test("partialTurnMessage preserves chips for a turn that failed after tools ran", () => {
+    resetMessageIds();
+    const message = partialTurnMessage(
+      [{ name: "woocommerce_list_orders", outcome: "success" }],
+      2,
+    );
+    assert.equal(message.role, "assistant");
+    assert.equal(message.content, PARTIAL_TURN_TEXT);
+    assert.deepEqual(message.toolCalls, [{ name: "woocommerce_list_orders", outcome: "success" }]);
+    assert.equal(message.rounds, 2);
+    // An assistant message: retryTarget still resolves to the user turn above it.
+    const thread = [msg(9, "user", "do it"), message];
+    const target = retryTarget(thread);
+    assert.ok(target !== null);
+    assert.equal(target.message, "do it");
+    assert.deepEqual(target.history, []);
+    resetMessageIds();
   });
 
   test("toolChipLabel maps gateway outcomes", () => {

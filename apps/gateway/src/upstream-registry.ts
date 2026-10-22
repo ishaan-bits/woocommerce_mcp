@@ -14,10 +14,17 @@ import type { Logger } from "./logger.ts";
 import { parseToolName, qualifyToolName } from "./routing.ts";
 import { assertUpstreamTargetAllowed, createCappedFetch, type SsrfPolicy } from "./ssrf.ts";
 import { createSchemaValidator } from "./validation.ts";
+import { credentialHeaders, type UpstreamCredential } from "./upstream-credentials.ts";
 import { VERSION } from "./version.ts";
 
 export interface UpstreamRegistryOptions {
   configs: readonly UpstreamConfig[];
+  /**
+   * Milestone 11 (D34): decrypted static credentials for admin-registered
+   * servers, keyed by upstream id. Held in memory only — never logged,
+   * never returned by an API. Fixed deploy-time servers have none.
+   */
+  credentials?: ReadonlyMap<string, UpstreamCredential>;
   toolCacheTtlMs: number;
   logger: Logger;
   /** C4: private-address guard for upstream targets. */
@@ -36,6 +43,16 @@ export interface UpstreamRegistry {
   listAggregatedTools(): Promise<AggregatedTool[]>;
   callTool(qualifiedName: string, args: Record<string, unknown>): Promise<CallToolResult>;
   health(): UpstreamHealth[];
+  /** Live ids (deploy-time + admin-registered) for tool-name parsing/grants. */
+  upstreamIds(): readonly string[];
+  /**
+   * Milestone 11 (D34): register a new admin-added server or replace an
+   * existing one (closing its connection). The credential is held in memory
+   * for wire use only. Persistence is the caller's job.
+   */
+  addOrUpdateServer(config: UpstreamConfig, credential: UpstreamCredential | null): Promise<void>;
+  /** Milestone 11: unregister a server (closes connections, drops tools). */
+  removeServer(upstreamId: string): Promise<boolean>;
   /**
    * Dashboard toggle (D24): applies an enable/disable override live. Returns
    * false when the id is not part of this registry (not configured via env).
@@ -74,8 +91,16 @@ interface CachedTools {
   fetchedAt: number;
 }
 
+/** SDK transport options (requestInit carries the D34 credential headers). */
+type TransportOptions = NonNullable<ConstructorParameters<typeof StreamableHTTPClientTransport>[1]>;
+
 interface UpstreamState {
   config: UpstreamConfig;
+  /**
+   * Milestone 11 (D34): decrypted static credential for admin-registered
+   * servers (null for fixed servers or none configured). In-memory only.
+   */
+  credential: UpstreamCredential | null;
   /** Runtime toggle from the dashboard (D24); null = follow config.enabled. */
   enabledOverride: boolean | null;
   client: Client | null;
@@ -110,6 +135,7 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
 
   const states: UpstreamState[] = options.configs.map((config) => ({
     config,
+    credential: options.credentials?.get(config.id) ?? null,
     enabledOverride: null,
     client: null,
     cached: null,
@@ -204,10 +230,16 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
       // C4: refuse non-routable targets unless the operator allow-listed them.
       await assertUpstreamTargetAllowed(target, options.ssrf);
       const client = new Client(clientInfo);
-      const transport = new StreamableHTTPClientTransport(
-        target,
-        maxResponseBytes > 0 ? { fetch: createCappedFetch(maxResponseBytes, state.config.id) } : {},
-      );
+      const transportOptions: TransportOptions = {};
+      if (maxResponseBytes > 0) {
+        transportOptions.fetch = createCappedFetch(maxResponseBytes, state.config.id);
+      }
+      // D34: static credential for admin-registered servers — attached here,
+      // and only here; it never travels in a URL, log line or response.
+      if (state.credential !== null) {
+        transportOptions.requestInit = { headers: credentialHeaders(state.credential) };
+      }
+      const transport = new StreamableHTTPClientTransport(target, transportOptions);
       try {
         await client.connect(transport, { timeout: state.config.connectTimeoutMs });
       } catch (error) {
@@ -313,7 +345,7 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
     },
 
     async callTool(qualifiedName, args): Promise<CallToolResult> {
-      const parsed = parseToolName(qualifiedName);
+      const parsed = parseToolName(qualifiedName, states.map((state) => state.config.id));
       if (parsed === null) {
         throw new GatewayError("unknown_tool", `Unknown tool: ${qualifiedName}`);
       }
@@ -389,6 +421,58 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
         lastCheckedAt: state.lastCheckedAt,
         lastErrorMessage: state.lastErrorMessage,
       }));
+    },
+
+    upstreamIds(): readonly string[] {
+      return states.map((state) => state.config.id);
+    },
+
+    async addOrUpdateServer(config, credential): Promise<void> {
+      const existing = stateFor(config.id);
+      if (existing !== undefined) {
+        // Close the old connection so URL/credential changes take effect on
+        // the next call, and drop the tool cache (the server may differ).
+        await resetConnection(existing);
+        existing.config = config;
+        existing.credential = credential;
+        existing.enabledOverride = null;
+        existing.cached = null;
+        existing.reachable = false;
+        existing.lastCheckedAt = new Date(now()).toISOString();
+        existing.lastErrorMessage = null;
+        if (!semaphores.has(config.id)) {
+          semaphores.set(config.id, createSemaphore(maxConcurrentCalls));
+        }
+        logger.info("upstream_server_updated", { upstream_id: config.id });
+        return;
+      }
+      states.push({
+        config,
+        credential,
+        enabledOverride: null,
+        client: null,
+        cached: null,
+        reachable: false,
+        lastCheckedAt: new Date(now()).toISOString(),
+        lastErrorMessage: null,
+        connectPromise: null,
+      });
+      semaphores.set(config.id, createSemaphore(maxConcurrentCalls));
+      logger.info("upstream_server_registered", { upstream_id: config.id });
+    },
+
+    async removeServer(upstreamId): Promise<boolean> {
+      const index = states.findIndex((state) => state.config.id === upstreamId);
+      if (index === -1) {
+        return false;
+      }
+      const [state] = states.splice(index, 1);
+      semaphores.delete(upstreamId);
+      if (state !== undefined) {
+        await resetConnection(state);
+      }
+      logger.info("upstream_server_removed", { upstream_id: upstreamId });
+      return true;
     },
 
     setEnabled(upstreamId, enabled): boolean {

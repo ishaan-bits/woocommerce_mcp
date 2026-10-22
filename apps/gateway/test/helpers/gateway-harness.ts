@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import net from "node:net";
-import { UPSTREAM_IDS, WOOCOMMERCE_TOOLS, type UpstreamId } from "@mcp/shared";
+import { WOOCOMMERCE_TOOLS } from "@mcp/shared";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createApp, type McpApp } from "../../src/app.ts";
@@ -10,6 +10,8 @@ import type { AppConfig } from "../../src/config.ts";
 import { createLogger, type Logger } from "../../src/logger.ts";
 import type { UpstreamRegistry } from "../../src/upstream-registry.ts";
 import { createUpstreamRegistry } from "../../src/upstream-registry.ts";
+import type { CredentialVault } from "../../src/upstream-credentials.ts";
+import type { DynamicUpstreamRepository } from "../../src/db/dynamic-upstream-repository.ts";
 import { startFakeUpstream, type FakeToolSpec, type FakeUpstream } from "./fake-upstream.ts";
 import { makeConfig, TEST_PEPPER } from "./config.ts";
 import { FakeAuditRepository, FakeAuthRepository, FakeSessionRepository, FakeUpstreamStateRepository } from "./fake-repos.ts";
@@ -21,16 +23,16 @@ export const READER_USER_ID = "22222222-2222-4222-8222-222222222222";
 export { TEST_PEPPER };
 
 export interface FakeUpstreamSpec {
-  id: UpstreamId;
+  id: string;
   name?: string;
   tools: FakeToolSpec[];
 }
 
 export interface StartGatewayOptions {
   upstreams?: FakeUpstreamSpec[];
-  deadUpstreams?: UpstreamId[];
-  hangingUpstreams?: UpstreamId[];
-  disableUpstreams?: UpstreamId[];
+  deadUpstreams?: string[];
+  hangingUpstreams?: string[];
+  disableUpstreams?: string[];
   timeoutMs?: number;
   connectTimeoutMs?: number;
   toolCacheTtlMs?: number;
@@ -39,11 +41,21 @@ export interface StartGatewayOptions {
   config?: Partial<AppConfig>;
   /** Milestone 9: scripted chat provider (with config.llm set) for /api/chat tests. */
   provider?: ChatProvider;
+  /** Chat-agent tunables (bounded provider retry policy, budgets) for tests. */
+  agentOptions?: Parameters<typeof createApp>[0]["agentOptions"];
   /** Key the harness client authenticates with; defaults to a fresh admin key. */
   clientKey?: string;
   pepper?: string;
   authRepo?: FakeAuthRepository;
   auditRepo?: FakeAuditRepository;
+  /**
+   * Milestone 11 (D34): inject an in-memory dynamic-upstream repository.
+   * When omitted, the dynamic CRUD routes answer 503 (feature off) so
+   * pre-M11 tests keep their exact behaviour.
+   */
+  dynamicUpstreamRepo?: DynamicUpstreamRepository;
+  /** D34: credential vault. Tests use createCredentialVault(a 32-byte key). */
+  credentialVault?: CredentialVault | null;
 }
 
 export interface GatewayHarness {
@@ -51,15 +63,17 @@ export interface GatewayHarness {
   client: Client;
   registry: UpstreamRegistry;
   mcpApp: McpApp;
-  fakes: Map<UpstreamId, FakeUpstream>;
+  fakes: Map<string, FakeUpstream>;
   authRepo: FakeAuthRepository;
   auditRepo: FakeAuditRepository;
+  /** D34: the injected dynamic-upstream repository (undefined = feature off). */
+  dynamicUpstreamRepo?: DynamicUpstreamRepository;
   pepper: string;
   adminKey: string;
   readerKey: string;
   /** Auth header object for raw fetches: { authorization: "Bearer ..." }. */
   authHeaders(key?: string): Record<string, string>;
-  stopFake(id: UpstreamId): Promise<void>;
+  stopFake(id: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -155,10 +169,10 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
   const timeoutMs = options.timeoutMs ?? 5_000;
   const connectTimeoutMs = options.connectTimeoutMs ?? 2_000;
 
-  const fakes = new Map<UpstreamId, FakeUpstream>();
+  const fakes = new Map<string, FakeUpstream>();
   const hangServers: Array<{ mcpUrl: string; close(): Promise<void> }> = [];
 
-  const mcpUrls = new Map<UpstreamId, string>();
+  const mcpUrls = new Map<string, string>();
   for (const spec of specs) {
     const fake = await startFakeUpstream({ name: spec.name, tools: spec.tools });
     fakes.set(spec.id, fake);
@@ -220,7 +234,7 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
       qualifiedNames.add(`${spec.id}_${tool.name}`);
     }
   }
-  const grantedUpstreams: UpstreamId[] = ["woocommerce", "inventory", "support"];
+  const grantedUpstreams: string[] = ["woocommerce", "inventory", "support"];
   const adminUser: StoredUser = {
     id: ADMIN_USER_ID,
     displayName: "admin-demo",
@@ -251,6 +265,9 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
     sessionRepo: new FakeSessionRepository(),
     upstreamStateRepo: new FakeUpstreamStateRepository(),
     provider: options.provider,
+    agentOptions: options.agentOptions,
+    dynamicUpstreamRepo: options.dynamicUpstreamRepo,
+    credentialVault: options.credentialVault ?? null,
   });
 
   const httpServer: HttpServer = mcpApp.app.listen(0, "127.0.0.1");
@@ -278,13 +295,14 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
     fakes,
     authRepo,
     auditRepo,
+    dynamicUpstreamRepo: options.dynamicUpstreamRepo,
     pepper,
     adminKey,
     readerKey,
     authHeaders(key) {
       return { authorization: `Bearer ${key ?? connectKey}` };
     },
-    async stopFake(id: UpstreamId): Promise<void> {
+    async stopFake(id: string): Promise<void> {
       const fake = fakes.get(id);
       if (fake !== undefined) {
         fakes.delete(id);

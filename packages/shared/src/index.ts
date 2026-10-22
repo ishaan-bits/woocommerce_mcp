@@ -29,7 +29,7 @@ export type UserRole = "admin" | "reader";
 export type ToolPermission = `tools:${string}`;
 
 export interface ToolDescriptor {
-  readonly upstreamId: UpstreamId;
+  readonly upstreamId: string;
   readonly name: string;
   readonly description: string;
   readonly inputSchema: Record<string, unknown>;
@@ -41,7 +41,12 @@ export interface AggregatedTool extends ToolDescriptor {
 }
 
 export interface UpstreamConfig {
-  readonly id: UpstreamId;
+  /**
+   * Fixed ids are the UPSTREAM_IDS union; admin-registered servers use a
+   * dynamic slug id (Milestone 11). Everything downstream treats ids as
+   * opaque strings — the fixed union only names the deploy-time servers.
+   */
+  readonly id: string;
   readonly baseUrl: string;
   readonly enabled: boolean;
   readonly timeoutMs: number;
@@ -52,7 +57,7 @@ export interface ApiKeyPrincipal {
   readonly userId: string;
   readonly displayName: string;
   readonly role: UserRole;
-  readonly allowedUpstreams: readonly UpstreamId[];
+  readonly allowedUpstreams: readonly string[];
   readonly allowedTools: readonly string[];
   readonly keyId: string;
 }
@@ -68,7 +73,10 @@ export type AuditAction =
   | "upstream_enabled"
   | "upstream_disabled"
   | "user_created"
-  | "user_updated";
+  | "user_updated"
+  | "upstream_created"
+  | "upstream_updated"
+  | "upstream_deleted";
 
 export interface AuditLogEntry {
   readonly id: string;
@@ -78,7 +86,7 @@ export interface AuditLogEntry {
   readonly keyId: string | null;
   readonly userId: string | null;
   readonly role: UserRole | null;
-  readonly upstreamId: UpstreamId | null;
+  readonly upstreamId: string | null;
   readonly toolName: string | null;
   readonly qualifiedName: string | null;
   readonly outcome: ToolCallOutcome;
@@ -87,7 +95,7 @@ export interface AuditLogEntry {
 }
 
 export interface UpstreamHealth {
-  readonly id: UpstreamId;
+  readonly id: string;
   readonly enabled: boolean;
   readonly reachable: boolean;
   readonly lastCheckedAt: string;

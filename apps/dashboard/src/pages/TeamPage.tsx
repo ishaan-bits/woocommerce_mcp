@@ -261,7 +261,7 @@ export function TeamPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                           </td>
                           <td className="small">
                             {user.allowedUpstreams.length > 0
-                              ? user.allowedUpstreams.map(upstreamLabel).join(", ")
+                              ? user.allowedUpstreams.map((id) => upstreamLabel(id)).join(", ")
                               : "none"}
                           </td>
                           <td className="small">{user.allowedTools.length}</td>

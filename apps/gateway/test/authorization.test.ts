@@ -111,3 +111,48 @@ describe("admin API gate (C2)", () => {
     assert.equal(decision.errorCode, "role_forbidden");
   });
 });
+
+describe("dynamic upstream grants (M11/D34)", () => {
+  const dynamicPrincipal = principal({
+    allowedUpstreams: ["woocommerce", "acme-shop"],
+    allowedTools: ["tools:woocommerce_list_products", "tools:acme-shop_list_widgets"],
+  });
+
+  test("a granted dynamic upstream id authorizes exactly like a fixed one", () => {
+    assert.deepEqual(authorizeToolCall(dynamicPrincipal, "acme-shop_list_widgets", ["woocommerce", "acme-shop"]), {
+      allowed: true,
+      errorCode: null,
+      reason: null,
+    });
+  });
+
+  test("without the dynamic id in the known set the name is unparseable (registry unknown_tool path)", () => {
+    // Production call sites pass registry.upstreamIds(); the default only
+    // knows the fixed ids, so a dynamic name must NOT slip past the grant
+    // checks as if it were authorized — it simply does not parse here.
+    const decision = authorizeToolCall(dynamicPrincipal, "acme-shop_list_widgets");
+    assert.equal(decision.allowed, true, "unparseable names are handed to the registry, not granted");
+    assert.equal(decision.errorCode, null);
+  });
+
+  test("a principal without the dynamic grant is denied with grant_forbidden", () => {
+    const other = principal({
+      allowedUpstreams: ["woocommerce"],
+      allowedTools: ["tools:woocommerce_list_products"],
+    });
+    const decision = authorizeToolCall(other, "acme-shop_list_widgets", ["woocommerce", "acme-shop"]);
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.errorCode, "grant_forbidden");
+  });
+
+  test("reader ceiling still applies to dynamic write tools", () => {
+    const reader = principal({
+      role: "reader",
+      allowedUpstreams: ["acme-shop"],
+      allowedTools: ["tools:acme-shop_create_widget"],
+    });
+    const decision = authorizeToolCall(reader, "acme-shop_create_widget", ["acme-shop"]);
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.errorCode, "role_forbidden");
+  });
+});

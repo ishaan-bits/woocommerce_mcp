@@ -9,15 +9,25 @@
  * success/error handling without a DOM or a network (see test/client.test.ts).
  */
 
+/** Whitelisted extra fields a chat error body may carry (partial tool state). */
+export interface ChatErrorDetails {
+  tool_calls?: ChatToolCall[];
+  rounds?: number;
+  retry_after_seconds?: number;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Whitelisted error-body extras (e.g. partial tool state from a failed chat turn). */
+  readonly details: ChatErrorDetails | undefined;
 
-  constructor(status: number, code: string, message?: string) {
+  constructor(status: number, code: string, message?: string, details?: ChatErrorDetails) {
     super(message ?? code);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -58,17 +68,32 @@ export interface ToolView {
 
 export interface UpstreamStatusView {
   id: string;
+  /** Human name (admin-registered servers); fixed env servers use the id. */
+  name?: string;
   configured: boolean;
   enabled: boolean;
   reachable: boolean;
   last_error: string | null;
   /** Display label for the woocommerce backing store: "mock" | "real" | null. */
   mode?: "mock" | "real" | null;
+  /** "env" = deploy-time fixed server; "admin" = registered at runtime (M11). */
+  source?: "env" | "admin";
+  /** Admin-only: the stored upstream URL (C4 — members never receive it). */
+  url?: string;
+  /** Admin-only: whether a static credential is stored (the value never leaves the gateway). */
+  has_credential?: boolean;
+  credential_mode?: "bearer" | "header" | null;
 }
 
 export interface ToolsResponse {
   tools: ToolView[];
-  upstreams: Array<{ id: string; enabled: boolean; reachable: boolean; last_error: string | null }>;
+  upstreams: Array<{
+    id: string;
+    display_name?: string;
+    enabled: boolean;
+    reachable: boolean;
+    last_error: string | null;
+  }>;
 }
 
 export interface UpstreamsResponse {
@@ -161,6 +186,18 @@ export interface IssuedKey {
   key: string;
 }
 
+/** One of the caller's own keys (self-serve list; no other user's data). */
+export interface OwnKeyRecord {
+  id: string;
+  key_prefix: string;
+  created_at: string;
+  revoked_at: string | null;
+}
+
+export interface OwnKeysResponse {
+  keys: OwnKeyRecord[];
+}
+
 export interface RevokeKeyResult {
   id: string;
   revoked_at: string | null;
@@ -196,14 +233,16 @@ export interface ChatTurn {
 async function parseError(response: Response): Promise<ApiError> {
   let code = "error";
   let message: string | undefined;
+  let details: ChatErrorDetails | undefined;
   try {
-    const body = (await response.json()) as { error?: unknown; message?: unknown };
+    const body = (await response.json()) as { error?: unknown; message?: unknown } & Record<string, unknown>;
     if (typeof body.error === "string" && body.error.length > 0) {
       code = body.error;
     }
     if (typeof body.message === "string" && body.message.length > 0) {
       message = body.message;
     }
+    details = parseChatErrorDetails(body);
   } catch {
     // Non-JSON error body (proxy/gateway crash): keep the generic code.
   }
@@ -213,7 +252,36 @@ async function parseError(response: Response): Promise<ApiError> {
   if (response.status === 403) {
     return new ForbiddenError(code);
   }
-  return new ApiError(response.status, code, message);
+  return new ApiError(response.status, code, message, details);
+}
+
+/**
+ * Whitelist the chat error-body extras: gateway-computed partial tool state
+ * and the provider's wait hint. Unknown/shaped-wrong fields are dropped.
+ */
+function parseChatErrorDetails(body: Record<string, unknown>): ChatErrorDetails | undefined {
+  const details: ChatErrorDetails = {};
+  if (Array.isArray(body.tool_calls)) {
+    const calls: ChatToolCall[] = [];
+    for (const entry of body.tool_calls) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const record = entry as Record<string, unknown>;
+      if (typeof record.name !== "string" || typeof record.outcome !== "string") continue;
+      calls.push({
+        name: record.name,
+        outcome: record.outcome as ChatToolCall["outcome"],
+        ...(typeof record.error === "string" ? { error: record.error } : {}),
+      });
+    }
+    if (calls.length > 0) details.tool_calls = calls;
+  }
+  if (typeof body.rounds === "number" && Number.isFinite(body.rounds)) {
+    details.rounds = body.rounds;
+  }
+  if (typeof body.retry_after_seconds === "number" && Number.isFinite(body.retry_after_seconds)) {
+    details.retry_after_seconds = body.retry_after_seconds;
+  }
+  return Object.keys(details).length > 0 ? details : undefined;
 }
 
 export function createApiClient(fetchImpl: FetchLike = (...args) => fetch(...args)) {
@@ -265,6 +333,34 @@ export function createApiClient(fetchImpl: FetchLike = (...args) => fetch(...arg
       return request("POST", `/upstreams/${id}:${enabled ? "enable" : "disable"}`);
     },
     /**
+     * M11/D34 admin CRUD. The credential is sent once, over TLS, to be
+     * encrypted server-side; responses only ever carry `has_credential`.
+     * `credential: null` on update clears the stored credential; omitting the
+     * field keeps it unchanged.
+     */
+    createUpstream(input: {
+      name: string;
+      url: string;
+      enabled?: boolean;
+      credential?: { mode: "bearer" | "header"; value: string; header?: string };
+    }): Promise<UpstreamStatusView> {
+      return request("POST", "/upstreams", input);
+    },
+    updateUpstream(
+      id: string,
+      input: {
+        name?: string;
+        url?: string;
+        enabled?: boolean;
+        credential?: { mode: "bearer" | "header"; value: string; header?: string } | null;
+      },
+    ): Promise<UpstreamStatusView> {
+      return request("PUT", `/upstreams/${encodeURIComponent(id)}`, input);
+    },
+    deleteUpstream(id: string): Promise<{ id: string; deleted: boolean }> {
+      return request("DELETE", `/upstreams/${encodeURIComponent(id)}`);
+    },
+    /**
      * Bounded by the server (limit 1–100, keyset cursor) — never unbounded.
      * `filters` are the optional action/outcome/upstreamId/tool/userId query params.
      */
@@ -310,6 +406,14 @@ export function createApiClient(fetchImpl: FetchLike = (...args) => fetch(...arg
     },
     revokeKey(id: string): Promise<RevokeKeyResult> {
       return request<RevokeKeyResult>("POST", `/keys/${id}/revoke`);
+    },
+    /** Self-serve keys: the caller's OWN keys only (M1/X4). */
+    myKeys(): Promise<OwnKeysResponse> {
+      return request<OwnKeysResponse>("GET", "/me/keys");
+    },
+    /** Self-serve key issuance for the caller; plaintext returned EXACTLY ONCE. */
+    issueMyKey(): Promise<IssuedKey> {
+      return request<IssuedKey>("POST", "/me/keys");
     },
     /**
      * Milestone 9: chat with the server-side agent. The LLM key never touches

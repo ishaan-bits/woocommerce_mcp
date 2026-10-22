@@ -149,6 +149,12 @@ data:
     wp option update home "${WORDPRESS_SITE_URL}"
     wp option update siteurl "${WORDPRESS_SITE_URL}"
 
+    # WordPress treats guid as immutable, so a site-URL change leaves the old
+    # host in wp_posts — and the WooCommerce REST "permalink" field (passed
+    # through by woocommerce-mcp into tool output) exposes it. Align product
+    # guids with the canonical URL; idempotent (no-op when already matching).
+    wp eval-file /init/fix-guids.php
+
     # Pretty permalinks: the WooCommerce REST API is addressed at
     # /wp-json/wc/v3/... and store URLs must not contain query strings
     # (docs/architecture.md §7). Without a .htaccess, /wp-json/ answers 404.
@@ -306,6 +312,54 @@ data:
     }
 
     printf( "seed: %d new product(s), api key present\n", $created );
+  fix-guids.php: |
+    <?php
+    /**
+     * Idempotent guid alignment for the demo store (runs on every wp-init
+     * after home/siteurl are rewritten). WordPress never updates guid after
+     * insert, so products seeded under an earlier siteUrl keep the old host
+     * in their guid — which the WooCommerce REST "permalink" field exposes
+     * (and woocommerce-mcp passes through into tool output). Rewrite product
+     * guids to the current canonical home; nothing else touches wp_posts.
+     */
+    if ( ! defined( 'ABSPATH' ) ) {
+        exit( 1 );
+    }
+    global $wpdb;
+    $home = untrailingslashit( home_url() );
+    $rows = $wpdb->get_results(
+        "SELECT ID, guid, post_name FROM {$wpdb->posts}
+          WHERE post_type = 'product' AND post_status IN ('publish','draft','pending')"
+    );
+    $fixed = 0;
+    foreach ( (array) $rows as $row ) {
+        $expected = $home . '/product/' . $row->post_name . '/';
+        if ( untrailingslashit( (string) $row->guid ) !== untrailingslashit( $expected ) ) {
+            $wpdb->update( $wpdb->posts, array( 'guid' => $expected ), array( 'ID' => (int) $row->ID ) );
+            ++$fixed;
+        }
+    }
+    printf( "fix-guids: %d product guid(s) aligned to %s\n", $fixed, $home );
+  # Canonical-host mu-plugin, copied into wp-content/mu-plugins by the main
+  # container's entrypoint wrapper (the wp-init container runs as uid 33 and
+  # cannot create new directories under a root-owned wp-content; the main
+  # container already runs as root by design). WordPress can otherwise mix
+  # the request host with the home URL's port when redirecting (a bare
+  # port-forward would 301 to 127.0.0.1:<home-port>). The filter forces
+  # every canonical redirect onto home_url() — the configured siteUrl is
+  # always where browsers land. Installed on every boot — idempotent.
+  urumi-canonical.php: |
+    <?php
+    /**
+     * Plugin Name: Urumi canonical host
+     * Description: Canonical redirects always target the configured home URL.
+     */
+    add_filter( 'redirect_canonical', function ( $redirect_url, $requested_url ) {
+        $path  = wp_parse_url( (string) $requested_url, PHP_URL_PATH );
+        $query = wp_parse_url( (string) $requested_url, PHP_URL_QUERY );
+        $target = home_url( is_string( $path ) && '' !== $path ? $path : '/' );
+        return is_string( $query ) && '' !== $query ? $target . '?' . $query : $target;
+    }, 10, 2 );
 ---
 apiVersion: v1
 kind: Service
@@ -432,6 +486,17 @@ spec:
         - name: wordpress
           image: {{ printf "%s:%s" .Values.wordpress.image.repository .Values.wordpress.image.tag | quote }}
           imagePullPolicy: {{ .Values.wordpress.image.pullPolicy }}
+          # Copy the canonical-host mu-plugin into wp-content (the wp-init
+          # container runs as uid 33 and cannot create directories under a
+          # root-owned wp-content; this container already runs as root), then
+          # hand off to the image's own entrypoint unchanged.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              mkdir -p /var/www/html/wp-content/mu-plugins
+              cp /init/urumi-canonical.php /var/www/html/wp-content/mu-plugins/urumi-canonical.php
+              exec docker-entrypoint.sh apache2-foreground
           ports:
             - name: http
               containerPort: 80
@@ -478,6 +543,10 @@ spec:
             - name: init
               mountPath: /etc/apache2/conf-enabled/urumi-links.conf
               subPath: urumi-links.conf
+              readOnly: true
+            - name: init
+              mountPath: /init/urumi-canonical.php
+              subPath: urumi-canonical.php
               readOnly: true
       volumes:
         - name: data

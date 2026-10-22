@@ -45,6 +45,9 @@ data:
   TRUST_PROXY: {{ .Values.gateway.trustProxy | quote }}
   # D33: session-cookie Secure policy (auto | true | false).
   SESSION_COOKIE_SECURE: {{ .Values.gateway.sessionCookieSecure | quote }}
+  # Milestone 11 (D34): TLS policy for admin-registered upstream URLs
+  # (https-only in production; local kind may allow http for demo servers).
+  DYNAMIC_UPSTREAM_TLS_POLICY: {{ .Values.gateway.dynamicUpstreamTlsPolicy | quote }}
   # Milestone 9 chat agent (D29): non-sensitive provider settings only. The
   # provider key is NOT here — it is the optional GROQ_API_KEY key in the
   # Secret (env below). Absent key = agent disabled = 503 on POST /api/chat.
@@ -188,6 +191,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "mcp.secretName" . }}
                   key: GROQ_API_KEY
+                  optional: true
+            # Milestone 11 (D34): AES-256-GCM key for admin-entered upstream
+            # credentials. optional:true means the pod starts without it and
+            # credential-storing routes answer 503 — the gateway never fails
+            # to boot over it, and the value only ever exists in this
+            # container's env (never a ConfigMap, response, or log).
+            - name: UPSTREAM_CREDENTIAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcp.secretName" . }}
+                  key: UPSTREAM_CREDENTIAL_KEY
                   optional: true
           readinessProbe:
             httpGet:

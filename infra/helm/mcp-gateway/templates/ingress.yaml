@@ -1,9 +1,14 @@
 {{- if .Values.ingress.enabled }}
 {{/*
 One host, two backends (docs/architecture.md §8): /mcp and /api → gateway,
-/ → dashboard. TLS only renders when an operator enabled it and supplied a
-certificate Secret — this chart does not provision certificates.
+/ → dashboard. When ingress.storefrontHost is set, a second host routes / to
+the WordPress storefront (K6 / milestone 11 phase 3). TLS only renders when
+an operator enabled it and supplied a certificate Secret — this chart does
+not provision certificates.
 */}}
+{{- if and .Values.ingress.storefrontHost (not .Values.wordpress.enabled) }}
+{{- fail "ingress.storefrontHost requires wordpress.enabled=true" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -47,4 +52,16 @@ spec:
                 name: dashboard
                 port:
                   number: {{ .Values.dashboard.service.port }}
+    {{- if .Values.ingress.storefrontHost }}
+    - host: {{ .Values.ingress.storefrontHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: wordpress
+                port:
+                  number: 80
+    {{- end }}
 {{- end }}

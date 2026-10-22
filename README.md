@@ -41,7 +41,12 @@ live-verified on the Groq free tier) and Milestone 10 complete (dashboard
 Team/Settings areas, a tool-permission indicator that mirrors the server's
 authorization exactly, a real WordPress/WooCommerce store inside the same cluster
 live-verified through `/mcp`, an external MCP client compatibility test, and the
-[requirement matrix](./docs/requirement-matrix.md)).**
+[requirement matrix](./docs/requirement-matrix.md)). Milestone 11 (in progress)
+brings admin-managed dynamic upstreams with AES-256-GCM-encrypted credentials,
+member self-serve API keys, Ingress hosts for storefront + dashboard, a more
+reliable chat path (bounded provider retries, honest health indicator), and the
+**two-user definition-of-done walkthrough** — reproducible step by step in
+[docs/demo-runbook.md](./docs/demo-runbook.md) with each step's evidence status.**
 
 | Area | Status |
 | --- | --- |
@@ -56,7 +61,7 @@ live-verified through `/mcp`, an external MCP client compatibility test, and the
 | Docker images | ✅ five multi-stage images (`urumi/<name>:0.1.0`: gateway, three MCP servers, dashboard), non-root, runtime-config only, built and container-tested — see [infra/docker/README.md](./infra/docker/README.md) |
 | Kubernetes / Helm | ✅ one chart (`infra/helm/mcp-gateway`) with `values-local.yaml` + `values-prod.yaml`, installed and e2e-validated on kind `urumi-local` (9 workloads incl. the real WordPress/WooCommerce store, PVC-backed PostgreSQL, chart/external secrets, port-forward access) — see [infra/helm/README.md](./infra/helm/README.md) |
 | PostgreSQL schema, API keys, audit log | ✅ migrations (001–002), two seeded users, hashed revocable keys, append-only audit incl. upstream-toggle rows, session + override tables (`npm run migrate`; integration-tested against PostgreSQL 17) |
-| LLM / chat agent | ✅ `POST /api/chat` agent loop: Groq (free tier) or local OpenAI-compatible server via `LLM_BASE_URL`; tools from the gateway registry, executed through the shared authz/audit pipeline; disabled cleanly (503) with no key — see [docs/decisions.md D29/D30](./docs/decisions.md). In Kubernetes the key is an optional `GROQ_API_KEY` in the release Secret ([infra/helm/README.md](./infra/helm/README.md) "Enabling the chat agent") |
+| LLM / chat agent | ✅ `POST /api/chat` agent loop: Groq (free tier) or local OpenAI-compatible server via `LLM_BASE_URL`; tools from the gateway registry, executed through the shared authz/audit pipeline; disabled cleanly (503) with no key — see [docs/decisions.md D29/D30](./docs/decisions.md). Transient provider rate limits are retried in-request with a bounded, `Retry-After`-aware policy (never on timeouts/5xx — no duplicate token spend); a still-rate-limited provider answers 429 with `retry_after_seconds` and the UI offers "Retry last message" (the topbar stays "Connected" — provider availability is not gateway health, [docs/decisions.md D35](./docs/decisions.md)). In Kubernetes the key is an optional `GROQ_API_KEY` in the release Secret ([infra/helm/README.md](./infra/helm/README.md) "Enabling the chat agent") |
 
 No feature should be described as working unless `npm run check` proves it. Files in this repo
 are deliberately honest: empty workspaces have **no placeholder endpoints** that could be
@@ -71,9 +76,9 @@ Support and WooCommerce MCP server processes** over Streamable HTTP
 (`test/real-upstreams.test.ts`); authentication, sessions, upstream toggles and audit logging
 are verified against a **real PostgreSQL 17** in a disposable container via `TEST_DATABASE_URL`
 (`test/integration/postgres.test.ts`); without that variable the integration suite skips with
-a printed reason, while the tests that need no database still run — **510 tests in total with
-the database** (96 dashboard + 267 gateway + 39 inventory + 38 support + 70 woocommerce),
-497 without it.
+a printed reason, while the tests that need no database still run — **574 tests in total with
+the database** (106 dashboard + 321 gateway + 39 inventory + 38 support + 70 woocommerce),
+560 without it.
 
 ---
 
@@ -111,11 +116,14 @@ mcp/
 │   └── shared/                 # Shared contract types        [implemented]
 ├── infra/
 │   ├── docker/                 # 5 multi-stage Dockerfiles      [implemented]
-│   └── helm/                   # Helm charts                    [README only]
+│   └── helm/                   # One chart, values-local/prod   [implemented]
 ├── docs/
-│   ├── architecture.md         # What and why, explained plainly
-│   ├── decisions.md            # ADR-style choices and trade-offs
-│   ├── threat-model.md         # Security controls C1–C8 (C1/C2/C6 live since M3)
+│   ├── Urumi-MCP-Gateway-Assignment.pdf  # the original assignment (source of truth)
+│   ├── demo-runbook.md         # Two-user definition-of-done walkthrough + evidence
+│   ├── architecture.md         # What and why, explained plainly (§12: design tradeoffs)
+│   ├── decisions.md            # ADR-style choices and trade-offs (D1–D35)
+│   ├── threat-model.md         # Security controls C1–C8 + the 4 PDF threat scenarios
+│   ├── requirement-matrix.md   # Every PDF requirement → evidence
 │   └── learning-guide.md       # Staged study plan + interview questions
 ├── scripts/
 │   └── check.sh                # All validation for this milestone
@@ -258,8 +266,10 @@ done
 helm upgrade --install urumi infra/helm/mcp-gateway -n urumi --create-namespace \
   -f infra/helm/mcp-gateway/values-local.yaml
 
-# access (local kind has no ingress controller; port-forward is the demo path)
-kubectl -n urumi port-forward svc/dashboard 8088:8080   # http://127.0.0.1:8088
+# access — local ingress on kind (see infra/helm/README.md "Access" for details)
+kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 18080:80
+# then: dashboard http://dashboard.urumi.test:18080 — store http://shop.urumi.test:18080
+# (add both hosts as 127.0.0.1 in /etc/hosts, or skip DNS with curl --resolve)
 ```
 
 The chart keeps the three MCP servers, PostgreSQL and the mock store on
@@ -270,20 +280,42 @@ tool call — exact commands in [infra/helm/README.md](./infra/helm/README.md).
 
 ### Local URLs, login flow, and troubleshooting
 
-Use the exact addresses below — nothing serves on plain `http://127.0.0.1`
-(port 80), so a port-less address is never the app:
+The local domain approach (K6): the chart's Ingress gives the demo two stable
+hostnames. The kind cluster runs the community `ingress-nginx` controller
+(chart 4.15.1, namespace `ingress-nginx`); because the kind node publishes no
+host ports (and port 80 binding needs root), reach it through a single
+port-forward:
+
+```bash
+# one-time (or per session): point the demo hosts at the forwarded port
+echo "127.0.0.1 dashboard.urumi.test shop.urumi.test" | sudo tee -a /etc/hosts
+kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 18080:80 &
+```
 
 | What | URL |
 | --- | --- |
-| Dashboard (browser login) | `http://127.0.0.1:8088` |
+| Dashboard (browser login) | `http://dashboard.urumi.test:18080` (Ingress `/` → dashboard, `/mcp` + `/api` → gateway) |
+| Storefront (WordPress/WooCommerce) | `http://shop.urumi.test:18080` (Ingress `/` → wordpress:80; `wp-login.php` works there too) |
+| Dashboard (port-forward fallback) | `http://127.0.0.1:8088` |
 | Gateway REST + health (curl) | `http://127.0.0.1:8080` |
-| MCP endpoint (Bearer `Authorization` only — cookies are ignored here) | `http://127.0.0.1:8080/mcp` |
+| MCP endpoint (Bearer `Authorization` only — cookies are ignored here) | `http://dashboard.urumi.test:18080/mcp` (or `http://127.0.0.1:8080/mcp`) |
+
+No `/etc/hosts` access (or checking scripts)? `curl --resolve
+dashboard.urumi.test:18080:127.0.0.1 http://dashboard.urumi.test:18080/` works
+the same, and the store's canonical URLs always carry `shop.urumi.test:18080`
+— WordPress's canonical redirects are forced onto the configured site URL, so
+a bare `port-forward svc/wordpress 8082:80` visit 301s to
+`http://shop.urumi.test:18080/…` instead of leaking a stale host.
+
+Use the exact addresses below — nothing serves on plain `http://127.0.0.1`
+(port 80), so a port-less address is never the app:
 
 Port-forwards die whenever the forwarded pods restart; restore them with:
 
 ```bash
-kubectl -n urumi port-forward svc/dashboard 8088:8080 &
-kubectl -n urumi port-forward svc/gateway 8080:8080 &
+kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 18080:80 &
+kubectl -n urumi port-forward svc/dashboard 8088:8080 &   # fallback path
+kubectl -n urumi port-forward svc/gateway 8080:8080 &     # curl / health
 ```
 
 **Expected login flow.** Open `http://127.0.0.1:8088` → the sign-in form
@@ -301,7 +333,7 @@ A reload stays signed in for the cookie's 12-hour lifetime.
 | --- | --- | --- |
 | Banner "That key was rejected (unknown, malformed or revoked)." | Wrong/revoked key: login 401, no cookie set | Re-issue or re-copy the key (bootstrap commands above) |
 | Toast "Session expired — sign in again to continue." once + the sign-in banner | Cookie died mid-use (12 h TTL or key revoked) | Sign in again; a *repeated* toast would be a regression (D33 tests) |
-| "Gateway unreachable — is it running?" | Port-forward died (pod restarted) | Run the two `port-forward` commands above |
+| "Gateway unreachable — is it running?" | Port-forward died (pod restarted) | Run the `port-forward` commands above |
 | Login works in Chrome/Firefox but loops in Safari | Secure cookie set over plain http (fixed by D33 `auto`) | `kubectl -n urumi logs deploy/gateway \| grep session_cookie_secure` → expect `"auto"` |
 
 Safe checks that never print keys or cookies:
@@ -311,6 +343,19 @@ curl -s http://127.0.0.1:8080/healthz        # {"status":"ok"}
 curl -s http://127.0.0.1:8080/readyz         # 200
 kubectl -n urumi logs deploy/gateway --tail=30   # config_loaded lists session_cookie_secure
 ```
+
+### Place an order (storefront, cash on delivery)
+
+The store is a real WordPress/WooCommerce in the cluster. Open
+`http://shop.urumi.test:18080/shop/` (or the port-forwarded equivalent),
+pick a product, **Add to cart**, then `…/checkout/` → fill contact + billing →
+choose **Cash on delivery** → **Place order**. The confirmation page shows the
+order number, and the order appears immediately in **WooCommerce → Orders**
+(`wp-admin/admin.php?page=wc-orders`) *and* through the platform's own tools
+(`woocommerce_list_orders` from the dashboard chat or any MCP client).
+Cash on delivery is a one-time store setting (the PDF's "test-friendly
+method") — exact commands, screenshots-as-evidence and the whole two-user demo
+are in [docs/demo-runbook.md](./docs/demo-runbook.md) §1.
 
 ### External MCP clients (Milestone 10)
 
@@ -338,6 +383,67 @@ run time only.
 
 ---
 
+## Demo credentials and secrets
+
+**Everything sensitive lives outside git.** `.env` is git-ignored and
+`.env.example` holds placeholders only; the Kubernetes release Secret
+(`urumi-secrets`, operator-created in production) carries the database
+passwords, `API_KEY_PEPPER`, the upstream credential vault key
+(`UPSTREAM_CREDENTIAL_KEY`), WooCommerce consumer key/secret, the WordPress
+admin password and the optional `GROQ_API_KEY`. Demo **gateway API keys**
+(`umk_…`) are created at bootstrap time (commands in
+[infra/helm/README.md](./infra/helm/README.md) "Secrets and API-key bootstrap")
+and shown to you exactly once — keep them in a local file outside the repo
+(the demo runbook uses a git-ignored `keys.json`), pass them as shell variables,
+and never paste them into screenshots, issues or commits. Revoke and re-issue
+any key that leaks (dashboard → Team / Settings → Revoke — see
+[docs/demo-runbook.md](./docs/demo-runbook.md) §5). The repository is scanned
+for key-shaped strings before every commit; only clearly-labelled test fixtures
+(fakes like `gsk_test_…`) are allowed.
+
+## Local demo vs public deployment
+
+What you get from this repo **today** is the local demonstration: the kind
+cluster `urumi-local` with two stable demo hosts —
+`http://dashboard.urumi.test:18080` and `http://shop.urumi.test:18080` —
+reachable through one `kubectl port-forward` to the `ingress-nginx` controller
+plus `/etc/hosts` entries (or `curl --resolve` / Playwright
+`--host-resolver-rules`). Ports: `18080` = ingress (both hosts), `8088` =
+dashboard fallback, `8080` = gateway fallback (curl/SDK). Nothing serves on
+port 80 locally.
+
+A **public** deployment (VPS/k3s, real DNS, TLS) is documented step by step in
+[infra/helm/README.md](./infra/helm/README.md) "Deploying to a future VPS" and
+differs **only through Helm values** (`values-prod.yaml`: real domain + TLS at
+the ingress, operator Secrets instead of dev placeholders, storage class,
+2 gateway replicas) — but it has **not been executed or verified** and no
+domain, certificate or host is provisioned by this project. The design
+tradeoffs of that split are in [docs/architecture.md §12](./docs/architecture.md).
+
+## Teardown (preserves data by default)
+
+None of the demo steps require destroying anything — the store's orders and
+users intentionally accumulate. When you *do* want to tear down, the safe
+sequence is in [infra/helm/README.md](./infra/helm/README.md) "Cleanup
+(preserves data by default)": scale workloads to zero or `helm uninstall` —
+both keep the PostgreSQL and WordPress PVCs (`helm.sh/resource-policy=keep`);
+delete the PVCs or the kind cluster only if you explicitly want to lose the
+data (marked destructive in that document). To stop the local demo access
+points only: `pkill -f "port-forward"`.
+
+## Stand-out items attempted
+
+Which optional stand-out items were attempted, and where each lives
+(full table with evidence: [docs/requirement-matrix.md §0.9](./docs/requirement-matrix.md)):
+
+| Attempted | Where to find |
+| --- | --- |
+| Tool permissions (restricted tools rejected when called directly) | `apps/gateway/src/auth/authorization.ts` + dashboard `lib/permissions.ts` (parity-tested) |
+| SSRF protection on admin-added upstream URLs | `apps/gateway/src/config.ts` C4 classifier + `upstream-crud.test.ts` |
+| NetworkPolicies / non-root containers | `infra/helm/mcp-gateway/templates/networkpolicy.yaml` (documented, disabled on kind), all images non-root |
+| Upstream credentials encrypted at rest (AES-256-GCM) | `apps/gateway/src/upstream-credentials.ts` + `upstream-credentials.test.ts` |
+| VPS/k3s deployment | outline only in `infra/helm/README.md` — **not executed** |
+
 ## Roadmap
 
 | # | Milestone | Deliverable |
@@ -353,5 +459,6 @@ run time only.
 | 8 | Security hardening | ✅ done: threat-model C1–C8 + B1 hardening implemented and test-verified (SSRF guard, rate/concurrency/limit controls, log scrubbing, ServiceAccounts, host allow-listing) |
 | 9 | Chat agent + LLM | ✅ done: Groq-compatible agent loop through the same gateway path (shared authz/audit pipeline); optional — 503 without a key |
 | 10 | Real store + dashboard overhaul | ✅ done: WordPress/WooCommerce in-cluster (Helm, pinned versions, idempotent seed) live-verified through `/mcp`; Team/Settings dashboard areas; tool-permission indicator mirroring `authorization.ts` (regression-tested on both sides); env-gated external MCP client test + Inspector docs; security assertions; [requirement matrix](./docs/requirement-matrix.md) |
+| 11 | Assignment reconciliation + DoD | ✅ done (VPS remains outline-only): admin-managed dynamic upstreams with AES-256-GCM credentials (D34), member self-serve keys, Ingress hosts for dashboard+storefront, chat reliability (D35), and the **two-user definition-of-done walkthrough** live-executed end to end — [docs/demo-runbook.md](./docs/demo-runbook.md) |
 
 Details and the *why* for each ordering: [docs/architecture.md § 11](./docs/architecture.md).

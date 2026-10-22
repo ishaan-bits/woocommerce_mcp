@@ -1,10 +1,11 @@
-import type { UpstreamId, UserRole } from "@mcp/shared";
+import type { UserRole } from "@mcp/shared";
 
 export interface StoredUser {
   readonly id: string;
   readonly displayName: string;
   readonly role: UserRole;
-  readonly allowedUpstreams: readonly UpstreamId[];
+  /** Fixed ids (UPSTREAM_IDS) and/or admin-registered dynamic ids (D34). */
+  readonly allowedUpstreams: readonly string[];
   /** ToolPermission strings: `tools:<qualifiedName>` (C5). */
   readonly allowedTools: readonly string[];
 }
@@ -37,7 +38,7 @@ export interface UserAdminRecord {
   readonly id: string;
   readonly displayName: string;
   readonly role: UserRole;
-  readonly allowedUpstreams: readonly UpstreamId[];
+  readonly allowedUpstreams: readonly string[];
   readonly allowedTools: readonly string[];
   readonly createdAt: string;
   /** API keys currently usable (revoked_at IS NULL). */
@@ -48,14 +49,14 @@ export interface UserAdminRecord {
 export interface CreateUserInput {
   readonly displayName: string;
   readonly role: UserRole;
-  readonly allowedUpstreams: readonly UpstreamId[];
+  readonly allowedUpstreams: readonly string[];
   readonly allowedTools: readonly string[];
 }
 
 export interface UpdateUserInput {
   readonly displayName?: string;
   readonly role?: UserRole;
-  readonly allowedUpstreams?: readonly UpstreamId[];
+  readonly allowedUpstreams?: readonly string[];
   readonly allowedTools?: readonly string[];
 }
 
@@ -81,6 +82,8 @@ export interface AuthRepository {
   /** Flips revoked_at only when it is still NULL; row is kept (C1). */
   revokeKey(keyId: string): Promise<{ found: boolean; revokedNow: boolean; revokedAt: string | null }>;
   listKeys(): Promise<KeyMetadata[]>;
+  /** One member's own keys (self-serve page); same shape as listKeys. */
+  listKeysForUser(userId: string): Promise<KeyMetadata[]>;
   userExists(userId: string): Promise<boolean>;
   /** Admin-only member listing (display names, grants, key counts — no hashes). */
   listUsers(): Promise<UserAdminRecord[]>;

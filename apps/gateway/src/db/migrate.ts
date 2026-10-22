@@ -16,6 +16,8 @@ import pg from "pg";
  * session rows — logout and expiry cleanup; audit_log/users/api_keys still
  * have no DELETE grant anywhere) and SELECT+INSERT+UPDATE on
  * upstream_overrides (config state, updated in place, never deleted).
+ * Milestone 11 (D34): SELECT+INSERT+UPDATE+DELETE on dynamic_upstreams —
+ * admin-registered server config that an admin may also remove.
  */
 
 const APP_ROLE = "mcp_gateway_app";
@@ -97,6 +99,10 @@ export async function runMigrations(options: RunMigrationsOptions): Promise<void
       await client.query(`GRANT INSERT, SELECT, UPDATE (revoked_at) ON api_keys TO ${APP_ROLE}`);
       await client.query(`GRANT SELECT, INSERT, DELETE ON web_sessions TO ${APP_ROLE}`);
       await client.query(`GRANT SELECT, INSERT, UPDATE ON upstream_overrides TO ${APP_ROLE}`);
+      // Milestone 11 (D34): admin-registered upstream config state. The
+      // runtime role needs DELETE here so an admin can REMOVE a server
+      // (unlike audit_log/users/api_keys, which stay append-only/limited).
+      await client.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON dynamic_upstreams TO ${APP_ROLE}`);
       await client.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${APP_ROLE}`);
       log(`runtime role ${APP_ROLE} ready (append-only audit grants; ephemeral session grants)`);
     } else {

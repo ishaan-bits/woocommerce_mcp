@@ -1,5 +1,5 @@
+import { UPSTREAM_IDS, type ApiKeyPrincipal, type ToolPermission } from "@mcp/shared";
 import { parseToolName } from "../routing.ts";
-import type { ApiKeyPrincipal, ToolPermission } from "@mcp/shared";
 
 export interface AuthzDecision {
   readonly allowed: boolean;
@@ -34,9 +34,19 @@ function toolPermission(qualifiedName: string): ToolPermission {
  * C5 check order applied at the gateway: role ceiling first, then
  * upstream grant, then exact tool grant. Everything is derived from the
  * authenticated principal — never from request input.
+ *
+ * `knownUpstreamIds` must be the registry's LIVE ids (fixed + admin-added):
+ * grant checks only apply to names that parse, so a caller that omitted the
+ * dynamic ids would let them past this function. Production call sites all
+ * pass `registry.upstreamIds()`; the default covers the fixed ids for unit
+ * tests of the fixed world.
  */
-export function authorizeToolCall(principal: ApiKeyPrincipal, qualifiedName: string): AuthzDecision {
-  const parsed = parseToolName(qualifiedName);
+export function authorizeToolCall(
+  principal: ApiKeyPrincipal,
+  qualifiedName: string,
+  knownUpstreamIds: readonly string[] = UPSTREAM_IDS,
+): AuthzDecision {
+  const parsed = parseToolName(qualifiedName, knownUpstreamIds);
   if (parsed === null) {
     // Unparseable names are the registry's `unknown_tool` path (outcome "error"),
     // not an authorization decision.

@@ -187,6 +187,7 @@
         "enabled": { "type": "boolean" },
         "className": { "type": "string" },
         "host": { "type": "string" },
+        "storefrontHost": { "type": "string" },
         "annotations": { "type": "object" },
         "tls": {
           "type": "object",

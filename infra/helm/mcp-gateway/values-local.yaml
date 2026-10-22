@@ -3,6 +3,8 @@
 #   kind load docker-image urumi/gateway:0.1.0 urumi/woocommerce-mcp:0.1.0 \
 #     urumi/inventory-mcp:0.1.0 urumi/support-mcp:0.1.0 urumi/dashboard:0.1.0 \
 #     postgres:17-alpine node:26.7-alpine --name urumi-local
+#   helm -n ingress-nginx upgrade --install ingress-nginx \
+#     ingress-nginx/ingress-nginx --version 4.15.1 --create-namespace
 #   helm upgrade --install urumi infra/helm/mcp-gateway \
 #     -n urumi --create-namespace \
 #     -f infra/helm/mcp-gateway/values-local.yaml
@@ -15,9 +17,15 @@ gateway:
   service:
     type: NodePort
     nodePort: 30081
-  # What an external MCP client can actually reach: the gateway NodePort.
-  # Feeds GET /api/settings → the dashboard's Settings page.
-  publicUrl: "http://127.0.0.1:30081"
+  # What an external MCP client can actually reach: the ingress host (stable
+  # local domain, docs/README "Local ingress"). Falls back to a port-forward
+  # of svc/gateway when the ingress controller is not running. Feeds
+  # GET /api/settings → the dashboard's Settings page.
+  publicUrl: "http://dashboard.urumi.test:18080"
+  # Local kind runs plain-http MCP services (ClusterIP, no TLS); D34's
+  # registration policy allows http:// URLs so an admin can register a local
+  # server from the dashboard. Production (values-prod) keeps https-only.
+  dynamicUpstreamTlsPolicy: "allow-http"
 
 dashboard:
   service:
@@ -53,11 +61,29 @@ mockStore:
 woocommerceMcp:
   storeMode: "real"
 
+# Local ingress (kind): an ingress-nginx controller is installed into the
+# same cluster and reached through a port-forward (kind maps no host ports):
+#   helm -n ingress-nginx upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+#     --version 4.15.1 --create-namespace
+#   kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 18080:80 &
+# Then map the local domain (requires sudo; without it use
+# `curl --resolve` / a browser host override — see README "Local ingress"):
+#   127.0.0.1 dashboard.urumi.test shop.urumi.test
+ingress:
+  enabled: true
+  className: nginx
+  host: "dashboard.urumi.test"
+  storefrontHost: "shop.urumi.test"
+
 wordpress:
   enabled: true
-  # Port-forward address of the storefront (see README "Demo walkthrough"):
-  #   kubectl -n urumi port-forward svc/wordpress 8082:80
-  siteUrl: "http://127.0.0.1:8082"
+  # Canonical storefront URL = the ingress host. The wp-init container rewrites
+  # home/siteurl to this value on every boot (idempotent), so the storefront
+  # renders with matching asset URLs and no redirect loop through the ingress.
+  # The port is the ingress port-forward above (kind maps no host ports; :80
+  # needs root). A bare port-forward of svc/wordpress 301-redirects here —
+  # use it only for wp-login.php emergencies.
+  siteUrl: "http://shop.urumi.test:18080"
 
 wordpressDb:
   persistence:

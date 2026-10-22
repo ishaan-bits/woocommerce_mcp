@@ -259,6 +259,29 @@ describe("admin surface methods (users, keys, settings)", () => {
     assert.equal(result.already_revoked, true);
   });
 
+  test("self-serve myKeys/issueMyKey target /me/keys and never send a user_id", async () => {
+    const { fetchImpl, calls } = recordingFetch((call) => {
+      if (call.init?.method === "POST") {
+        return jsonResponse(
+          { id: "k1", user_id: "u1", key_prefix: "umk_ab", created_at: "2026-01-01T00:00:00Z", revoked_at: null, key: "umk_plaintext" },
+          201,
+        );
+      }
+      return jsonResponse({ keys: [{ id: "k1", key_prefix: "umk_ab", created_at: "2026-01-01T00:00:00Z", revoked_at: null }] });
+    });
+    const api = createApiClient(fetchImpl);
+    const listed = await api.myKeys();
+    assert.equal(listed.keys.length, 1);
+    const issued = await api.issueMyKey();
+    assert.equal(issued.key, "umk_plaintext");
+    assert.equal(calls[0]?.url, "/api/me/keys");
+    assert.equal(calls[0]?.init?.method, "GET");
+    assert.equal(calls[1]?.url, "/api/me/keys");
+    assert.equal(calls[1]?.init?.method, "POST");
+    // Self-serve never sends a user_id — the server derives it from the session.
+    assert.equal(calls[1]?.init?.body, undefined);
+  });
+
   test("audit filters map to whitelisted query params; empty values are omitted", async () => {
     const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ entries: [] }));
     const api = createApiClient(fetchImpl);
@@ -298,6 +321,67 @@ describe("admin surface methods (users, keys, settings)", () => {
       assert.equal(error.status, 429);
       assert.equal(error.code, "provider_rate_limited");
       assert.ok(error.message.includes("rate limiting"));
+      return true;
+    });
+  });
+});
+
+describe("chat error details (partial tool state + provider wait hint)", () => {
+  test("the whitelist keeps tool chips, rounds and retry_after_seconds from a failed turn", async () => {
+    const { fetchImpl } = recordingFetch(() =>
+      jsonResponse(
+        {
+          error: "provider_rate_limited",
+          message: "The LLM provider is rate limiting requests; try again shortly.",
+          retry_after_seconds: 90,
+          rounds: 1,
+          tool_calls: [
+            { name: "woocommerce_list_products", outcome: "success" },
+            { name: "woocommerce_list_orders", outcome: "error", error: "store unreachable" },
+          ],
+          ignored_field: "never forwarded",
+        },
+        429,
+      ),
+    );
+    const api = createApiClient(fetchImpl);
+    await assert.rejects(() => api.chat("hi"), (error: unknown) => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.details?.retry_after_seconds, 90);
+      assert.equal(error.details?.rounds, 1);
+      assert.deepEqual(error.details?.tool_calls, [
+        { name: "woocommerce_list_products", outcome: "success" },
+        { name: "woocommerce_list_orders", outcome: "error", error: "store unreachable" },
+      ]);
+      assert.ok(!JSON.stringify(error.details).includes("ignored_field"));
+      return true;
+    });
+  });
+
+  test("shaped-wrong tool entries are dropped rather than forwarded", async () => {
+    const { fetchImpl } = recordingFetch(() =>
+      jsonResponse(
+        {
+          error: "provider_error",
+          tool_calls: [{ name: 42 }, "junk", { outcome: "success" }, { name: "ok_tool", outcome: "success" }],
+        },
+        502,
+      ),
+    );
+    const api = createApiClient(fetchImpl);
+    await assert.rejects(() => api.chat("hi"), (error: unknown) => {
+      assert.ok(error instanceof ApiError);
+      assert.deepEqual(error.details?.tool_calls, [{ name: "ok_tool", outcome: "success" }]);
+      return true;
+    });
+  });
+
+  test("an error body without extras leaves details undefined", async () => {
+    const { fetchImpl } = recordingFetch(() => jsonResponse({ error: "internal_error" }, 500));
+    const api = createApiClient(fetchImpl);
+    await assert.rejects(() => api.chat("hi"), (error: unknown) => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.details, undefined);
       return true;
     });
   });

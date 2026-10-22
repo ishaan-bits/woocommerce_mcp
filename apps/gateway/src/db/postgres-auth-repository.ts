@@ -184,6 +184,35 @@ export function createPostgresAuthRepository(pool: Pool): AuthRepository {
       }));
     },
 
+    async listKeysForUser(userId: string): Promise<KeyMetadata[]> {
+      const result = await pool.query<{
+        id: string;
+        key_prefix: string;
+        created_at: Date;
+        revoked_at: Date | null;
+        user_id: string;
+        display_name: string;
+        role: string;
+      }>(
+        `SELECT k.id, k.key_prefix, k.created_at, k.revoked_at,
+                u.id AS user_id, u.display_name, u.role
+           FROM api_keys k
+           JOIN users u ON u.id = k.user_id
+          WHERE k.user_id = $1
+          ORDER BY k.created_at DESC`,
+        [userId],
+      );
+      return result.rows.map((row) => ({
+        id: row.id,
+        keyPrefix: row.key_prefix,
+        userId: row.user_id,
+        displayName: row.display_name,
+        role: row.role === "admin" ? "admin" : "reader",
+        createdAt: row.created_at.toISOString(),
+        revokedAt: row.revoked_at?.toISOString() ?? null,
+      }));
+    },
+
     async userExists(userId: string): Promise<boolean> {
       const result = await pool.query<Pick<UserRow, "id">>(`SELECT id FROM users WHERE id = $1`, [userId]);
       return (result.rowCount ?? 0) > 0;

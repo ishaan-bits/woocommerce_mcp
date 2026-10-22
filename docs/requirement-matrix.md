@@ -1,11 +1,144 @@
-# Requirement matrix — Milestone 10
+# Requirement matrix — original assignment (PDF) and milestones
 
-Maps each requirement of this milestone to the code that implements it and the
-check that proves it. Every "verification" cell names a command in this repo;
-live checks were run against the kind cluster `urumi-local` (Helm release
-`urumi`, namespace `urumi`) and can be repeated with the shown commands.
-Nothing here is claimed without a passing check — see "Explicitly not claimed"
-at the bottom.
+Section 0 reconciles the **original assignment PDF** (`docs/Urumi-MCP-Gateway-Assignment.pdf`,
+8 pages) against this repository as of the start of Milestone 11. Sections 1–10
+map each milestone to the code that implements it and the check that proves it.
+Every "verification" cell names a command in this repo; live checks were run
+against the kind cluster `urumi-local` (Helm release `urumi`, namespace `urumi`)
+and can be repeated with the shown commands. Nothing here is claimed without a
+passing check — see "Explicitly not claimed" at the bottom.
+
+## 0. Original assignment (PDF) — mandatory requirement reconciliation
+
+Statuses were recorded **before** any Milestone 11 code changes, from evidence
+in this repository and the live cluster. Documentation alone is never counted
+as "verified" for a functional requirement; where only docs exist the status is
+`🟡 partial` or `❌ missing` with the gap named. `⛔` means the environment or
+this milestone's rules prevent it. `optional` rows are the PDF's bonus/stand-out
+items, which the PDF itself marks non-mandatory.
+
+### 0.1 Kubernetes and Helm (PDF p.3)
+
+| # | Requirement | Status | Evidence / gap |
+| --- | --- | --- | --- |
+| K1 | Runs on local Kubernetes (Kind/k3d/Minikube) | ✅ verified | kind cluster `urumi-local`, Helm release `urumi` in ns `urumi`, 9 live deployments (§9) |
+| K2 | Deployable to a production-like VPS (k3s) with the same Helm charts, config changes only | 🟡 partial | `values-prod.yaml` renders/lints clean and `infra/helm/README.md` has "Deploying to a future VPS (outline — prepared, not executed here)" — **no VPS was ever deployed** (§9) |
+| K3 | Helm mandatory (no Kustomize); local/prod differences via values files | ✅ verified | only `infra/helm/mcp-gateway` + `values-local.yaml`/`values-prod.yaml`; no Kustomize manifests in repo; `helm lint` 2/2 (§6) |
+| K4 | Everything runs in the cluster: store, store DB, WooCommerce MCP, gateway, dashboard | ✅ verified | 9 deployments incl. `wordpress`, `wordpress-db`, `woocommerce-mcp`, `gateway`, `dashboard` (§3, §9) |
+| K5 | Store DB and WordPress content use persistent storage | ✅ verified | 3 PVCs `Bound`; `helm.sh/resource-policy=keep` so uninstall preserves them (§9) |
+| K6 | Storefront and dashboard exposed through **Ingress** with stable URLs; local domain approach documented | ✅ verified | `ingress-nginx` (chart 4.15.1) installed on kind `urumi-local`; Ingress `mcp-gateway` serves `dashboard.urumi.test` (`/` → dashboard, `/mcp` + `/api` → gateway) and `shop.urumi.test` (`/` → wordpress); local-domain approach documented (README, `infra/helm/README.md` "Access", `docs/architecture.md` §8) incl. the single `:18080` port-forward + `/etc/hosts`/`--resolve` path; live-checked (curl + Playwright: both hosts render, login forms answer, canonical URLs stable) |
+| K7 | Readiness/liveness checks and resource requests+limits on every workload | ✅ verified | all 9 deployments have both probes + CPU/memory limits (§9) |
+| K8 | No hardcoded secrets in source; credentials in Kubernetes Secrets | ✅ verified | `scripts/security/assert-helm-security.sh` 7/7 (prod render ships 0 Secret manifests, no inline credential literals), tree/commit secret scans 0 matches (§6, §7) |
+
+### 0.2 WooCommerce MCP server (PDF p.4)
+
+| # | Requirement | Status | Evidence / gap |
+| --- | --- | --- | --- |
+| W1 | Written by us, no existing WooCommerce MCP plugin | ✅ verified | `services/woocommerce-mcp` first-party source, 70 tests |
+| W2 | Speaks MCP over Streamable HTTP | ✅ verified | SDK Streamable HTTP server; reached through the gateway by the official SDK client (§5) |
+| W3 | Exposes ≥ list products, create product, list orders, get order, update order status | ✅ verified | exactly those 5 tools; live `woocommerce_list_products` → 4 real SKUs (§3) |
+| W4 | Not reachable from outside the cluster; only the gateway can call it | ✅ verified | ClusterIP-only service; security-demo check "internal services not exposed" (§9) |
+| W5 | Documented how it talks to the store and why | ✅ verified | `docs/architecture.md` §7 (REST API rationale) + `services/woocommerce-mcp/README.md` |
+
+### 0.3 Gateway (PDF p.4)
+
+| # | Requirement | Status | Evidence / gap |
+| --- | --- | --- | --- |
+| G1 | Admins can **add, edit, disable and remove** upstream MCP servers by URL with an **optional static credential (header or bearer)** | ✅ resolved | Milestone 11 Phase 1 (D34): admin API `POST/PUT/DELETE /api/upstreams` + `UpstreamsPage` UI (name, URL, enable, optional `bearer`/`header` credential); registry `addOrUpdateServer`/`removeServer` with live re-discovery; unique-URL enforcement; fixed ids refuse edit/delete. Credential is **encrypted at rest** (AES-256-GCM, AAD-bound to the upstream id), 3-state patch (omit/null/object), never returned or logged; feature fails closed 503 without `UPSTREAM_CREDENTIAL_KEY`. Tests: `upstream-crud.test.ts`, `upstream-credentials.test.ts`, `postgres.test.ts` (D34) |
+| G2 | One MCP endpoint; tools/list returns every enabled server's tools; calls routed to the right server | ✅ verified | `/mcp` single endpoint, 9 live tools, qualified-name routing (§5, §9) |
+| G3 | Same tool name on two servers handled by a documented scheme | ✅ verified | `<upstream>_<tool>` qualified names, collision tests, `docs/architecture.md` §5 |
+| G4 | Slow/dead upstream doesn't break listing/calls to others; timeouts + clear error | ✅ verified | C7 isolation tests, per-upstream timeouts, chat maps 504, registry semaphore tests (§ matrix rows in threat-model C7) |
+| G5 | Upstream credentials stay server-side; never sent to browser or MCP client | ✅ verified | WooCommerce consumer key/secret exist only as env in the `woocommerce-mcp` Pod. Admin-entered dynamic credentials (Phase 1) are AES-256-GCM ciphertext in Postgres and plaintext only inside the gateway process to the upstream hop; responses/audit/logs carry redaction or a boolean `has_credential` only (URLs admin-only, C4). Tests: `upstream-credentials.test.ts` (round-trip/AAD/fail-closed), `upstream-crud.test.ts` ("encrypted credential: stored as ciphertext only, redacted from responses and logs"), live Phase 1 redaction check (threat-model C3) |
+| G6 | ≥3 upstream servers connected | ✅ verified | `woocommerce`, `inventory`, `support` → 9 tools live (§9) |
+
+### 0.4 Team and access (PDF p.4)
+
+| # | Requirement | Status | Evidence / gap |
+| --- | --- | --- | --- |
+| T1 | ≥2 roles: admin (manages servers+members) and member (uses tools) | ✅ verified | role enum `admin`/`reader` (member ≡ reader; naming documented in dashboard `roleLabel`), RBAC tests incl. "grants bind admins too" (§2) |
+| T2 | Per-user gateway API key, revocable, stored hashed | ✅ verified | sha256+pepper storage, `key_revoked` audit, live revoked key → 401 (§9 security-demo 7/7) |
+| T3 | Every tool call audited (user, server, tool, timestamp, duration, outcome), visible in the dashboard | ✅ verified | `audit_log` columns + Audit page filters; live rows attributed per user (§9) |
+
+### 0.5 Chat agent (PDF p.4)
+
+| # | Requirement | Status | Evidence / gap |
+| --- | --- | --- | --- |
+| C1 | Dashboard chat uses an LLM to call tools through the gateway and **shows which tools it called** | ✅ verified (automated) | agent loop + provider tests; `ChatPage` renders `tool_calls` under each reply (`aria-label="Tool calls"`). Live LLM calls: Milestone 9 only — **not re-run in Milestone 11** (no-spend rule) |
+| C2 | Acts as the logged-in user; calls appear in audit under that user | ✅ verified | agent executes with the request principal through the shared pipeline (D30), agent tests assert audit attribution |
+| C3 | Model/provider free choice | ✅ verified | Groq free tier or any OpenAI-compatible base URL (D29); clean 503 with no key |
+| C4 | LLM API keys follow the same secret rule | ✅ verified | optional `GROQ_API_KEY` via `secretKeyRef` only; prod renders no key; no literals (K8) |
+
+### 0.6 Definition of done — two-user demo (PDF pp.3–4)
+
+| # | DoD step | Status | Evidence / gap |
+| --- | --- | --- | --- |
+| D1 | Storefront: add product to cart, check out with test-friendly method (COD) | ✅ verified | Phase 4 live (Playwright against `shop.urumi.test:18080`): catalog → product → add to cart → block checkout → **Cash on delivery** (enabled once via `wc/v3/payment_gateways/cod`, the PDF's sanctioned test method) → order-received **#17** (`$12.00`, "Payment: Cash on delivery"). Runbook **T1** (`docs/demo-runbook.md`); re-runnable with `scripts/demo/storefront-checkout.cjs` |
+| D2 | Order visible in WooCommerce admin | ✅ verified | Phase 4 live (Playwright): wp-admin login (password from `urumi-secrets` via env, never printed) → **WooCommerce → Orders** shows `#17 Ada Lovelace … Processing $12.00` next to seeded #14/#15. Cross-check through our own tool: user B `woocommerce_list_orders` → `[14, 15, 17]`. Runbook **T2** |
+| D3 | User A chat: agent creates a product; it appears on the storefront | ⛔ blocked (LLM quota) | the free-tier provider is currently rate-limiting the demo account (live `chat_provider_failed {kind: rate_limited, status: 429}` on 2026-10-22; the gateway answers `429 provider_rate_limited` + `retry_after_seconds`, UI offers a safe retry) — **a provider quota limitation, not fixed by code**. Deterministic coverage: `agent.test.ts` (grounded create-product loop), `chat-api.test.ts`; historical live proof: M9 on Groq. Runbook **T3** marks it MANUAL for demo time |
+| D4 | User A: place order by hand, ask agent "orders today", it returns that order | ⛔ blocked (LLM quota), storefront half ✅ | storefront half done live (T1/T5: order #17 returned by `woocommerce_list_orders`); the chat answer needs provider quota (same blocker as D3). Runbook **T4** |
+| D5 | User B external client: gateway URL + own key only → sees tools of every enabled server, answers the orders question | ✅ verified | Phase 4 live: official MCP SDK vs deployed gateway → 3/3 (handshake + `tools/list` 9 tools from 3 servers; `tools/call`; two-upstream D6) and the orders question returns **#17**; `GATEWAY_URL=… GATEWAY_API_KEY=… node --test apps/gateway/test/external-client.test.ts`. Runbook **T5** |
+| D6 | One prompt needing tools from **two different upstreams** | ✅ verified | Phase 4 live: one member session calls `woocommerce_list_products` **and** `inventory_list_products` successfully (reader grants cover both). Automated twins: `external-client.test.ts` "DoD D6" (live-gated) + `dod-flow.test.ts` "D6" (deterministic harness). Runbook **T6** |
+| D7 | Revoke user B's key → next call rejected | ✅ verified | Phase 4 live: user B self-serves a key (`POST /api/me/keys` → 201, plaintext once) → call works → user A `POST /api/keys/:id/revoke` → 200 → next MCP call **401**, `GET /api/me` **401**; `key_created`/`key_revoked` audited. Tests: `dod-flow.test.ts` D7/D10, `api.test.ts`, `auth-middleware.test.ts`, postgres integration. Runbook **T7** |
+| D8 | Disable one upstream → its tools disappear from chat agent **and** external client | ✅ verified | Phase 4 live round-trip: 9→7→9 tools; `inventory_*` gone from the member's `tools/list` **and** the `GET /api/tools` mirror the chat/Tools UI uses; `woocommerce_*` intact; `upstream_disabled`/`upstream_enabled` audited. Tests: `dod-flow.test.ts` D8 (agent offered list + client list), `mcp-protocol.test.ts`. Runbook **T8** |
+| D9 | Kill one upstream pod → others keep working; dashboard shows the dead one as unreachable | ✅ verified | Phase 4 live (scale `inventory-mcp` to 0 for an observable window; literal `kubectl delete pod` variant in the runbook): `inventory_list_products` → tool error *"upstream 'inventory' is unreachable (the connection failed)"*, sibling `woocommerce_list_products` → success, `GET /api/upstreams` → `reachable:false` + `last_error`, recovery after restore. Tests: `dod-flow.test.ts` D9, `mcp-failure.test.ts`, `real-upstreams.test.ts` (SIGKILL). Cosmetic gap noted: `last_error` renders as generic `TypeError`. Runbook **T9** |
+| D10 | Every call above appears in the audit log attributed to the right user | ✅ verified | Phase 4 live audit table (runbook **T10**): 14 `tool_call` rows attributed to user B with upstream/tool/outcome/duration, `key_created` (B), `key_revoked` (A, names the key), `upstream_disabled`/`upstream_enabled` (A), `auth_failed` for the revoked key's attempts. Tests: `dod-flow.test.ts` D10, `postgres.test.ts` (exactly-one row per call) |
+
+### 0.7 User stories (PDF p.2)
+
+| # | Story | Status | Evidence / gap |
+| --- | --- | --- | --- |
+| A1 | Admin sees registered servers with status (Connected/Unreachable/Disabled) and their tools | ✅ verified | `UpstreamsPage` status badges (`Healthy` / `Degraded (unreachable)` / `Disabled` via `upstreamHealthText`) + expandable tool lists, `ToolsPage` catalogue |
+| A2 | WooCommerce already registered as the first server | ✅ verified | config builds registry from `UPSTREAM_IDS` starting with `woocommerce`; live first row |
+| A3 | Admin adds another server by URL and credential, edits/disables/removes it | ✅ resolved | same evidence as G1 (Milestone 11 Phase 1); live on kind: admin created a dynamic server with a credential against the real `inventory-mcp`, its tools joined `tools/list` and were callable, member view redacted the URL, delete removed the row and unregistered the server |
+| A4 | Invite members, issue/revoke their keys | ✅ verified | Team page + `POST /api/users`, `POST /api/keys`, `POST /api/keys/:id/revoke` |
+| A5 | Audit log of every tool call: who, which server/tool, when, duration, success | ✅ verified | Audit page + T3 |
+| M1 | Member generates **their own** API key in the dashboard | ✅ verified | self-serve `POST/GET /api/me/keys` (user id always from the credential, plaintext returned once, `key_created` audited) + member-visible "Your API keys" card on Settings; live-checked on kind — reader mints a key and it authenticates immediately |
+| M2 | One gateway URL + own key in an MCP client → sees every enabled server's tools | ✅ verified | D5 evidence (§5 live) |
+| M3 | Use dashboard chat agent answered with those tools | ✅ verified | C1/C2 (chat available to authenticated users; executes under own grants) |
+| M4 | Never sees or needs upstream credentials | ✅ verified | threat-model C3; no API returns upstream credentials (Phase 1 must keep this true for dynamic credentials) |
+
+### 0.8 Repo deliverables (PDF p.7)
+
+| # | Deliverable | Status | Evidence / gap |
+| --- | --- | --- | --- |
+| R1 | README: local setup instructions | ✅ verified | README setup + live-checked commands used every milestone |
+| R2 | README: VPS/production-like (k3s) setup | 🟡 partial | outline documented, explicitly **not executed** (K2) |
+| R3 | README: how to **place an order**, connect an external MCP client, use the chat agent | ✅ verified | README "Place an order (storefront, cash on delivery)" + "External MCP clients" + the LLM/chat agent row; full scripted walkthrough in `docs/demo-runbook.md` (order placement T1/T2 live-executed, 2026-10-22) |
+| R4 | Source: dashboard, backend/gateway, WooCommerce MCP server, chat agent | ✅ verified | `apps/dashboard`, `apps/gateway`, `services/woocommerce-mcp`, agent in `apps/gateway/src/agent` |
+| R5 | Helm charts + values files (local and production) | ✅ verified | `infra/helm/mcp-gateway` + both values files |
+| R6 | Short "System design and tradeoffs" note (architecture, aggregation/routing/failure, prod changes) | ✅ verified | `docs/architecture.md` **§12 "System design and tradeoffs"** — framed as the PDF asks: architecture choices (one gateway server+client, shared `executeToolCall`), aggregation/routing/failure handling (qualified names, structural isolation), production deltas (DNS/TLS, storage class, secret `keyRef`s, replicas) with the unverified VPS step called out |
+| R7 | Threat-model note with the 4 required bullets (shared upstream creds vs members; why client tokens aren't passed through; untrusted upstreams/tool-description manipulation; member-vs-member) | ✅ verified | `docs/threat-model.md` **§3c** covers all four, each mapped to controls + test names; C3 rewritten (no longer claims "the gateway holds only URLs" — now states both credential classes and what a member can do with a credential they never see) |
+| R8 | If bonus/stand-out attempted: list which and where | ✅ verified | §0.9 table now carries a "Where to find" column (tool permissions, SSRF on admin-added URLs, NetworkPolicies/non-root, encrypted upstream credentials); README "Stand-out items attempted" points at it; unattempted items say so |
+| R9 | Repo contains the original assignment PDF | ✅ verified | tracked at `docs/Urumi-MCP-Gateway-Assignment.pdf` (8 pages, included in the Milestone 11 commit); §0 reconciles every mandatory requirement against it |
+
+### 0.9 Bonus / stand-out items (PDF pp.5–6 — optional, recorded honestly)
+
+| Item | Status | Where to find |
+| --- | --- | --- |
+| Bonus: multi-store provisioning | not attempted (PDF: attempt only after core; explicitly out of Milestone 11 scope) | — |
+| Stand-out 1: VPS (k3s) deployment | 🟡 outline only — documented, **not implemented or verified** | `infra/helm/README.md` "Deploying to a future VPS (outline — prepared, not executed here)" |
+| Stand-out 2: tool permissions — restricted tools **rejected** when called directly | ✅ rejection verified (§2 live parity); restricted tools are **still listed** by `/mcp` discovery (by design, D-noted in `mcp-server.ts`) → hiding them from the list is **not** claimed | `apps/gateway/src/auth/authorization.ts`, dashboard `lib/permissions.ts`; parity tests both sides |
+| Stand-out 3: OAuth on the gateway | not attempted | — |
+| Stand-out 4: handling many tools | not attempted | — |
+| Stand-out 5: hosted MCP servers by container image | not attempted | — |
+| Stand-out 6: security hardening — SSRF protection when admin adds a URL | ✅ for config URLs **and** admin-entered dynamic URLs (Phase 1): the C4 allow-list + private-address classifier run on create/edit; metadata addresses refused at boot | `apps/gateway/src/config.ts` (`assertUpstreamTargetAllowed`), `upstream-crud.test.ts` ("URL validation applies the C4 private-address allow-list") |
+| Stand-out 6: NetworkPolicies / non-root | 🟡 deny-by-default `NetworkPolicy` template exists but disabled (kind's kindnet can't enforce it, documented); containers run non-root ✅ | `templates/networkpolicy.yaml`, `infra/helm/README.md` "Milestone 8 security posture" |
+| Stand-out 6: **upstream credentials encrypted at rest** | ✅ AES-256-GCM vault (Phase 1): ciphertext in Postgres, AAD-bound to the upstream id, 503 fail-closed without the key | `apps/gateway/src/upstream-credentials.ts`, `upstream-credentials.test.ts`, migration `004_dynamic_upstreams.sql` |
+| Stand-out 7: multi-replica gateway | not attempted (single replica); rate limits exist (per-bucket keys, `limits.ts`) | `values-prod.yaml` shows the 2-replica shape |
+| Stand-out 8: metrics (calls/error rate/latency per server) | ❌ not implemented; "clear reporting why unreachable" 🟡 via `last_error` in `GET /api/upstreams` (rendered text is a generic `TypeError` — known cosmetic gap) | `GET /api/upstreams` |
+| Stand-out 9: upgrade/rollback with Helm | 🟡 upgrade commands documented; no executed rollback drill | `infra/helm/README.md` |
+
+### 0.10 Discrepancy log (PDF vs repository at Milestone 11 start)
+
+| # | Discrepancy | Resolution |
+| --- | --- | --- |
+| X1 | PDF mandates admin add/edit/remove of upstreams **with credentials** (G1/A3); repo is deploy-time config only | ✅ resolved | migration `004_dynamic_upstreams.sql`, AES-256-GCM credential vault (never plaintext in DB/logs/API), live registry add/remove/toggle, admin API `POST/PUT/DELETE /api/upstreams` + dashboard UI; live-checked on kind (create with credential → tools discovered from the real inventory-mcp → redaction → delete) |
+| X2 | PDF mandates **Ingress** for storefront + dashboard with documented local domain (K6); repo has none | ✅ resolved | same evidence as K6 — `ingress.storefrontHost` chart value + storefront rule in `templates/ingress.yaml`, `ingress-nginx` controller on the existing kind cluster, docs in README/`infra/helm/README.md`/architecture §8; port-forward paths preserved as fallback |
+| X3 | DoD/user stories need the member to reach **multiple** upstreams and a two-upstream prompt (D6, M2); `reader-demo` is granted only `woocommerce` | ✅ resolved | migration `005_demo_grants.sql` (additive, keyed on the two seed users, sorted-DISTINCT so re-runs are a no-op): admin gains the 4 inventory/support tools; reader gains `inventory`+`support` upstreams and the 2 read-only tools (writes stay admin-only). Live on kind: one reader key calls `inventory_list_products` **and** `woocommerce_list_products` in a single MCP session |
+| X4 | Member story M1: self-service key issuance; repo issues keys admin-only | ✅ resolved | same evidence as M1 — `POST/GET /api/me/keys` + Settings-page UI; `listKeysForUser` scopes the listing to the caller so no other member's keys are visible |
+| X5 | Threat model must contain the 4 PDF bullets (R7) and stop claiming the gateway holds only URLs once dynamic credentials exist | ✅ resolved | `docs/threat-model.md` §3c (all four bullets with control/test mapping) + C3 rewritten for the two credential classes (D34) |
+| X6 | README lacks order-placement how-to; "System design and tradeoffs" note and stand-out list missing (R3/R6/R8) | ✅ resolved | README "Place an order (storefront, cash on delivery)" + "Stand-out items attempted"; `docs/architecture.md` §12 |
+| X7 | Stale claim in §9 below ("the PDF is not present") | fixed in this edit — PDF now tracked at `docs/Urumi-MCP-Gateway-Assignment.pdf` |
 
 ## 1. Backend regressions and honest settings (Phase A)
 
@@ -81,9 +214,10 @@ at the bottom.
 ## 9. Continuation verification (same day, after the Milestone 10 commit)
 
 Re-run against the live release (Helm `urumi`, namespace `urumi`); every row was
-executed, not assumed. The original assignment PDF is not present anywhere in
-this workspace — requirements are therefore traced from `README.md`, this
-matrix and `docs/decisions.md` rather than from the PDF.
+executed, not assumed. At the time of this continuation the original assignment
+PDF was not in the workspace, so requirements were traced from `README.md`, this
+matrix and `docs/decisions.md`; the PDF has since been added at
+`docs/Urumi-MCP-Gateway-Assignment.pdf` and is reconciled in §0 above.
 
 | Item | Evidence |
 | --- | --- |
@@ -111,8 +245,51 @@ matrix and `docs/decisions.md` rather than from the PDF.
 | Live HTTP contract (plain http, `auto`) | login via dashboard proxy **and** direct: 200 + `urumi_session=<…>; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200` (no `Secure`); `/me` with the cookie → 200; wrong key → 401 uniform `{"error":"unauthorized"}` with **no** `Set-Cookie`; logout → 200 + `Max-Age=0` clear cookie. |
 | Full quality gates re-run | `TEST_DATABASE_URL=… bash scripts/check.sh` → rc 0 "All required checks passed"; **510/510 tests** (96 dashboard + 267 gateway + 39 inventory + 38 support + 70 woocommerce), `helm lint` 2/2 (both values files), helm security assertions 7/7, `helm template` renders `SESSION_COOKIE_SECURE` and the schema rejects junk values, diff/staged secret scans 0 matches. |
 
+## 11. Milestone 11 Phase 4 — definition-of-done walkthrough (runbook + live end-to-end)
+
+The PDF's "Definition of done" is now fully mapped in
+[`docs/demo-runbook.md`](./demo-runbook.md) (§10 maps every DoD line to its
+evidence; no unperformed check is marked verified). Executed 2026-10-22 on the
+existing cluster (no resets, no PVC touches, ₹0):
+
+| DoD area | Live result (summary) | Deterministic tests added/pinned |
+| --- | --- | --- |
+| Store checkout + admin visibility (D1/D2) | Playwright: COD order **#17** placed through `shop.urumi.test:18080`; wp-admin Orders shows `#17 Ada Lovelace … Processing $12.00` | `services/woocommerce-mcp` suite (order tools) |
+| External client as user B (D5/D6) | official SDK 3/3; orders question returns #17; two-upstream session (woocommerce + inventory) | `external-client.test.ts` "DoD D6" (live-gated), `dod-flow.test.ts` D6 |
+| Key lifecycle (D7, M1) | self-serve mint → works → admin revoke → MCP/REST 401 | `dod-flow.test.ts` D7/D10, `api.test.ts`, `auth-middleware.test.ts` |
+| Upstream disable/enable (D8) | 9→7→9 tools across **both** surfaces (client `tools/list` + `GET /api/tools` chat mirror); audited | `dod-flow.test.ts` D8 |
+| Failure isolation (D9) | inventory outage fails alone (`… is unreachable (the connection failed)`), woocommerce keeps serving real products, `reachable:false` + `last_error` in `/api/upstreams`, clean recovery | `dod-flow.test.ts` D9, `mcp-failure.test.ts`, `real-upstreams.test.ts` |
+| Audit attribution (D10) | 14 `tool_call` rows under user B, `key_revoked` under user A (naming the key), `upstream_disabled/enabled` under user A | `dod-flow.test.ts` D10, `postgres.test.ts` |
+| Persistence (restart clause) | `rollout restart` of gateway + wordpress → orders `[14,15,17]`, 4 products, keys and audit intact | `postgres.test.ts` (migrations idempotent) |
+| Chat agent as user A (D3/D4) | ⛔ **not re-run live**: free-tier provider quota exhausted (real 429s observed; gateway handles them correctly per D35) | `agent.test.ts`, `chat-api.test.ts` (incl. mocked 429/retry/recovery) |
+
+New this phase: `apps/gateway/test/dod-flow.test.ts` (5 tests — the in-process
+twin of the runbook's team-and-control steps) and the live-gated
+"DoD D6" two-upstream test in `external-client.test.ts`. **Release-check
+finding:** the storefront archive went blank for guests after the last
+WordPress restart — root cause is WooCommerce's own **coming-soon** mode
+(`woocommerce_coming_soon = yes`, the plugin's fresh-install default; our seed
+never touches it), which serves guests a "Great things are on the horizon"
+placeholder on store pages. Fixed with the plugin's own launch switch
+(`woocommerce_coming_soon = no`) and re-verified (catalog back: 8 product
+links; `scripts/demo/storefront-checkout.cjs` places order #19 end to end).
+The runbook now includes this step for reviewers. Full gates after the
+suite: `scripts/check.sh` rc 0 — **574/574 tests** (106 dashboard + 321
+gateway incl. 14 PostgreSQL integration + 39 inventory + 38 support + 70
+woocommerce), `helm lint` 2/2, helm security assertions 7/7, tree + diff
+secret scans 0 real matches (documented fixtures only), `npm audit` 0, browser
+smoke 4/4 (dashboard + storefront via ingress hosts).
+
 ## Explicitly not claimed
 
+- **The chat agent's live LLM turn (DoD D3/D4) is NOT claimed as re-verified in
+  Milestone 11.** The free-tier provider is genuinely rate-limiting the demo
+  account (real `429`s on 2026-10-22); the code handles them honestly (D35) but
+  a quota limitation is not "fixed by code". Mock/deterministic coverage and
+  the historical Milestone 9 live run stand in until quota resets.
+- **The dashboard's `last_error` for a dead upstream renders a generic
+  `TypeError`** instead of a friendlier sentence. The DoD requirement (shown as
+  unreachable) is met; nicer wording is open work.
 - **No paid services, no new live LLM spend:** the one allowed Groq end-to-end call
   belongs to Milestone 9 (`scripts/llm-smoke.sh`, opt-in); it was not re-run this
   milestone. All Phase D work is deterministic/mocked.

@@ -45,8 +45,16 @@ export function ToolsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
 
   const tools = state.status === "loaded" ? state.data.tools : [];
   const shown = useMemo(() => filterTools(tools, { search, upstreamId: upstreamFilter }), [tools, search, upstreamFilter]);
-  const degraded =
-    state.status === "loaded" ? state.data.upstreams.filter((entry) => !entry.enabled || !entry.reachable) : [];
+  const upstreams = state.status === "loaded" ? state.data.upstreams : [];
+  const degraded = upstreams.filter((entry) => !entry.enabled || !entry.reachable);
+  /** id → display name (admin-added servers carry their own name, M11). */
+  const labelFor = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const entry of upstreams) {
+      map.set(entry.id, upstreamLabel(entry.id, entry.display_name));
+    }
+    return (id: string) => map.get(id) ?? upstreamLabel(id);
+  }, [upstreams]);
 
   return (
     <section aria-labelledby="tools-heading">
@@ -77,7 +85,7 @@ export function ToolsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
             <option value="">All upstreams</option>
             {(state.status === "loaded" ? state.data.upstreams : []).map((entry) => (
               <option key={entry.id} value={entry.id}>
-                {upstreamLabel(entry.id)}
+                {upstreamLabel(entry.id, entry.display_name)}
               </option>
             ))}
           </select>
@@ -115,7 +123,7 @@ export function ToolsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
           <>
             {degraded.map((entry) => (
               <p key={entry.id} className="banner banner-warn" role="status">
-                Upstream <strong>{upstreamLabel(entry.id)}</strong> is {!entry.enabled ? "disabled" : "unreachable"}
+                Upstream <strong>{labelFor(entry.id)}</strong> is {!entry.enabled ? "disabled" : "unreachable"}
                 {entry.last_error !== null ? ` (${entry.last_error})` : ""} — its tools are omitted from discovery.
               </p>
             ))}
@@ -149,7 +157,7 @@ export function ToolsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                             <code>{tool.qualified_name}</code>
                           </td>
                           <td>
-                            <span className="badge">{upstreamLabel(tool.upstream_id)}</span>
+                            <span className="badge">{labelFor(tool.upstream_id)}</span>
                           </td>
                           <td>{tool.description !== "" ? tool.description : <span className="muted">—</span>}</td>
                           <td>

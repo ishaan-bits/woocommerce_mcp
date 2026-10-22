@@ -1,5 +1,6 @@
 import type { ApiKeyPrincipal } from "@mcp/shared";
 import { authorizeToolCall } from "../auth/authorization.ts";
+import { unionUpstreamIds } from "../routing.ts";
 import { executeToolCall, type ToolCallOutcome } from "../tool-executor.ts";
 import type { AuditWriter } from "../audit.ts";
 import type { Logger } from "../logger.ts";
@@ -10,6 +11,7 @@ import {
   ProviderError,
   type ChatProvider,
   type ProviderMessage,
+  type ProviderResponse,
   type ProviderToolCall,
   type ProviderToolDefinition,
 } from "./provider.ts";
@@ -55,6 +57,32 @@ export class AgentInputError extends Error {
   }
 }
 
+/**
+ * A provider failure that arrived *after* some tool calls of this turn had
+ * already executed. Carries the gateway-computed partial tool state so the
+ * route can return it (chips survive the failure) and a retry can be judged
+ * safe/informed — tool results are never re-executed by the retry itself.
+ */
+export class AgentTurnError extends ProviderError {
+  readonly toolCalls: ToolCallReport[];
+  readonly rounds: number;
+
+  constructor(cause: ProviderError, toolCalls: ToolCallReport[], rounds: number) {
+    super(cause.kind, cause.message, cause.status, cause.retryAfterMs);
+    this.name = "AgentTurnError";
+    this.toolCalls = toolCalls;
+    this.rounds = rounds;
+  }
+}
+
+/** Bounded provider-retry policy (transient failures only). */
+export const PROVIDER_MAX_ATTEMPTS = 3;
+export const PROVIDER_RETRY_BASE_MS = 300;
+export const PROVIDER_RETRY_JITTER_MS = 150;
+export const PROVIDER_RETRY_MAX_WAIT_MS = 3_000;
+/** Never start a wait that leaves less than this for the retried call itself. */
+export const PROVIDER_RETRY_HEADROOM_MS = 500;
+
 export interface ChatTurn {
   role: "user" | "assistant";
   content: string;
@@ -91,6 +119,16 @@ export interface ChatAgentOptions {
   maxToolResultChars?: number;
   totalBudgetMs?: number;
   now?: () => number;
+  /**
+   * Bounded retry policy for transient provider failures (429 rate limits
+   * and connection-level unavailability). Requests that may have been
+   * processed (5xx, timeouts) are NEVER retried — no automatic duplicate
+   * token spend. `wait`/`random` are injectable for deterministic tests.
+   */
+  maxProviderAttempts?: number;
+  maxRetryWaitMs?: number;
+  wait?: (ms: number) => Promise<void>;
+  random?: () => number;
 }
 
 export interface ChatAgent {
@@ -120,6 +158,10 @@ export function createChatAgent(options: ChatAgentOptions): ChatAgent {
     maxToolResultChars = MAX_TOOL_RESULT_CHARS,
     totalBudgetMs = MAX_TOTAL_AGENT_MS,
     now = Date.now,
+    maxProviderAttempts = PROVIDER_MAX_ATTEMPTS,
+    maxRetryWaitMs = PROVIDER_RETRY_MAX_WAIT_MS,
+    wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    random = Math.random,
   } = options;
 
   async function run(request: ChatRequest, principal: ApiKeyPrincipal): Promise<ChatResult> {
@@ -137,7 +179,7 @@ export function createChatAgent(options: ChatAgentOptions): ChatAgent {
           logger,
           audit,
           principal,
-          authorize: (name) => authorizeToolCall(principal, name),
+          authorize: (name) => authorizeToolCall(principal, name, unionUpstreamIds(registry.upstreamIds())),
           rateLimiter,
         },
         qualifiedName,
@@ -155,17 +197,60 @@ export function createChatAgent(options: ChatAgentOptions): ChatAgent {
     const toolCalls: ToolCallReport[] = [];
     let rounds = 0;
 
-    for (let round = 0; round <= maxToolRounds; round++) {
-      const remaining = totalBudgetMs - (now() - startedAt);
-      if (remaining <= 0) {
-        throw new ProviderError("timeout", "chat request budget exceeded before the model replied");
+    /**
+     * One model completion with bounded, provider-aware retries. Retries run
+     * ONLY for failures where the request was certainly not processed (a 429
+     * rejected pre-generation, or a connection that never delivered) — so a
+     * retry can never double-bill tokens, and tool execution (which happens
+     * strictly after a successful completion) is never duplicated by it.
+     * The provider's own Retry-After window is respected when short enough;
+     * a longer window means "do not retry now" — the error surfaces with its
+     * retryAfterMs so the user gets an honest wait hint and can retry later.
+     */
+    async function completeWithRetry(
+      wire: ProviderMessage[],
+      completedToolCalls: ToolCallReport[],
+      completedRounds: number,
+    ): Promise<ProviderResponse> {
+      for (let attempt = 1; ; attempt++) {
+        const remaining = totalBudgetMs - (now() - startedAt);
+        if (remaining <= 0) {
+          throw wrapPartialError(
+            new ProviderError("timeout", "chat request budget exceeded before the model replied"),
+            completedToolCalls,
+            completedRounds,
+          );
+        }
+        try {
+          return await provider.complete({ messages: wire, tools: toolDefinitions, timeoutMs: remaining });
+        } catch (error) {
+          const providerError = error instanceof ProviderError ? error : null;
+          const retryable =
+            providerError !== null &&
+            (providerError.kind === "rate_limited" ||
+              // Connection-level only ("unreachable"): HTTP 5xx responses may
+              // have been processed after all — those are not retried.
+              (providerError.kind === "unavailable" && providerError.status === undefined));
+          if (!retryable || attempt >= maxProviderAttempts) {
+            throw wrapPartialError(error, completedToolCalls, completedRounds);
+          }
+          const waitMs = retryWaitMs(providerError!, attempt, remaining, maxRetryWaitMs, random);
+          if (waitMs === null) {
+            throw wrapPartialError(error, completedToolCalls, completedRounds);
+          }
+          logger.info("chat_provider_retry", {
+            kind: providerError!.kind,
+            attempt,
+            wait_ms: waitMs,
+            ...(providerError!.retryAfterMs !== undefined ? { retry_after_ms: providerError!.retryAfterMs } : {}),
+          });
+          await wait(waitMs);
+        }
       }
+    }
 
-      const response = await provider.complete({
-        messages,
-        tools: toolDefinitions,
-        timeoutMs: remaining,
-      });
+    for (let round = 0; round <= maxToolRounds; round++) {
+      const response = await completeWithRetry(messages, toolCalls, rounds);
 
       if (response.toolCalls.length === 0 || round === maxToolRounds) {
         // Final answer (or the round budget is spent: stop without executing
@@ -266,13 +351,50 @@ async function runToolCall(
   }
 }
 
+/** Attach partial turn state to a provider failure once tools have run. */
+function wrapPartialError(error: unknown, toolCalls: ToolCallReport[], rounds: number): unknown {
+  if (error instanceof ProviderError && toolCalls.length > 0) {
+    return new AgentTurnError(error, toolCalls, rounds);
+  }
+  return error;
+}
+
+/**
+ * How long to wait before the next attempt, or null to give up (respecting
+ * the provider's window and the request budget — never sleep past either).
+ * No Retry-After → exponential backoff with full jitter to avoid stampedes.
+ */
+function retryWaitMs(
+  error: ProviderError,
+  attempt: number,
+  remainingMs: number,
+  maxWaitMs: number,
+  random: () => number,
+): number | null {
+  const base =
+    error.retryAfterMs !== undefined
+      ? error.retryAfterMs
+      : PROVIDER_RETRY_BASE_MS * 2 ** (attempt - 1) + random() * PROVIDER_RETRY_JITTER_MS;
+  if (base > maxWaitMs) {
+    // The provider asked for longer than one request may wait: do not fire
+    // another request into a closed window (that is a retry storm) — surface
+    // the error carrying retryAfterMs so the caller can hint "try again in ~N s".
+    return null;
+  }
+  if (base > remainingMs - PROVIDER_RETRY_HEADROOM_MS) {
+    return null;
+  }
+  return Math.round(base);
+}
+
 async function offerableTools(principal: ApiKeyPrincipal, registry: UpstreamRegistry): Promise<ProviderToolDefinition[]> {
   // Tools offered to the model are the gateway's *current discovered* list,
   // filtered by the principal's own authorization — a reader never sees
   // write tools, though authorization is still re-checked at execution.
   const aggregated = await registry.listAggregatedTools();
+  const knownIds = unionUpstreamIds(registry.upstreamIds());
   return aggregated
-    .filter((tool) => authorizeToolCall(principal, tool.qualifiedName).allowed)
+    .filter((tool) => authorizeToolCall(principal, tool.qualifiedName, knownIds).allowed)
     .map((tool) => ({
       name: tool.qualifiedName,
       description: tool.description,

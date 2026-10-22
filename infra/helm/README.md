@@ -280,9 +280,27 @@ The Groq key itself is never an input to that script: the gateway holds it.
 
 ## Access
 
-Local development access is **port-forwarding** (the Kind cluster was created
-without extra port mappings and must not be recreated, and a Kind node's IP is
-not reachable from macOS):
+The chart's Ingress (`ingress.enabled: true` in `values-local.yaml`) gives the
+local demo two stable hostnames: `dashboard.urumi.test` (routes `/` to the
+dashboard and `/mcp` + `/api` straight to the gateway) and `shop.urumi.test`
+(routes `/` to WordPress). The kind cluster runs the community
+`ingress-nginx` controller (Helm chart 4.15.1 / app 1.15.1, namespace
+`ingress-nginx` — `kubectl -n ingress-nginx get pods` must show it Running).
+Since the kind node publishes no host ports (and binding port 80 would need
+root), reach the controller through one port-forward and add the demo hosts
+to `/etc/hosts` (scripts skip DNS with `curl --resolve`, browsers need the
+hosts entries):
+
+```bash
+echo "127.0.0.1 dashboard.urumi.test shop.urumi.test" | sudo tee -a /etc/hosts
+kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 18080:80 &
+# dashboard: http://dashboard.urumi.test:18080   store: http://shop.urumi.test:18080
+```
+
+Port-forwarding straight to the workloads remains the fallback (and the path
+for curl/health checks) — the Kind cluster was created without extra port
+mappings and must not be recreated, and a Kind node's IP is not reachable
+from macOS:
 
 ```bash
 kubectl -n urumi port-forward svc/dashboard 8088:8080   # http://127.0.0.1:8088
@@ -291,9 +309,20 @@ kubectl -n urumi port-forward svc/gateway 8080:8080     # http://127.0.0.1:8080/
 
 The local values also create fixed NodePorts (dashboard 30080, gateway 30081);
 they are reachable from inside the cluster network / a VM that routes to it,
-which is why the demo path is the port-forward. The three MCP servers, the
-mock store and PostgreSQL have **no** external service type at all — they are
-ClusterIP-only by template, not by value.
+which is why the demo path is the ingress port-forward. The three MCP servers,
+the mock store and PostgreSQL have **no** external service type at all — they
+are ClusterIP-only by template, not by value.
+
+WordPress is configured with a canonical site URL
+(`wordpress.siteUrl: http://shop.urumi.test:18080`): `init.sh` rewrites
+`home`/`siteurl` and product GUIDs on every boot (idempotent, PVC preserved),
+and the `urumi-canonical` mu-plugin forces every canonical redirect onto that
+URL — so a visit on any other host/port 301s to the storefront instead of
+leaking a stale address. WooCommerce REST authentication intentionally stays
+in-cluster (`http://wordpress/wp-json/wc/v3/...`): the chart's wp-config only
+marks HTTPS for the internal `wordpress*` hosts, so Basic auth (which
+WordPress gates behind `is_ssl()`) works for the woocommerce-mcp upstream and
+fails closed over plain external http.
 
 ## Verification (commands and actual results, 2026-10-21)
 
@@ -377,8 +406,10 @@ tests); free-tier rate limits apply — `scripts/llm-smoke.sh` stays opt-in and
 is never part of `check.sh`.
 
 **Not performed** (honest gaps): TLS and real DNS (no certificate and no
-public host exists); Ingress routing (Kind has no ingress controller — the
-prod Ingress is rendered and dry-run-validated only); NetworkPolicy
+public host exists); Ingress routing was still a gap at this point — the
+chart's Ingress was rendered and dry-run-validated only (since closed in
+Milestone 11 Phase 3: `ingress-nginx` installed on kind, storefront route
+added, both hosts verified — see "Access" above); NetworkPolicy
 enforcement (Kind's kindnet does not enforce policies — the local values keep
 it off); multi-replica gateway behaviour (local values use 1
 replica; prod values specify 2 with `sessionAffinity: ClientIP` on the
@@ -404,6 +435,27 @@ Performed on the same cluster with `values-local.yaml` (`woocommerceMcp.storeMod
 | External SDK client | `GATEWAY_URL=… GATEWAY_API_KEY=… node --test apps/gateway/test/external-client.test.ts` | 2/2 pass; explicit printed skip when the env vars are unset |
 
 Full commands and per-requirement evidence: [docs/requirement-matrix.md](../../docs/requirement-matrix.md).
+
+### Milestone 11 Phase 3 — local Ingress verification (2026-10-22)
+
+Same cluster (no recreation, no data loss): `ingress-nginx` chart 4.15.1
+installed into namespace `ingress-nginx`, then the app chart upgraded with
+`ingress.enabled: true`, `ingress.host: dashboard.urumi.test`,
+`ingress.storefrontHost: shop.urumi.test`, `gateway.publicUrl:
+http://dashboard.urumi.test:18080`, `wordpress.siteUrl:
+http://shop.urumi.test:18080`:
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Controller | `kubectl -n ingress-nginx get pods` | `ingress-nginx-controller` **Running 1/1** (LB EXTERNAL-IP `<pending>` — normal on kind) |
+| Ingress object | `kubectl -n urumi get ingress mcp-gateway` | HOSTS `dashboard.urumi.test,shop.urumi.test`; `/` + `/mcp` + `/api` on the dashboard host, `/` → `wordpress:80` on the storefront host |
+| Dashboard host | `curl --resolve dashboard.urumi.test:18080:127.0.0.1 …/` | 200 HTML (SPA), `/api/me` anon → 401, `/mcp` anon → 401, `/api/settings` (reader key) → `mcp_endpoint: http://dashboard.urumi.test:18080/mcp` |
+| Storefront host | `curl --resolve shop.urumi.test:18080:127.0.0.1 …/` | 200 (no redirect); every asset/link on `shop.urumi.test:18080`, zero `8082`/`127.0.0.1` leftovers; `/wp-login.php` 200 |
+| Canonical URLs | in-cluster `GET /wp-json/wc/v3/products` + DB `wp_posts.guid` | REST `permalink` and product GUIDs all `shop.urumi.test:18080/...` (`fix-guids.php` init step, idempotent) |
+| Redirect hygiene | bare `port-forward svc/wordpress 8082:80` → `GET /` | 301 → `http://shop.urumi.test:18080/` (`urumi-canonical` mu-plugin: canonical redirects always land on `siteUrl`); `/wp-login.php` still 200 on the bare port-forward for emergency admin |
+| External WC REST auth | Basic auth via the public host | 401 — intentional (WordPress only accepts REST Basic auth on HTTPS/internal hosts); the supported path is in-cluster, used by `woocommerce-mcp` |
+| Browser (Playwright) | both hosts via `--host-resolver-rules` | dashboard 200 + sign-in renders; storefront 200 (title `URUMI demo store`), no broken images/stale links; WP login form 200 |
+| Full checks | `TEST_DATABASE_URL=… bash scripts/check.sh` | exit 0 (gateway 304, dashboard 97, postgres integration 14, all servers, security assertions 7/7, `npm audit` 0) |
 
 ## Persistence and recovery
 

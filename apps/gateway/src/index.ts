@@ -2,8 +2,10 @@ import { createApp } from "./app.ts";
 import { loadConfig, safeConfigSummary } from "./config.ts";
 import { ConfigurationError } from "./errors.ts";
 import { createDatabaseDeps } from "./db/index.ts";
+import { loadDynamicUpstreamConfigs } from "./dynamic-upstream-loader.ts";
 import { createLogger } from "./logger.ts";
 import { applyUpstreamOverrides, createUpstreamRegistry } from "./upstream-registry.ts";
+import { createCredentialVault } from "./upstream-credentials.ts";
 import { VERSION } from "./version.ts";
 
 async function main(): Promise<void> {
@@ -23,7 +25,8 @@ async function main(): Promise<void> {
   logger.info("config_loaded", { ...safeConfigSummary(config) });
 
   // Fail fast with a safe message: no credentials, no SQL, no stack traces.
-  const { pool, authRepo, auditRepo, sessionRepo, upstreamStateRepo } = createDatabaseDeps(config);
+  const { pool, authRepo, auditRepo, sessionRepo, upstreamStateRepo, dynamicUpstreamRepo } =
+    createDatabaseDeps(config);
   try {
     await pool.query("SELECT 1");
     const { rows } = await pool.query(`SELECT to_regclass('public.users') AS t`);
@@ -43,8 +46,29 @@ async function main(): Promise<void> {
   }
   logger.info("database_ready", { host: safeHost(config.databaseUrl) });
 
+  // Milestone 11 (D34): decrypt admin-registered upstream credentials before
+  // building the registry. Fail closed: no vault while ciphertext exists, or
+  // an undecryptable row, means the gateway refuses to boot (never a silent
+  // credential-less start, never plaintext fallback).
+  const credentialVault = createCredentialVault(config.dynamicUpstreamCredentialKey);
+  const dynamicUpstreams = await loadDynamicUpstreamConfigs({
+    repo: dynamicUpstreamRepo,
+    vault: credentialVault,
+    timeoutMs: config.upstreamTimeoutMs,
+    connectTimeoutMs: config.upstreamConnectTimeoutMs,
+    logger,
+  });
+  if (!dynamicUpstreams.ok) {
+    process.stderr.write(`Gateway failed to start: ${dynamicUpstreams.error}\n`);
+    await pool.end().catch(() => undefined);
+    process.exitCode = 1;
+    return;
+  }
+  logger.info("dynamic_upstreams_loaded", { count: dynamicUpstreams.loaded.configs.length });
+
   const registry = createUpstreamRegistry({
-    configs: config.upstreams,
+    configs: [...config.upstreams, ...dynamicUpstreams.loaded.configs],
+    credentials: dynamicUpstreams.loaded.credentials,
     toolCacheTtlMs: config.toolCacheTtlMs,
     logger,
     ssrf: { allowedPrivateHosts: config.upstreamAllowedPrivateHosts },
@@ -71,7 +95,17 @@ async function main(): Promise<void> {
     logger.warn("startup_refresh_failed", { error: String(error) });
   });
 
-  const { app, close } = createApp({ config, logger, registry, authRepo, auditRepo, sessionRepo, upstreamStateRepo });
+  const { app, close } = createApp({
+    config,
+    logger,
+    registry,
+    authRepo,
+    auditRepo,
+    sessionRepo,
+    upstreamStateRepo,
+    dynamicUpstreamRepo,
+    credentialVault,
+  });
   const server = app.listen(config.port, config.host, () => {
     logger.info("listening", { host: config.host, port: config.port, mcp_path: "/mcp" });
   });

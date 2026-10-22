@@ -28,13 +28,67 @@ export class ProviderError extends Error {
   readonly kind: ProviderErrorKind;
   /** Provider HTTP status if any — for server-side logs only. */
   readonly status: number | undefined;
+  /**
+   * Provider-requested wait before retrying (from `Retry-After` or reset
+   * metadata), in milliseconds. Absent when the provider said nothing.
+   * For server-side retry policy and user-facing "try again in ~N s"
+   * hints — never a credential or provider body.
+   */
+  readonly retryAfterMs: number | undefined;
 
-  constructor(kind: ProviderErrorKind, message: string, status?: number) {
+  constructor(kind: ProviderErrorKind, message: string, status?: number, retryAfterMs?: number) {
     super(message);
     this.name = "ProviderError";
     this.kind = kind;
     this.status = status;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/** Largest provider-requested wait we will even consider honouring. */
+export const MAX_PROVIDER_WAIT_MS = 3_000;
+
+/**
+ * Parse a provider's "how long until I will accept requests again" metadata
+ * into milliseconds. Sources, in order:
+ *   1. `Retry-After` — delta-seconds or an HTTP-date (RFC 7231)
+ *   2. `x-ratelimit-reset-seconds` — plain seconds (fractional allowed)
+ *   3. `x-ratelimit-reset` — unix-epoch seconds (> 1e9) or delta seconds
+ * Anything unparseable is ignored: callers fall back to their own backoff.
+ */
+export function parseRetryAfterMs(headers: Pick<Headers, "get">, nowMs: number = Date.now()): number | undefined {
+  const rawRetryAfter = headers.get("retry-after");
+  if (rawRetryAfter !== null) {
+    const trimmed = rawRetryAfter.trim();
+    if (/^\d+$/.test(trimmed)) {
+      return clampWaitMs(Number(trimmed) * 1_000);
+    }
+    const dateMs = Date.parse(trimmed);
+    if (!Number.isNaN(dateMs)) {
+      return clampWaitMs(dateMs - nowMs);
+    }
+  }
+  const rawResetSeconds = headers.get("x-ratelimit-reset-seconds");
+  if (rawResetSeconds !== null && Number.isFinite(Number(rawResetSeconds))) {
+    return clampWaitMs(Number(rawResetSeconds) * 1_000);
+  }
+  const rawReset = headers.get("x-ratelimit-reset");
+  if (rawReset !== null && Number.isFinite(Number(rawReset))) {
+    const value = Number(rawReset);
+    const deltaMs = value > 1e9 ? value * 1_000 - nowMs : value * 1_000;
+    return clampWaitMs(deltaMs);
+  }
+  return undefined;
+}
+
+function clampWaitMs(ms: number): number | undefined {
+  // No upper clamp here on purpose: the caller must see the provider's real
+  // window (e.g. "come back in 60 s") to decide NOT to retry before it —
+  // only a sanity ceiling against nonsense values.
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return undefined;
+  }
+  return Math.min(Math.round(ms), 3_600_000);
 }
 
 export interface ProviderToolCall {
@@ -132,7 +186,12 @@ export class OpenAiCompatProvider implements ChatProvider {
     }
 
     if (response.status === 429) {
-      throw new ProviderError("rate_limited", "LLM provider rate limit hit", 429);
+      throw new ProviderError(
+        "rate_limited",
+        "LLM provider rate limit hit",
+        429,
+        parseRetryAfterMs(response.headers),
+      );
     }
     if (response.status === 401 || response.status === 403) {
       throw new ProviderError("rejected", "LLM provider rejected the configured credentials", response.status);
