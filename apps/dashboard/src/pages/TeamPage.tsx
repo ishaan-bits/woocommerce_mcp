@@ -37,17 +37,22 @@ export function TeamPage({ api, me }: { api: ApiClient; me: MeResponse }) {
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const [actionOk, setActionOk] = useState<string | null>(null);
   const [issueError, setIssueError] = useState<string | null>(null);
-  const seq = useRef(0);
+  // One sequencer per loader. REGRESSION: the members and keys loaders run in
+  // the SAME mount effect; a shared counter made the first loader's id stale
+  // (1 !== 2) as soon as the second one started, so its result was silently
+  // discarded and the Members tab stayed on the skeleton forever.
+  const teamSeq = useRef(0);
+  const keysSeq = useRef(0);
 
   const refreshTeam = useCallback(async () => {
-    const id = ++seq.current;
+    const id = ++teamSeq.current;
     setTeam(loading());
     try {
       const [usersRes, toolsRes] = await Promise.all([api.users(), api.tools()]);
-      if (id !== seq.current) return;
+      if (id !== teamSeq.current) return;
       setTeam(loaded({ users: usersRes.users, tools: toolsRes.tools }));
     } catch (error) {
-      if (id !== seq.current) return;
+      if (id !== teamSeq.current) return;
       const failure = toFailure(error);
       setTeam(
         failed(
@@ -59,14 +64,14 @@ export function TeamPage({ api, me }: { api: ApiClient; me: MeResponse }) {
   }, [api]);
 
   const refreshKeys = useCallback(async () => {
-    const id = ++seq.current;
+    const id = ++keysSeq.current;
     setKeys(loading());
     try {
       const response = await api.keys();
-      if (id !== seq.current) return;
+      if (id !== keysSeq.current) return;
       setKeys(loaded(response.keys, response.keys.length === 0));
     } catch (error) {
-      if (id !== seq.current) return;
+      if (id !== keysSeq.current) return;
       const failure = toFailure(error);
       setKeys(failed(failure.code, failure.message));
     }
@@ -76,7 +81,8 @@ export function TeamPage({ api, me }: { api: ApiClient; me: MeResponse }) {
     void refreshTeam();
     void refreshKeys();
     return () => {
-      seq.current += 1;
+      teamSeq.current += 1;
+      keysSeq.current += 1;
     };
   }, [refreshTeam, refreshKeys]);
 
@@ -254,11 +260,11 @@ export function TeamPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                             <Badge tone={user.role === "admin" ? "admin" : "member"}>{roleLabel(user.role)}</Badge>
                           </td>
                           <td className="small">
-                            {user.allowed_upstreams.length > 0
-                              ? user.allowed_upstreams.map(upstreamLabel).join(", ")
+                            {user.allowedUpstreams.length > 0
+                              ? user.allowedUpstreams.map(upstreamLabel).join(", ")
                               : "none"}
                           </td>
-                          <td className="small">{user.allowed_tools.length}</td>
+                          <td className="small">{user.allowedTools.length}</td>
                           <td className="small">
                             {user.activeKeys} / {user.totalKeys}
                           </td>

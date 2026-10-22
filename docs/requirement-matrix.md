@@ -78,6 +78,28 @@ at the bottom.
 | README status/roadmap honesty (mock vs real, external clients, test totals) | `README.md` |
 | Store README no longer claims "real store impossible" | `services/woocommerce-mcp/README.md` |
 
+## 9. Continuation verification (same day, after the Milestone 10 commit)
+
+Re-run against the live release (Helm `urumi`, namespace `urumi`); every row was
+executed, not assumed. The original assignment PDF is not present anywhere in
+this workspace — requirements are therefore traced from `README.md`, this
+matrix and `docs/decisions.md` rather than from the PDF.
+
+| Item | Evidence |
+| --- | --- |
+| Protocol negative paths through the gateway session | `tools/list` → 9 qualified tools; unknown tool → JSON-RPC `-32602 Unknown tool`; malformed `after` filter → `-32602 Input validation error` (ajv schema); tool outside the key's grants → `-32003 not granted to this principal` |
+| Security demos against the deployed stack | `NAMESPACE=urumi bash scripts/security-demo.sh` → **7/7 PASS** (ClusterIP-only internal services, SSRF boot refusal for a metadata-service upstream, revoked key → 401, reader 403 + `denied` audit row, 39/60 burst calls rate-limited `-32000`/429, failed-logins → 429, no key/password material in 5000 gateway log lines) |
+| Upstream enable/disable round-trip (D24) | `POST /api/upstreams/inventory:disable` → `tools/list` drops to 7 (WooCommerce's 5 intact) → `:enable` → back to 9; audit rows `upstream_disabled` / `upstream_enabled` recorded; idempotent `changed:false` contract per `routes.ts` |
+| **Bug fix:** Team → Members tab stuck on the loading skeleton forever | Root cause: `refreshTeam` and `refreshKeys` shared one `useRef` seq inside a single mount effect, so the first loader's result was always discarded (`1 !== 2`). Fixed in `apps/dashboard/src/pages/TeamPage.tsx` (one sequencer per loader); pinned by `test/team-loaders.test.ts` (4 REGRESSION checks); live proof after redeploy: both member rows render, `Create member` present, zero skeletons |
+| **Bug fix:** members table crash once the loader actually worked | `GET /api/users` answers camelCase (`allowedUpstreams`, `allowedTools`) while the client's `UserRecord` declared snake_case, so the first real render threw `Cannot read properties of undefined (reading 'length')`. Fixed: interface now mirrors the response (`client.ts`), consumers updated (`TeamPage.tsx`, `MemberForm.tsx`), pinned by `test/user-record.test.ts`; live proof: table renders upstreams/grants per member and the Edit form prefills `reader-demo` with no page errors |
+| Pods restart without losing data (assignment restart clause) | `kubectl -n urumi rollout restart deploy/postgres deploy/wordpress` → after rollout: `GET /api/users` → 2, newest audit id still 264, `woocommerce_list_products` → the same 4 SKUs, orders `#15, #14`, in-cluster `curl localhost/wp-login.php` → 200; all three PVCs still `Bound`, no PVC touched |
+| Production render cannot inherit local placeholders | `helm template … -f values-prod.yaml`: **0** Secret manifests (operator pre-creates `urumi-gateway-secrets` via `secretKeyRef`), **0** `local-dev-only` literals, **0** inline `value:` credentials; local render intentionally contains the placeholders (8, schema-checked) |
+| Probes + resource limits on every workload | All 9 deployments (gateway, dashboard, 3 MCP servers, postgres, wordpress, wordpress-db, store mock) have `livenessProbe` and `readinessProbe` with CPU/memory limits; images run as named non-root users (`node`/`nginx`, pinned to numeric UIDs by the chart) |
+| VPS deployment documented, nothing provisioned | New section "Deploying to a future VPS (outline — prepared, not executed here)" in `infra/helm/README.md`: registry push → pre-created Secret → `helm upgrade --install` with `values-prod.yaml` → bootstrap → verify; explicitly labelled untested here |
+| Cleanup keeps data by default | `infra/helm/README.md` "Cleanup (preserves data by default)": scale-to-zero and `helm uninstall` keep the PVC (`helm.sh/resource-policy=keep`); destructive steps are commented as such |
+| Full quality gates re-run | `TEST_DATABASE_URL=… bash scripts/check.sh` → rc 0 "All required checks passed" (incl. 7/7 helm security assertions); **502/502 tests pass** (94+261+39+38+70), 5/5 image builds, `helm lint` 2/2, `npm audit` 0 vulnerabilities, `git diff HEAD` secret scan 0 matches, external-client live suite **2/2** against the deployed gateway |
+| External tool-call still returns real store shape | post-restart `woocommerce_list_products` → 4 products with SKUs `URUMI-TEA-001`, `URUMI-CHAI-001`, `URUMI-COF-001`, `URUMI-MUG-001` (never re-seeded this session) |
+
 ## Explicitly not claimed
 
 - **No paid services, no new live LLM spend:** the one allowed Groq end-to-end call

@@ -850,3 +850,48 @@ static fixture) in exchange for a genuinely verifiable store; probes and rewrite
 cluster-specific fixes (numeric port, hand-written `.htaccess`) that are documented where they
 live. The default `npm test` still uses the mock — the real-store evidence is the live checks
 recorded in `docs/requirement-matrix.md` §3.
+
+## D32 — Dashboard data contracts: one in-flight counter per loader, and interfaces that mirror each endpoint's actual wire shape
+
+**Context.** Live UI inspection (Playwright against the deployed dashboard) surfaced two
+latent defects on the Team page that no unit test could see, because the dashboard suite is
+plain `node --test` with no DOM renderer. First, the Members tab sat on the loading
+skeleton forever: `refreshTeam` and `refreshKeys` ran back-to-back in one mount effect but
+shared a single `useRef` sequence counter, so by the time the members fetch resolved its
+captured id was stale (`1 !== 2`) and the result was silently discarded. Second, once that
+was fixed the page crashed instead (`undefined.length`): `GET /api/users` responds
+camelCase (`allowedUpstreams`, `allowedTools`, `displayName`) while `/api/me` stays
+snake_case, but the client's `UserRecord` interface had declared snake_case for both — the
+interface lied about the wire, `tsc` could not catch it, and the members table had simply
+never executed before (the skeleton bug hid it).
+
+**Decision.**
+- **One sequence counter per loader** (`teamSeq`, `keysSeq` in `TeamPage.tsx`), each guard
+  checking only its own counter; unmount invalidates both. Concurrent loaders may never
+  share a counter — a shared one is a silent "discard every result" bug.
+- **Each client type mirrors exactly one endpoint's response shape**: `UserRecord` is
+  camelCase (matching `/api/users`, `POST/PATCH /users`), `MeResponse` stays snake_case
+  (matching `/api/me` and `/auth/login`); request bodies stay snake_case
+  (`CreateUserInput`/`UpdateUserInput`), which is what the gateway parses.
+- Both rules are pinned by source-invariant REGRESSION tests
+  (`apps/dashboard/test/team-loaders.test.ts`, `test/user-record.test.ts`) in the same
+  spirit as the helm security assertions — they fail loudly if the wiring or field names
+  drift back.
+- Verification stays two-layered: the regression tests run in `npm test`, and the rendered
+  proof (member rows visible, Edit prefills, no page errors) was captured live against the
+  deployed bundle with Playwright after redeploy.
+
+**Alternatives.**
+- *Normalize everything to snake_case in the client* — hides the mismatch behind a
+  conversion layer and still requires fixing every mock; rejected as the wrong direction:
+  the wire format is the source of truth.
+- *Add a DOM test framework (jsdom/Testing Library)* — would catch render crashes directly,
+  but adds a dependency and a second test runner for one page; the two-layer approach
+  (source invariants + scripted live check) covers this bug class without it.
+- *Only fix the sequencer* — would have shipped a members table that crashes on first
+  render; both defects had to be fixed together because the first exposed the second.
+
+**Trade-offs.** Source-invariant tests are string-based and must be updated when code is
+legitimately renamed (accepted: they fail with explicit messages), and the live UI proof is
+a scripted check rather than an automated `npm test` gate (accepted: it needs the deployed
+bundle and a session, recorded as live evidence in `docs/requirement-matrix.md` §9).

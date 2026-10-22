@@ -48,9 +48,9 @@ live-verified through `/mcp`, an external MCP client compatibility test, and the
 | Repository layout + npm workspaces | ✅ `npm install` resolves all 6 workspaces |
 | `packages/shared` contract types | ✅ builds, type-checks, imports (5 WooCommerce tool names) |
 | `services/woocommerce-mcp` | ✅ 5 tools over Streamable HTTP (`/mcp`), health probes, 70 tests; unit tests run against the in-process mock, and since M10 the same server is live-verified against a real in-cluster store (see below) |
-| Documentation (`docs/`) | ✅ architecture, decisions (D1–D31), threat model, learning guide, [requirement matrix](./docs/requirement-matrix.md) |
+| Documentation (`docs/`) | ✅ architecture, decisions (D1–D32), threat model, learning guide, [requirement matrix](./docs/requirement-matrix.md) |
 | Gateway (`apps/gateway`) | ✅ aggregates upstream tools, qualified-name routing, timeouts, health probes, API-key auth + RBAC + audit + dashboard REST (login/session, settings, tools, upstream toggles), **261 tests** including the real-PostgreSQL integration suite (which skips with a printed reason without `TEST_DATABASE_URL`), plus an env-gated live external-client test |
-| Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, **Team** (members + API keys) and **Settings** areas, working chat (server-side agent, gateway-audited tool calls), tool-permission indicator mirroring `authorization.ts` exactly; **87 tests** + typecheck + production build |
+| Dashboard (`apps/dashboard`) | ✅ React 19 + Vite 8 SPA: login, overview, tools, admin upstream toggles, read-only audit viewer, **Team** (members + API keys) and **Settings** areas, working chat (server-side agent, gateway-audited tool calls), tool-permission indicator mirroring `authorization.ts` exactly; **94 tests** + typecheck + production build |
 | Inventory MCP server | ✅ `list_products` + `adjust_stock` over Streamable HTTP, deterministic 12-item seeded store, 39 tests, registered via `INVENTORY_MCP_URL` (no gateway code changes) |
 | Support MCP server | ✅ `list_tickets` + `create_ticket` over Streamable HTTP, deterministic 8-ticket seeded store, 38 tests, registered via `SUPPORT_MCP_URL` (no gateway code changes) |
 | Docker images | ✅ five multi-stage images (`urumi/<name>:0.1.0`: gateway, three MCP servers, dashboard), non-root, runtime-config only, built and container-tested — see [infra/docker/README.md](./infra/docker/README.md) |
@@ -71,9 +71,9 @@ Support and WooCommerce MCP server processes** over Streamable HTTP
 (`test/real-upstreams.test.ts`); authentication, sessions, upstream toggles and audit logging
 are verified against a **real PostgreSQL 17** in a disposable container via `TEST_DATABASE_URL`
 (`test/integration/postgres.test.ts`); without that variable the integration suite skips with
-a printed reason, while the tests that need no database still run — **495 tests in total with
-the database** (87 dashboard + 261 gateway + 39 inventory + 38 support + 70 woocommerce),
-482 without it.
+a printed reason, while the tests that need no database still run — **502 tests in total with
+the database** (94 dashboard + 261 gateway + 39 inventory + 38 support + 70 woocommerce),
+489 without it.
 
 ---
 

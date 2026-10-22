@@ -20,8 +20,8 @@ export function memberFormValue(user: UserRecord): MemberFormValue {
   return {
     displayName: user.displayName,
     role: user.role,
-    allowedUpstreams: [...user.allowed_upstreams],
-    allowedTools: [...user.allowed_tools],
+    allowedUpstreams: [...user.allowedUpstreams],
+    allowedTools: [...user.allowedTools],
   };
 }
 

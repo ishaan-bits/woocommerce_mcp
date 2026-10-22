@@ -108,8 +108,12 @@ export interface UserRecord {
   id: string;
   displayName: string;
   role: "admin" | "reader";
-  allowed_upstreams: string[];
-  allowed_tools: string[];
+  // Mirrors the gateway's /api/users RESPONSE shape (camelCase) — request
+  // bodies stay snake_case (see CreateUserInput/UpdateUserInput below). The
+  // live API returns allowedUpstreams/allowedTools; reading snake_case here
+  // produced undefined at runtime and crashed the members table.
+  allowedUpstreams: string[];
+  allowedTools: string[];
   createdAt: string;
   activeKeys: number;
   totalKeys: number;

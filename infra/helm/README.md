@@ -447,6 +447,42 @@ Full commands and per-requirement evidence: [docs/requirement-matrix.md](../../d
    the ClusterIP-only Services + gateway authentication; if your CNI can
    enforce pod-to-node rules, tightening this is a good follow-up.
 
+## Deploying to a future VPS (outline — prepared, not executed here)
+
+This repo provisions nothing and spends nothing; the walkthrough below assumes
+you already have a Linux VPS with a Kubernetes cluster (k3s, kubeadm, or a
+managed cluster) and `kubectl`/`helm` pointed at it. It has **not** been run
+from start to finish in this environment — treat it as a checklist to execute
+when a VPS exists:
+
+```bash
+# 1. Push the five images (tag 0.1.0) to a registry the cluster can pull from,
+#    then point values-prod.yaml repositories at them.
+
+# 2. Pre-create the Secret the chart will reference (secrets.create=false):
+kubectl create namespace urumi
+kubectl -n urumi create secret generic urumi-gateway-secrets \
+  --from-literal=DATABASE_URL='postgres://…' \
+  --from-literal=API_KEY_PEPPER='…' \
+  --from-literal=SESSION_SECRET='…' \
+  --from-literal=WOOCOMMERCE_URL='https://…' \
+  --from-literal=WOOCOMMERCE_CONSUMER_KEY='…' \
+  --from-literal=WOOCOMMERCE_CONSUMER_SECRET='…' \
+  --from-literal=GROQ_API_KEY='…'   # optional — chat stays disabled without it
+
+# 3. Review ingress.host, persistence sizes and networkPolicy (checklist above),
+#    then install:
+helm upgrade --install urumi infra/helm/mcp-gateway \
+  -n urumi -f infra/helm/mcp-gateway/values-prod.yaml
+
+# 4. Wait for readiness, then bootstrap the first admin key through the
+#    gateway's documented key-bootstrap flow (same procedure as local).
+
+# 5. Verify before trusting it: pods Ready, /readyz all reachable, one
+#    tools/list round-trip with the bootstrap key, and a login on the
+#    dashboard — exactly the commands in the local verification section.
+```
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
