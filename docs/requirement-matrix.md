@@ -280,6 +280,23 @@ woocommerce), `helm lint` 2/2, helm security assertions 7/7, tree + diff
 secret scans 0 real matches (documented fixtures only), `npm audit` 0, browser
 smoke 4/4 (dashboard + storefront via ingress hosts).
 
+## 12. Milestone 14 — recruiter delivery preparation (docs/readiness only)
+
+No application behavior changed; no statuses above were upgraded — D3/D4 remain
+`⛔ blocked` (LLM quota) and K2/R2 remain `🟡 partial` (VPS documented, not
+deployed). What this pass added, with evidence:
+
+| Deliverable | Evidence |
+| --- | --- |
+| Recruiter-first README entry point (what/architecture/security/prereqs/quick start/demo/tests/limitations, with links to architecture §12, this matrix, threat model, runbook) | `README.md` "For recruiters (start here)"; explicitly states **no public deployment exists** |
+| Demo runbook review — two demo identities + secure credential handling (`.tmp/demo-keys.json`, 0600, git-ignored; keys loaded as shell vars without printing; regeneration path documented) | `docs/demo-runbook.md` identity block + §0; `git check-ignore .tmp/demo-keys.json` → `.gitignore:23` |
+| Reproducible sequence kept (store data → two-upstream routing → reader permissions → revocation → upstream disable/failure isolation → audit → restart persistence) with browser/Groq steps marked MANUAL/BLOCKED | `docs/demo-runbook.md` T1–T11 + legend (dual-status note for T1–T4; §11 chat reliability) |
+| Cleanup that never touches PVCs/persistent data | `docs/demo-runbook.md` §12 |
+| Recording plan (5–7 min outline, screens/actions/narration, do-not-show checklist, truthful limitations) — **no video recorded** | `docs/recording-script.md` |
+| Groq 429 limitation + verified retry behavior documented without re-testing quota | `docs/demo-runbook.md` §11 + `docs/recording-script.md` limitations + D35 |
+| Link integrity + command drift check | local link scan **52 ok / 0 broken** (fixed one pre-existing `infra/helm/README.md` relative link); `npm run check` → `scripts/check.sh` confirmed |
+| Full gates re-run | `TEST_DATABASE_URL=… bash scripts/check.sh` → **rc 0, 574/574**; helm security assertions **ASSERT OK 7/7**; `npm audit` 0; secret scans 0 (demo keys absent from git status/diff, file 0600) |
+
 ## Explicitly not claimed
 
 - **The chat agent's live LLM turn (DoD D3/D4) is NOT claimed as re-verified in

@@ -10,21 +10,45 @@ ever claimed as verified:
 | --- | --- |
 | ✅ **LIVE** | Executed on the cluster on **2026-10-22** (Phase 4 pass); result recorded in the step |
 | 🧪 **TEST** | Pinned by the named deterministic test (mocks/doubles only — no network, no LLM quota) |
-| 👤 **MANUAL** | Must be performed by a human at demo time; **not** performed here |
+| 👤 **MANUAL** | Needs human/browser interaction at demo time — treat as manual even where a script once verified it |
 | ⛔ **BLOCKED** | Cannot be performed in this environment right now; reason stated (never marked verified) |
 
-Two users (seeded by `apps/gateway/migrations/`):
+Browser steps (T1–T4) are **dual-status**: their scripted check passed live, but
+for a demo you perform them **by hand in a browser** — count them as MANUAL
+steps when rehearsing. Groq-dependent steps (T3–T4 chat half) are ⛔ BLOCKED by
+the provider's free-tier quota (see "Chat reliability" at the end). Everything
+in this runbook is the **local** kind demo — the public VPS/k3s deployment is
+documented (`infra/helm/README.md` "Deploying to a future VPS") but **not
+executed or verified**; no public deployment exists.
 
-| Role in the PDF | Principal | Key |
+Two users (seeded by `apps/gateway/migrations/`) — **the two demo identities**:
+
+| Role in the PDF | Principal | Credential |
 | --- | --- | --- |
-| **User A — admin** (`admin-demo`) | `11111111-1111-4111-8111-111111111111` | bootstrapped `umk_…` (see `infra/helm/README.md` "Secrets and API-key bootstrap") |
-| **User B — team member** (`reader-demo`) | `22222222-2222-4222-8222-222222222222` | bootstrapped `umk_…`, **read tools only** (writes denied by the reader ceiling) |
+| **User A — admin** (`admin-demo`) | `11111111-1111-4111-8111-111111111111` | `umk_…` bootstrapped per `infra/helm/README.md` "Secrets and API-key bootstrap" |
+| **User B — team member** (`reader-demo`) | `22222222-2222-4222-8222-222222222222` | `umk_…` issued by user A via the dashboard/API — **read tools only** (writes denied by the reader ceiling) |
 
-> **Secrets discipline for the whole runbook:** keys live in
-> `/var/folders/…/m7/keys.json` (gitignored) or shell variables read from
-> `urumi-secrets`. Never print, paste or commit a key, cookie, or WordPress/
-> WooCommerce credential. Commands below use `$USER_A_KEY` / `$USER_B_KEY` /
-> `$WC_KEY` / `$WC_SECRET` placeholders.
+> **Secrets discipline for the whole runbook.** Both demo keys live **only** in
+> the Git-ignored local file `.tmp/demo-keys.json` (permissions `0600`; verified
+> ignored via `.gitignore`'s `.tmp/` rule). Load them into your shell **without
+> printing them** and keep using the `$USER_A_KEY` / `$USER_B_KEY` placeholders
+> below. Store credentials (`$WC_KEY`/`$WC_SECRET`, WordPress admin password)
+> are read from the `urumi-secrets` Secret the same way. Never print, paste or
+> commit a key, cookie, or password — not in the terminal, README, screenshots,
+> or commits.
+
+```bash
+# load both demo keys as shell variables (prints nothing)
+USER_A_KEY=$(python3 -c "import json;print(json.load(open('.tmp/demo-keys.json'))['admin']['key'])")
+USER_B_KEY=$(python3 -c "import json;print(json.load(open('.tmp/demo-keys.json'))['reader']['key'])")
+```
+
+**Where the credentials come from (fresh machine):** if `.tmp/demo-keys.json`
+does not exist, regenerate the two keys with the documented flows — bootstrap
+one admin key (`infra/helm/README.md` "Secrets and API-key bootstrap"), then
+have the admin issue the reader key (`POST /api/keys` or Team → Create key in
+the dashboard). Each key's plaintext is shown **exactly once** — paste it
+straight into `.tmp/demo-keys.json` and `chmod 600` the file.
 
 ---
 
@@ -76,7 +100,8 @@ SQL
 
 ## 1. Store — open the storefront, buy something (PDF DoD "Store")
 
-**T1. Add a product to the cart and check out with COD.** 👤/✅ — browser flow
+**T1. Add a product to the cart and check out with COD.** ✅ LIVE (scripted)
+· **👤 MANUAL at demo time** — browser flow
 (`shop.urumi.test:18080`), executed live via Playwright (Chromium,
 `--host-resolver-rules=MAP shop.urumi.test 127.0.0.1`):
 
@@ -91,7 +116,8 @@ delivery … Total: $12.00”*. Screenshot: `.tmp/dod/order-received.png`
 (gitignored; the flow is re-runnable with
 `PW_PATH=… node scripts/demo/storefront-checkout.cjs`).
 
-**T2. Confirm the order is visible in WooCommerce admin.** ✅ **LIVE**:
+**T2. Confirm the order is visible in WooCommerce admin.** ✅ LIVE (scripted)
+· **👤 MANUAL at demo time**:
 Playwright logs into `shop.urumi.test:18080/wp-login.php` as the WordPress
 admin (password from `urumi-secrets` → `WP_ADMIN_PW` env, never printed) and opens
 **WooCommerce → Orders** (`wp-admin/admin.php?page=wc-orders`) — re-runnable with
@@ -326,7 +352,39 @@ member never needs upstream credentials (§4 ✅/🧪 threat-model C3).
 
 ---
 
-## 11. Cleanup (nothing destructive is required)
+## 11. Chat reliability (Groq free tier — quota limitation and verified retry behavior)
+
+**The limitation, stated honestly:** the chat agent's live LLM provider is the
+**Groq free tier**, and the demo account is currently **exhausted/limited** —
+real `HTTP 429` responses were observed (`chat_provider_failed
+{"kind":"rate_limited","status":429,"retry_after_ms":12000}` in the gateway
+log, 2026-10-22). This is an **external quota limitation, not fixed by code**,
+and this runbook does not re-test it by hammering the provider.
+
+**What is verified (deterministic, mocked — no quota spent):**
+
+- The gateway captures the provider's `Retry-After`/reset metadata and, when
+  the window is short (≤ 3 s), retries in-request with bounded attempts
+  (max 3) and jittered backoff — recovering a transient 429 without the user
+  ever seeing an error (`test/chat-api.test.ts` "recovery", `test/agent/agent.test.ts`
+  retry suite).
+- Retries fire **only** for certainly-unprocessed failures (429s and
+  connection-level blips) — timeouts/5xx are never retried, so tokens are
+  never double-spent and tool calls are never duplicated.
+- A longer provider window is **respected, not stormed**: no retry inside the
+  request; the user gets `429 provider_rate_limited` with `retry_after_seconds`
+  (and a `Retry-After` header), the chat banner says "You can retry in about
+  N s", and "Retry last message" re-sends exactly the failed turn.
+- Provider availability is **not** gateway health: the topbar stays
+  "Connected" during provider rate limits (the pill flips only on real
+  connectivity trouble).
+
+Full rationale: `docs/decisions.md` **D35**. The deterministic agent/tool-loop
+tests (`test/agent/agent.test.ts`) exercise the *tool loop* with a scripted
+model — they are **tests, not the chat flow**, and no mock is ever presented
+as a real LLM answer.
+
+## 12. Cleanup (nothing destructive is required)
 
 The demo leaves real orders in the store (that is the point). If a pristine
 demo is wanted later, delete orders **in wp-admin** (or via the store REST
@@ -336,7 +394,8 @@ API) — never by touching the PVCs. Port-forwards die with their pods:
 pkill -f "port-forward"    # stops the three kubectl forwards
 ```
 
-Data-destroying operations (PVC deletion, `helm uninstall --purge` of the
-database volume, cluster deletion) are **out of scope for a demo** and are
-documented with warnings in `infra/helm/README.md` "Cleanup (preserves data by
-default)".
+**Never required for a demo:** deleting PVCs, dropping databases, revoking
+demo keys, or `helm uninstall`. Data-destroying operations (PVC deletion,
+`helm uninstall --purge` of the database volume, cluster deletion) are **out of
+scope for a demo** and are documented with warnings in
+`infra/helm/README.md` "Cleanup (preserves data by default)".

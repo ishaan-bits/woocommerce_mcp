@@ -26,7 +26,7 @@ any committed file.**
 | `woocommerce-store-mock` (mock) | `node:26.7-alpine` + script in ConfigMap | `woocommerce-store-mock:8090` | ClusterIP only; on when `mockStore.enabled` |
 
 Service names are **bare** (`gateway`, `postgres`, …) exactly as
-[docs/architecture.md §8](../docs/architecture.md) maps them, so every URL in
+[docs/architecture.md §8](../../docs/architecture.md) maps them, so every URL in
 the system is plain Kubernetes service DNS — no hostnames are baked into
 values. Deploy **one release per namespace** (names are not release-prefixed;
 labels carry the release identity).

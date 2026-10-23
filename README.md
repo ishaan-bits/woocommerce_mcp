@@ -5,6 +5,73 @@ as the first data source. Budget: **₹0** (free/open-source tooling only).
 
 ---
 
+## For recruiters (start here)
+
+**What this is.** A production-shaped **MCP Gateway on Kubernetes**: one authenticated
+endpoint that lets AI clients (a dashboard chat, IDEs like Claude Code/Cursor, MCP
+Inspector) use a real WooCommerce store and two more backends as *tools*, with
+per-user API keys, role-based tool permissions, rate limits, SSRF protection,
+encrypted upstream credentials and a full audit log — all running in a local kind
+cluster with Helm charts that deploy unchanged to a k3s VPS.
+
+**Architecture in one breath.** React dashboard → gateway (MCP server to callers,
+MCP client to upstreams) → three Streamable-HTTP MCP servers (WooCommerce /
+Inventory / Support) → a real WordPress+WooCommerce store and PostgreSQL.
+Start with [docs/architecture.md](./docs/architecture.md); the choice-vs-tradeoff
+summary is its **§12 "System design and tradeoffs"**.
+
+**Main security properties.** API keys stored as `sha256(key‖pepper)` only; roles
+(admin/member) enforced server-side with **no admin bypass** — grants bind admins
+too; upstream credentials never reach browsers or MCP clients (AES-256-GCM at rest,
+D34); SSRF allow-listing on every upstream URL; per-key rate limits + bounded
+concurrency; structured logs scrubbed of secrets; exactly-one audit row per tool
+call, attributed to the human. Details: [docs/threat-model.md](./docs/threat-model.md)
+(incl. §3c — the assignment's four threat scenarios).
+
+**Prerequisites.** macOS/Linux with Node ≥ 23.6, Docker (Colima), kind, kubectl,
+Helm — all free. Full table: [Prerequisites](#prerequisites).
+
+**Quick start (local demo, ~10 min).**
+```bash
+git clone https://github.com/ishaan-bits/woocommerce_mcp && cd woocommerce_mcp
+npm install && npm run check          # 574 tests, no cluster needed
+colima start                          # Docker VM (kind cluster lives here)
+kubectl -n urumi get pods             # 9/9 Running (see infra/helm/README.md to install from scratch)
+# demo access — one port-forward + /etc/hosts (or curl --resolve):
+kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 18080:80 &
+# dashboard → http://dashboard.urumi.test:18080    store → http://shop.urumi.test:18080
+```
+
+**Demo.** Follow [docs/demo-runbook.md](./docs/demo-runbook.md) (T0–T11: storefront
+checkout → WooCommerce admin → external MCP client → two-upstream prompt → key
+revocation → upstream disable → failure isolation → audit → restart persistence)
+with the two demo identities (admin-demo / reader-demo). Everything is verified
+**locally** on kind; the storefront/admin browser steps are performed
+**manually** at demo time, and the chat steps are **blocked** by the Groq
+free-tier quota (below). For a guided walkthrough
+see [docs/recording-script.md](./docs/recording-script.md) (5–7 minute outline).
+
+**Test results (2026-10-23).** `scripts/check.sh` → **574/574** (106 dashboard +
+321 gateway incl. 14 PostgreSQL integration + 39 inventory + 38 support + 70
+woocommerce), Helm security assertions 7/7, `npm audit` 0, secret scans clean.
+
+**Known limitations (honest).**
+- **Everything above is locally verified** on kind (`urumi-local`). The **VPS/k3s
+  deployment is documented but not executed** (`infra/helm/README.md` "Deploying
+  to a future VPS") — **no public deployment of this system exists**; don't let a
+  static-frontend URL stand in for one.
+- **Chat's live LLM turns are quota-blocked**: the Groq free tier returned real
+  `429`s; the gateway's bounded, `Retry-After`-aware retry behavior is verified
+  with mocks (D35) and the UI offers a safe retry. This is an external limitation,
+  not "fixed by code".
+- The assignment PDF, requirement matrix and evidence trail:
+  [docs/Urumi-MCP-Gateway-Assignment.pdf](./docs/Urumi-MCP-Gateway-Assignment.pdf) ·
+  [docs/requirement-matrix.md](./docs/requirement-matrix.md) ·
+  [docs/threat-model.md](./docs/threat-model.md) ·
+  [docs/decisions.md](./docs/decisions.md) (D1–D35).
+
+---
+
 ## Purpose
 
 One safe, uniform doorway (an **MCP Gateway**) that lets AI clients use several backend systems
