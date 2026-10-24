@@ -184,11 +184,15 @@ export function TeamPage({ api, me }: { api: ApiClient; me: MeResponse }) {
   return (
     <section aria-labelledby="team-heading">
       <div className="row space-between page-head">
-        <h1 id="team-heading">Team & API keys</h1>
-        <div className="row">
+        <div>
+          <p className="eyebrow">Governance</p>
+          <h1 id="team-heading">Team & API keys</h1>
+        </div>
+        <div className="tabs" role="tablist" aria-label="Team sections">
           <button
             type="button"
-            className={tab === "members" ? "btn btn-primary btn-sm" : "btn btn-ghost btn-sm"}
+            className={tab === "members" ? "tab is-active" : "tab"}
+            role="tab"
             aria-pressed={tab === "members"}
             onClick={() => setTab("members")}
           >
@@ -196,7 +200,8 @@ export function TeamPage({ api, me }: { api: ApiClient; me: MeResponse }) {
           </button>
           <button
             type="button"
-            className={tab === "keys" ? "btn btn-primary btn-sm" : "btn btn-ghost btn-sm"}
+            className={tab === "keys" ? "tab is-active" : "tab"}
+            role="tab"
             aria-pressed={tab === "keys"}
             onClick={() => setTab("keys")}
           >

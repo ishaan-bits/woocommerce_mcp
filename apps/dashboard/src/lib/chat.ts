@@ -117,3 +117,49 @@ export const EXAMPLE_PROMPTS: readonly string[] = [
   "Check inventory levels for a product",
   "What is the status of the latest order?",
 ];
+
+/**
+ * Safe "markdown-lite" segmentation of an assistant message: fenced code
+ * blocks and inline `code` spans become typed segments; everything else
+ * stays plain text (rendered with white-space preservation). No HTML is ever
+ * produced or injected — React renders each segment as elements, so tool
+ * output or model text can never smuggle markup into the DOM.
+ */
+export type MessageSegment =
+  | { type: "text"; value: string }
+  | { type: "code"; value: string }
+  | { type: "codeblock"; value: string };
+
+export function messageSegments(content: string): MessageSegment[] {
+  const segments: MessageSegment[] = [];
+  const fence = /```([\w-]*)\n?([\s\S]*?)```/g;
+  let last = 0;
+  let match: RegExpExecArray | null;
+  while ((match = fence.exec(content)) !== null) {
+    if (match.index > last) {
+      pushInline(segments, content.slice(last, match.index));
+    }
+    segments.push({ type: "codeblock", value: match[2] ?? "" });
+    last = match.index + match[0].length;
+  }
+  if (last < content.length) {
+    pushInline(segments, content.slice(last));
+  }
+  return segments.length > 0 ? segments : [{ type: "text", value: content }];
+}
+
+function pushInline(segments: MessageSegment[], chunk: string): void {
+  const span = /`([^`\n]+)`/g;
+  let last = 0;
+  let match: RegExpExecArray | null;
+  while ((match = span.exec(chunk)) !== null) {
+    if (match.index > last) {
+      segments.push({ type: "text", value: chunk.slice(last, match.index) });
+    }
+    segments.push({ type: "code", value: match[1] ?? "" });
+    last = match.index + match[0].length;
+  }
+  if (last < chunk.length) {
+    segments.push({ type: "text", value: chunk.slice(last) });
+  }
+}

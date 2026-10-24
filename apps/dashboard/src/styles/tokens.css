@@ -1,65 +1,97 @@
 /*
- * Design tokens: color (dark default + light overrides), type scale,
- * spacing, radii, borders, elevation, focus ring, motion, z-index.
- * Theme is applied via [data-theme] on <html> (set from localStorage or
- * prefers-color-scheme by a tiny inline boot script + the App toggle).
+ * Design tokens — Urumi control plane.
+ *
+ * Dark-first developer-platform theme: near-black surfaces, restrained
+ * borders, a violet/indigo primary accent (interaction), teal-green reserved
+ * for genuine success/health, amber for warnings, red for failures.
+ * Light theme keeps the same structure with adapted values.
+ *
+ * Applied via [data-theme] on <html> (localStorage or prefers-color-scheme,
+ * from the inline boot script + the App toggle). Every var name below is part
+ * of the stylesheet contract — pages never hardcode colors.
  */
 
 :root {
   color-scheme: dark;
 
-  /* Color — dark (default) */
-  --bg: #0e1116;
-  --bg-raised: #161b22;
-  --bg-sunken: #0a0d11;
-  --bg-input: #0a0d11;
-  --bg-hover: rgba(110, 170, 255, 0.1);
-  --bg-active: rgba(110, 170, 255, 0.18);
-  --border: #2b3440;
-  --border-strong: #3d4854;
-  --text: #e6edf3;
-  --text-muted: #9aa7b4;
-  --text-faint: #6e7b8a;
+  /* ── Surfaces ─────────────────────────────────────────── */
+  --bg: #0b0b10;
+  --bg-raised: #131319;
+  --bg-sunken: #08080c;
+  --bg-input: #0e0e14;
+  --bg-hover: rgba(139, 124, 247, 0.1);
+  --bg-active: rgba(139, 124, 247, 0.18);
+  --surface-glass: rgba(19, 19, 25, 0.72);
+  --border: #22222c;
+  --border-strong: #34343f;
 
-  --accent: #58a6ff;
-  --accent-strong: #4d9fec;
-  --accent-fg: #071018;
+  /* ── Text ─────────────────────────────────────────────── */
+  --text: #edecf4;
+  --text-muted: #9c9aad;
+  --text-faint: #6d6b7e;
 
-  --success: #3fb950;
-  --success-fg: #0c1f10;
-  --warn: #d29922;
-  --warn-fg: #221703;
-  --danger: #f85149;
-  --danger-fg: #2a0908;
-  --danger-strong: #da3633;
-  --info: #58a6ff;
-  --info-fg: #071018;
+  /* ── Accent (violet/indigo — interaction, never "success") ── */
+  --accent: #8b7cf7;
+  --accent-strong: #7a6af0;
+  --accent-fg: #0c0a1a;
+  --accent-soft: rgba(139, 124, 247, 0.14);
+  --accent-gradient: linear-gradient(135deg, #8b7cf7 0%, #6366f1 100%);
 
-  --badge-neutral-bg: #21262d;
-  --badge-neutral-fg: #9aa7b4;
+  /* ── Status ───────────────────────────────────────────── */
+  --success: #2dd4a7;
+  --success-fg: #04150f;
+  --success-soft: rgba(45, 212, 167, 0.13);
+  --warn: #f0b429;
+  --warn-fg: #1c1204;
+  --warn-soft: rgba(240, 180, 41, 0.13);
+  --danger: #f0504d;
+  --danger-fg: #1c0605;
+  --danger-strong: #d83936;
+  --danger-soft: rgba(240, 80, 77, 0.13);
+  --info: #818cf8;
+  --info-fg: #0c0a1a;
+  --info-soft: rgba(129, 140, 248, 0.13);
+
+  /* ── Badges ───────────────────────────────────────────── */
+  --badge-neutral-bg: #1c1c25;
+  --badge-neutral-fg: #b7b5c6;
   --badge-muted-bg: transparent;
-  --badge-muted-fg: #8b98a5;
-  --badge-admin-bg: #3fb950;
-  --badge-admin-fg: #0c1f10;
-  --badge-member-bg: #388bfd26;
-  --badge-member-fg: #79b8ff;
+  --badge-muted-fg: #7c7a8d;
+  --badge-admin-bg: rgba(45, 212, 167, 0.16);
+  --badge-admin-fg: #4ce0b8;
+  --badge-member-bg: rgba(139, 124, 247, 0.16);
+  --badge-member-fg: #a89cf9;
 
-  --focus: #79b8ff;
-  --overlay: rgba(1, 4, 9, 0.72);
-  --backdrop-blur: 2px;
+  /* ── Focus / overlay ──────────────────────────────────── */
+  --focus: #9d8dfc;
+  --overlay: rgba(4, 4, 8, 0.66);
+  --backdrop-blur: 6px;
 
-  /* Type scale */
+  /* ── Type ─────────────────────────────────────────────── */
+  --font-sans: "Inter", "Inter var", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
+  --fs-11: 0.6875rem;
   --fs-12: 0.75rem;
   --fs-13: 0.8125rem;
   --fs-14: 0.875rem;
+  --fs-15: 0.9375rem;
   --fs-16: 1rem;
+  --fs-18: 1.125rem;
   --fs-20: 1.25rem;
   --fs-24: 1.5rem;
-  --fs-30: 1.875rem;
-  --lh-tight: 1.25;
+  --fs-28: 1.75rem;
+  --fs-32: 2rem;
+  --lh-tight: 1.2;
   --lh: 1.55;
+  --tracking-tight: -0.015em;
+  --tracking-wide: 0.06em;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
 
-  /* Spacing scale (4..48) */
+  /* ── Spacing (4pt grid) ───────────────────────────────── */
   --sp-1: 4px;
   --sp-2: 8px;
   --sp-3: 12px;
@@ -70,73 +102,94 @@
   --sp-10: 40px;
   --sp-12: 48px;
 
-  /* Radii, borders, elevation */
+  /* ── Radii / borders / elevation ──────────────────────── */
+  --radius-xs: 4px;
   --radius-sm: 6px;
   --radius: 8px;
   --radius-lg: 12px;
+  --radius-xl: 16px;
   --radius-pill: 999px;
   --border-w: 1px;
-  --shadow-1: 0 1px 2px rgba(1, 4, 9, 0.4);
-  --shadow-2: 0 8px 24px rgba(1, 4, 9, 0.45);
-  --shadow-overlay: 0 16px 48px rgba(1, 4, 9, 0.6);
+  --shadow-1: 0 1px 2px rgba(2, 2, 8, 0.4);
+  --shadow-2: 0 8px 28px rgba(2, 2, 8, 0.5);
+  --shadow-overlay: 0 24px 64px rgba(2, 2, 8, 0.62);
+  --ring: 0 0 0 3px rgba(139, 124, 247, 0.28);
 
-  /* Motion */
-  --dur-fast: 120ms;
-  --dur: 180ms;
-  --ease: cubic-bezier(0.2, 0, 0, 1);
+  /* ── Motion ───────────────────────────────────────────── */
+  --dur-1: 110ms;
+  --dur-2: 190ms;
+  --dur-3: 300ms;
+  --dur-fast: 120ms; /* legacy alias */
+  --dur: 180ms; /* legacy alias */
+  --ease: cubic-bezier(0.2, 0, 0, 1); /* legacy alias */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
 
-  /* Z-index */
+  /* ── Z-index ──────────────────────────────────────────── */
   --z-sticky: 10;
   --z-drawer: 40;
   --z-overlay: 50;
   --z-modal: 60;
   --z-toast: 70;
 
-  --sidebar-w: 232px;
-  --topbar-h: 56px;
+  --sidebar-w: 244px;
+  --sidebar-w-collapsed: 64px;
+  --topbar-h: 60px;
+  --content-max: 1280px;
 }
 
 [data-theme="light"] {
   color-scheme: light;
 
-  --bg: #f6f8fa;
+  --bg: #f6f6f9;
   --bg-raised: #ffffff;
-  --bg-sunken: #eef1f4;
+  --bg-sunken: #ececf2;
   --bg-input: #ffffff;
-  --bg-hover: rgba(9, 65, 130, 0.07);
-  --bg-active: rgba(9, 65, 130, 0.13);
-  --border: #d1d9e0;
-  --border-strong: #b6c0ca;
-  --text: #1f2328;
-  --text-muted: #59636e;
-  --text-faint: #818b98;
+  --bg-hover: rgba(109, 92, 231, 0.08);
+  --bg-active: rgba(109, 92, 231, 0.15);
+  --surface-glass: rgba(255, 255, 255, 0.78);
+  --border: #e2e1ec;
+  --border-strong: #c9c7d8;
 
-  --accent: #0969da;
-  --accent-strong: #075bbd;
+  --text: #1a1826;
+  --text-muted: #5d5a70;
+  --text-faint: #8b879c;
+
+  --accent: #6d5ce7;
+  --accent-strong: #5a49d6;
   --accent-fg: #ffffff;
+  --accent-soft: rgba(109, 92, 231, 0.1);
+  --accent-gradient: linear-gradient(135deg, #7c6cf0 0%, #5a49d6 100%);
 
-  --success: #1a7f37;
+  --success: #0e9f6e;
   --success-fg: #ffffff;
-  --warn: #9a6700;
+  --success-soft: rgba(14, 159, 110, 0.1);
+  --warn: #b45309;
   --warn-fg: #ffffff;
-  --danger: #cf222e;
+  --warn-soft: rgba(180, 83, 9, 0.1);
+  --danger: #d92d20;
   --danger-fg: #ffffff;
-  --danger-strong: #a40e26;
-  --info: #0969da;
+  --danger-strong: #b42318;
+  --danger-soft: rgba(217, 45, 32, 0.1);
+  --info: #4f46e5;
   --info-fg: #ffffff;
+  --info-soft: rgba(79, 70, 229, 0.1);
 
-  --badge-neutral-bg: #eaeef2;
-  --badge-neutral-fg: #59636e;
+  --badge-neutral-bg: #ececf2;
+  --badge-neutral-fg: #514e63;
   --badge-muted-bg: transparent;
-  --badge-muted-fg: #6e7b8a;
-  --badge-admin-bg: #1a7f37;
-  --badge-admin-fg: #ffffff;
-  --badge-member-bg: #0969da1a;
-  --badge-member-fg: #0969da;
+  --badge-muted-fg: #8b879c;
+  --badge-admin-bg: rgba(14, 159, 110, 0.13);
+  --badge-admin-fg: #0b7a55;
+  --badge-member-bg: rgba(109, 92, 231, 0.12);
+  --badge-member-fg: #5a49d6;
 
-  --focus: #0969da;
-  --overlay: rgba(31, 35, 40, 0.5);
-  --shadow-1: 0 1px 2px rgba(31, 35, 40, 0.12);
-  --shadow-2: 0 8px 24px rgba(31, 35, 40, 0.16);
-  --shadow-overlay: 0 16px 48px rgba(31, 35, 40, 0.25);
+  --focus: #6d5ce7;
+  --overlay: rgba(26, 24, 38, 0.42);
+  --backdrop-blur: 3px;
+
+  --shadow-1: 0 1px 2px rgba(26, 24, 38, 0.08);
+  --shadow-2: 0 10px 30px rgba(26, 24, 38, 0.12);
+  --shadow-overlay: 0 24px 64px rgba(26, 24, 38, 0.18);
+  --ring: 0 0 0 3px rgba(109, 92, 231, 0.22);
 }

@@ -4,7 +4,8 @@
  * authorization + audit pipeline with *your* session principal. The history
  * lives in a module-level store so route changes do not wipe the thread.
  * Tool chips are gateway-computed outcomes — model prose cannot relabel a
- * failed call as a success.
+ * failed call as a success. Message text is segmented (safe code rendering
+ * only — never HTML) by lib/chat.messageSegments.
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import type { ApiClient } from "../api/client.ts";
@@ -14,6 +15,7 @@ import {
   EXAMPLE_PROMPTS,
   MAX_INPUT_CHARS,
   isAbortError,
+  messageSegments,
   newMessageId,
   partialTurnMessage,
   retryTarget,
@@ -30,6 +32,24 @@ import {
 } from "../lib/chatStore.ts";
 import { upstreamLabel } from "../lib/permissions.ts";
 import { Badge, Banner } from "../components/ui.tsx";
+
+function MessageBody({ content }: { content: string }) {
+  return (
+    <div className="chat-body">
+      {messageSegments(content).map((segment, index) =>
+        segment.type === "codeblock" ? (
+          <pre key={index}>
+            <code>{segment.value}</code>
+          </pre>
+        ) : segment.type === "code" ? (
+          <code key={index}>{segment.value}</code>
+        ) : (
+          <span key={index}>{segment.value}</span>
+        ),
+      )}
+    </div>
+  );
+}
 
 export function ChatPage({ api }: { api: ApiClient }) {
   const messages = useSyncExternalStore(subscribeChat, () => getChatMessages() as ChatMessage[], () => []);
@@ -131,8 +151,13 @@ export function ChatPage({ api }: { api: ApiClient }) {
   return (
     <section aria-labelledby="chat-heading">
       <div className="row space-between page-head">
-        <h1 id="chat-heading">Chat</h1>
-        {rounds !== null && <span className="muted small">last answer used {rounds} round{rounds === 1 ? "" : "s"}</span>}
+        <div>
+          <p className="eyebrow">AI assistant</p>
+          <h1 id="chat-heading">Chat</h1>
+        </div>
+        {rounds !== null && (
+          <span className="muted tiny">last answer used {rounds} round{rounds === 1 ? "" : "s"}</span>
+        )}
       </div>
 
       {agentMissing && (
@@ -177,7 +202,7 @@ export function ChatPage({ api }: { api: ApiClient }) {
           {messages.map((message) => (
             <div key={message.id} className={`chat-msg chat-msg-${message.role}`}>
               <span className="chat-msg-role">{message.role === "user" ? "You" : "Assistant"}</span>
-              <p>{message.content}</p>
+              <MessageBody content={message.content} />
               {message.toolCalls !== undefined && message.toolCalls.length > 0 && (
                 <ul className="chat-tools" aria-label="Tool calls">
                   {message.toolCalls.map((call, index) => {
@@ -231,9 +256,10 @@ export function ChatPage({ api }: { api: ApiClient }) {
             </button>
           )}
         </form>
-        <p className="muted small">
+        <p className="muted tiny" style={{ padding: "0 var(--sp-5) var(--sp-4)" }}>
           Tool calls execute inside the gateway with your role and grants, and each one is audited — the browser never
-          routes tools itself. Plain text only; nothing is rendered as markdown.
+          routes tools itself. Code spans and blocks are formatted; all other text is plain and never interpreted as
+          HTML.
         </p>
       </div>
     </section>

@@ -25,6 +25,7 @@ import {
 } from "../lib/audit.ts";
 import { roleLabel, upstreamLabel } from "../lib/permissions.ts";
 import { Badge, EmptyState, ErrorBanner, Skeleton } from "../components/ui.tsx";
+import { Modal } from "../components/Modal.tsx";
 
 /**
  * Audit viewer (C6/D22): read-only, admin-gated by the server. Keyset
@@ -40,6 +41,7 @@ export function AuditPage({ api, me }: { api: ApiClient; me: MeResponse }) {
   const [users, setUsers] = useState<LoadState<UserRecord[]>>(loading());
   const [exhausted, setExhausted] = useState(false);
   const [olderBusy, setOlderBusy] = useState(false);
+  const [detail, setDetail] = useState<AuditRowView | null>(null);
   const seq = useRef(0);
 
   const activeFilters = useMemo(() => auditFiltersActive(filters), [filters]);
@@ -140,7 +142,10 @@ export function AuditPage({ api, me }: { api: ApiClient; me: MeResponse }) {
   return (
     <section aria-labelledby="audit-heading">
       <div className="row space-between page-head">
-        <h1 id="audit-heading">Audit log</h1>
+        <div>
+          <p className="eyebrow">Governance</p>
+          <h1 id="audit-heading">Audit log</h1>
+        </div>
         <div className="row">
           <label htmlFor="audit-limit" className="muted small">
             Page size
@@ -284,7 +289,8 @@ export function AuditPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                     <th scope="col">Upstream</th>
                     <th scope="col">Tool</th>
                     <th scope="col">Error</th>
-                    <th scope="col">ms</th>
+                    <th scope="col" className="num">ms</th>
+                    <th scope="col"><span className="sr-only">Details</span></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -301,7 +307,17 @@ export function AuditPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                       <td className="small">{row.upstream ?? "—"}</td>
                       <td className="small">{row.tool ?? "—"}</td>
                       <td className="small">{row.error_code ?? "—"}</td>
-                      <td className="small">{row.duration_ms}</td>
+                      <td className="small num">{row.duration_ms}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setDetail(row)}
+                          aria-label={`Details for ${row.action} at ${row.occurred_at}`}
+                        >
+                          Details
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -316,6 +332,43 @@ export function AuditPage({ api, me }: { api: ApiClient; me: MeResponse }) {
           </>
         )}
       </div>
+
+      {detail !== null && (
+        <Modal
+          title="Audit event"
+          onClose={() => setDetail(null)}
+          footer={
+            <button type="button" className="btn btn-secondary" onClick={() => setDetail(null)}>
+              Close
+            </button>
+          }
+        >
+          <dl className="kv">
+            <dt>Action</dt>
+            <dd>{detail.action}</dd>
+            <dt>Outcome</dt>
+            <dd>
+              <Badge tone={outcomeTone(detail.outcome)}>{detail.outcome}</Badge>
+            </dd>
+            <dt>Actor</dt>
+            <dd>{detail.actor}</dd>
+            <dt>Upstream</dt>
+            <dd>{detail.upstream ?? "—"}</dd>
+            <dt>Tool</dt>
+            <dd>{detail.tool ?? "—"}</dd>
+            <dt>Time</dt>
+            <dd title={detail.occurred_at}>{formatLocalTime(detail.occurred_at)}</dd>
+            <dt>Duration</dt>
+            <dd>{detail.duration_ms} ms</dd>
+            <dt>Error code</dt>
+            <dd>{detail.error_code ?? "—"}</dd>
+          </dl>
+          <p className="muted tiny" style={{ marginTop: "var(--sp-4)" }}>
+            Rendered from the server&apos;s whitelisted projection — key material and request payloads are never part of
+            this view.
+          </p>
+        </Modal>
+      )}
     </section>
   );
 }

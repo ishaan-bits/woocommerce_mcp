@@ -49,7 +49,20 @@ export function LoginPage({
   return (
     <div className="fullpage">
       <form className="card login-card" onSubmit={(event) => void submit(event)}>
-        <h1>Sign in</h1>
+        <div className="row" style={{ gap: 12, marginBottom: "var(--sp-2)" }}>
+          <span className="brand-glyph" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="5.2" r="2.2" />
+              <circle cx="5.2" cy="16.5" r="2.2" />
+              <circle cx="18.8" cy="16.5" r="2.2" />
+              <path d="M10.6 7 6.6 14.6M13.4 7l4 7.6M7.4 16.5h9.2" />
+            </svg>
+          </span>
+          <div>
+            <p className="eyebrow">Urumi MCP</p>
+            <h1>Sign in</h1>
+          </div>
+        </div>
         {sessionExpired === true && (
           <p className="banner banner-warn" role="status">
             Your session expired. Sign in again to continue.

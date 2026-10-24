@@ -55,6 +55,15 @@ see [docs/recording-script.md](./docs/recording-script.md) (5–7 minute outline
 321 gateway incl. 14 PostgreSQL integration + 39 inventory + 38 support + 70
 woocommerce), Helm security assertions 7/7, `npm audit` 0, secret scans clean.
 
+**Dashboard UI.** The React dashboard is a dark-first developer control plane
+(refined violet/indigo design system, collapsible icon sidebar, per-page
+health summary from real API state, metric panels, server cards, tool schema
+explorer, audit detail viewer, safe code rendering in chat). Everything is
+genuine data — no fabricated metrics or statuses. Local dev: `npm run dev -w
+@mcp/dashboard` (Vite, `/api` proxied to `VITE_GATEWAY_API_URL`, default
+`http://127.0.0.1:8080`) or `npm run build -w @mcp/dashboard` + `npx vite
+preview`; light/dark follows the OS with a manual toggle.
+
 **Known limitations (honest).**
 - **Everything above is locally verified** on kind (`urumi-local`). The **VPS/k3s
   deployment is documented but not executed** (`infra/helm/README.md` "Deploying

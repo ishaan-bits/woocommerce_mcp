@@ -88,7 +88,10 @@ export function SettingsPage({ api }: { api: ApiClient }) {
   return (
     <section aria-labelledby="settings-heading">
       <div className="row space-between page-head">
-        <h1 id="settings-heading">Settings</h1>
+        <div>
+          <p className="eyebrow">Help</p>
+          <h1 id="settings-heading">Settings</h1>
+        </div>
         <button type="button" className="btn btn-secondary" onClick={() => void refresh()} disabled={state.status === "loading"}>
           Refresh
         </button>

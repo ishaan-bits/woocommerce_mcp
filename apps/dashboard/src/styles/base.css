@@ -13,39 +13,49 @@ body {
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-sans);
   font-size: var(--fs-14);
   line-height: var(--lh);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 h1,
 h2,
-h3 {
+h3,
+h4 {
   line-height: var(--lh-tight);
   margin: 0;
+  letter-spacing: var(--tracking-tight);
 }
 
 h1 {
   font-size: var(--fs-24);
-  letter-spacing: -0.01em;
+  font-weight: var(--weight-semibold);
 }
 
 h2 {
   font-size: var(--fs-16);
-  font-weight: 650;
+  font-weight: var(--weight-semibold);
+}
+
+h3 {
+  font-size: var(--fs-14);
+  font-weight: var(--weight-semibold);
 }
 
 code,
 pre,
-.key-value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.92em;
+.key-value,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
 }
 
 a {
   color: var(--accent);
   text-decoration: none;
+  transition: color var(--dur-1) var(--ease);
 }
 
 a:hover {
@@ -59,7 +69,25 @@ a:hover {
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+/* Slim, unobtrusive scrollbars (WebKit) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-pill);
+  border: 2px solid var(--bg);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -105,12 +133,45 @@ a:hover {
   color: var(--text-muted);
 }
 
+.faint {
+  color: var(--text-faint);
+}
+
 .small {
   font-size: var(--fs-13);
 }
 
+.tiny {
+  font-size: var(--fs-12);
+}
+
+.eyebrow {
+  font-size: var(--fs-11);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
 .error-text {
   color: var(--danger);
+}
+
+.mono {
+  letter-spacing: -0.01em;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.divider {
+  height: 1px;
+  background: var(--border);
+  border: 0;
+  margin: var(--sp-4) 0;
 }
 
 .row {
@@ -124,14 +185,43 @@ a:hover {
   justify-content: space-between;
 }
 
+.row.tight {
+  gap: var(--sp-1);
+}
+
 .stack {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
 }
 
+.stack.tight {
+  gap: var(--sp-2);
+}
+
+.stack.loose {
+  gap: var(--sp-5);
+}
+
+.grid {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.grid.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.grid.cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.grid.cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .page-head {
-  margin-bottom: var(--sp-1);
+  margin-bottom: var(--sp-2);
 }
 
 .spinner {
@@ -141,7 +231,7 @@ a:hover {
   border-top-color: var(--accent);
   border-radius: 50%;
   display: inline-block;
-  animation: spin 0.8s linear infinite;
+  animation: spin 0.75s linear infinite;
   flex: none;
 }
 
@@ -155,4 +245,18 @@ a:hover {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
+}
+
+/* Keyboard hint */
+.kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  line-height: 1.6;
 }

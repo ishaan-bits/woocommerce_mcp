@@ -6,7 +6,7 @@ import { routeHash } from "../lib/routes.ts";
 import { groupToolsByUpstream, upstreamHealth } from "../lib/selectors.ts";
 import { roleLabel, upstreamLabel } from "../lib/permissions.ts";
 import { formatLocalTime, outcomeTone } from "../lib/audit.ts";
-import { Badge, Banner, ErrorBanner, Skeleton } from "../components/ui.tsx";
+import { Badge, ErrorBanner, Skeleton } from "../components/ui.tsx";
 
 interface OverviewData {
   upstreams: UpstreamStatusView[];
@@ -19,8 +19,19 @@ function summarize(upstreams: readonly UpstreamStatusView[], tools: readonly Too
   const enabled = upstreams.filter((u) => u.configured && u.enabled).length;
   const reachable = upstreams.filter((u) => u.configured && u.enabled && u.reachable).length;
   const unreachable = upstreams.filter((u) => u.configured && u.enabled && !u.reachable).length;
+  const disabled = configured - enabled;
   const grouped = groupToolsByUpstream(upstreams, tools);
-  return { configured, enabled, reachable, unreachable, totalTools: tools.length, grouped };
+  return { configured, enabled, reachable, unreachable, disabled, totalTools: tools.length, grouped };
+}
+
+function MetricCard({ label, value, sub, tone }: { label: string; value: string | number; sub?: string; tone?: "success" | "warn" | "danger" }) {
+  return (
+    <article className={`metric-card${tone !== undefined ? ` tone-${tone}` : ""}`}>
+      <span className="metric-label">{label}</span>
+      <span className="metric-value">{value}</span>
+      {sub !== undefined && <span className="metric-sub">{sub}</span>}
+    </article>
+  );
 }
 
 export function OverviewPage({ api, me }: { api: ApiClient; me: MeResponse }) {
@@ -80,26 +91,32 @@ export function OverviewPage({ api, me }: { api: ApiClient; me: MeResponse }) {
   const metrics = state.status === "loaded" ? summarize(state.data.upstreams, state.data.tools) : null;
 
   return (
-    <section aria-labelledby="overview-heading">
+    <section aria-labelledby="overview-heading" className="stack loose">
       <div className="row space-between page-head">
         <div>
+          <p className="eyebrow">MCP control plane</p>
           <h1 id="overview-heading">Overview</h1>
           <p className="muted">
-            Signed in as <strong>{me.display_name}</strong> · <Badge tone={me.role === "admin" ? "admin" : "member"}>{roleLabel(me.role)}</Badge>
+            Signed in as <strong>{me.display_name}</strong>{" "}
+            <Badge tone={me.role === "admin" ? "admin" : "member"}>{roleLabel(me.role)}</Badge>
           </p>
         </div>
         <div className="row">
-          <span className={`badge badge-${conn.tone === "success" ? "success" : conn.tone === "warn" ? "warn" : "neutral"}`} title="Derived from real API responses — the gateway has no separate dashboard health endpoint">
+          <span
+            className={`health-chip ${conn.tone === "success" ? "is-healthy" : conn.tone === "warn" ? "is-warn" : ""}`}
+            title="Derived from real API responses — the gateway has no separate dashboard health endpoint"
+          >
+            <span className={`status-dot ${conn.tone === "success" ? "is-healthy" : conn.tone === "warn" ? "is-error" : ""}`} aria-hidden="true" />
             {conn.label}
           </span>
-          <button type="button" className="btn btn-secondary" onClick={() => void refresh()} disabled={state.status === "loading"}>
-            Refresh
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => void refresh()} disabled={state.status === "loading"}>
+            {state.status === "loading" ? "Refreshing…" : "Refresh"}
           </button>
         </div>
       </div>
 
       {lastRefreshedAt !== null && (
-        <p className="muted small">Last refreshed {formatLocalTime(new Date(lastRefreshedAt).toISOString())}</p>
+        <p className="muted tiny">Last refreshed {formatLocalTime(new Date(lastRefreshedAt).toISOString())}</p>
       )}
 
       {state.status === "error" && (
@@ -117,60 +134,68 @@ export function OverviewPage({ api, me }: { api: ApiClient; me: MeResponse }) {
 
       {metrics !== null && (
         <>
-          <div className="cards metrics-cards">
-            <article className="card metric">
-              <h2>Upstreams</h2>
-              <p className="metric-value">
-                {metrics.configured}
-                <span className="metric-sub"> configured</span>
-              </p>
-              <ul className="metric-list">
-                <li>
-                  <Badge tone="success">{metrics.enabled} enabled</Badge>
-                </li>
-                <li>
-                  <Badge tone="neutral">{metrics.reachable} reachable</Badge>
-                </li>
-                <li>
-                  <Badge tone={metrics.unreachable > 0 ? "error" : "neutral"}>{metrics.unreachable} unreachable</Badge>
-                </li>
-              </ul>
-            </article>
+          <div className="grid cols-4" aria-label="Key metrics">
+            <MetricCard
+              label="Upstream servers"
+              value={metrics.configured}
+              sub={`${metrics.enabled} enabled${metrics.disabled > 0 ? ` · ${metrics.disabled} disabled` : ""}`}
+            />
+            <MetricCard
+              label="Reachable now"
+              value={metrics.reachable}
+              tone={metrics.unreachable > 0 ? "warn" : "success"}
+              sub={metrics.unreachable > 0 ? `${metrics.unreachable} unreachable` : "all enabled servers responding"}
+            />
+            <MetricCard
+              label="Discovered tools"
+              value={metrics.totalTools}
+              sub={metrics.grouped.length > 0 ? `across ${metrics.grouped.length} servers` : "no servers discovered"}
+            />
+            <MetricCard
+              label="Recent audit events"
+              value={me.role === "admin" && recent.status === "loaded" ? recent.data.length : "—"}
+              sub={me.role === "admin" ? "latest 10 actions" : "admin role required"}
+            />
+          </div>
 
-            <article className="card metric">
-              <h2>Discovered tools</h2>
-              <p className="metric-value">{metrics.totalTools}</p>
-              <ul className="metric-list">
-                {metrics.grouped.map((entry) => (
-                  <li key={entry.id} className="small muted">
-                    {upstreamLabel(entry.id)}: {entry.tools.length}
-                  </li>
-                ))}
-              </ul>
-            </article>
-
+          <div className="grid cols-2">
             <article className="card">
-              <h2>Server status</h2>
+              <div className="row space-between">
+                <h2>Server health</h2>
+                <a className="small" href={routeHash("upstreams")}>Manage</a>
+              </div>
               <ul className="status-list">
                 {metrics.grouped.map((entry) => {
                   const health = upstreamHealth(entry.status);
                   return (
-                    <li key={entry.id}>
-                      <Badge tone={health === "healthy" ? "success" : health === "degraded" ? "error" : health === "disabled" ? "neutral" : "warn"}>
-                        {health}
-                      </Badge>
-                      <span className="status-name">{upstreamLabel(entry.id)}</span>
-                      <span className="muted small">{entry.tools.length} tools</span>
+                    <li key={entry.id} className="row space-between" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8, gap: 12 }}>
+                      <span className="row tight">
+                        <span
+                          className={`status-dot ${health === "healthy" ? "is-healthy" : health === "degraded" ? "is-error" : health === "disabled" ? "is-off" : "is-warn"}`}
+                          aria-hidden="true"
+                        />
+                        <span className="status-name">{upstreamLabel(entry.id)}</span>
+                        <Badge tone={health === "healthy" ? "success" : health === "degraded" ? "error" : health === "disabled" ? "muted" : "warn"}>
+                          {health}
+                        </Badge>
+                      </span>
+                      <span className="muted small">{entry.tools.length} tool{entry.tools.length === 1 ? "" : "s"}</span>
                     </li>
                   );
                 })}
+                {metrics.grouped.length === 0 && (
+                  <li className="muted">No upstreams discovered yet.</li>
+                )}
               </ul>
             </article>
-          </div>
 
-          <div className="cards">
             <article className="card">
-              <h2>Recent activity</h2>
+              <div className="row space-between">
+                <h2>Recent activity</h2>
+                {me.role === "admin" && (
+                  <a className="small" href={routeHash("audit")}>Audit log</a>
+                )}
+              </div>
               {me.role !== "admin" && (
                 <p className="muted">The audit log requires the admin role (enforced server-side). Ask an admin for access.</p>
               )}
@@ -180,10 +205,12 @@ export function OverviewPage({ api, me }: { api: ApiClient; me: MeResponse }) {
               {me.role === "admin" && recent.status === "loaded" && (
                 <ul className="status-list">
                   {recent.data.map((row) => (
-                    <li key={row.id}>
-                      <Badge tone={outcomeTone(row.outcome)}>{row.outcome}</Badge>
-                      <span className="status-name">{row.action}</span>
-                      <span className="muted small" title={row.occurred_at}>
+                    <li key={row.id} className="row space-between" style={{ gap: 12 }}>
+                      <span className="row tight">
+                        <Badge tone={outcomeTone(row.outcome)}>{row.outcome}</Badge>
+                        <span className="status-name">{row.action}</span>
+                      </span>
+                      <span className="muted tiny" title={row.occurred_at}>
                         {formatLocalTime(row.occurred_at)}
                       </span>
                     </li>
@@ -191,38 +218,40 @@ export function OverviewPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                 </ul>
               )}
             </article>
-
-            <article className="card">
-              <h2>Quick links</h2>
-              <ul className="quick-links">
-                <li>
-                  <a href={routeHash("upstreams")}>MCP servers</a>
-                </li>
-                <li>
-                  <a href={routeHash("tools")}>Tool catalogue</a>
-                </li>
-                <li>
-                  <a href={routeHash("chat")}>Chat</a>
-                </li>
-                {me.role === "admin" && (
-                  <li>
-                    <a href={routeHash("audit")}>Audit log</a>
-                  </li>
-                )}
-                <li>
-                  <a href={routeHash("settings")}>Connection settings</a>
-                </li>
-              </ul>
-            </article>
           </div>
+
+          <article className="card">
+            <h2>Quick links</h2>
+            <ul className="quick-links">
+              <li>
+                <a className="btn btn-secondary btn-sm" href={routeHash("upstreams")}>MCP servers</a>
+              </li>
+              <li>
+                <a className="btn btn-secondary btn-sm" href={routeHash("tools")}>Tool catalogue</a>
+              </li>
+              <li>
+                <a className="btn btn-secondary btn-sm" href={routeHash("chat")}>AI chat</a>
+              </li>
+              {me.role === "admin" && (
+                <li>
+                  <a className="btn btn-secondary btn-sm" href={routeHash("audit")}>Audit log</a>
+                </li>
+              )}
+              <li>
+                <a className="btn btn-secondary btn-sm" href={routeHash("settings")}>Connection settings</a>
+              </li>
+            </ul>
+          </article>
         </>
       )}
 
       {state.status === "loaded" && metrics !== null && metrics.configured === 0 && (
-        <Banner tone="warn">
-          No upstreams are configured. Set the gateway&apos;s <code>*_MCP_URL</code> environment variables — the dashboard
-          cannot point the gateway at arbitrary addresses.
-        </Banner>
+        <div className="banner banner-warn" role="status">
+          <p>
+            No upstreams are configured. Set the gateway&apos;s <code>*_MCP_URL</code> environment variables — the dashboard
+            cannot point the gateway at arbitrary addresses.
+          </p>
+        </div>
       )}
     </section>
   );

@@ -6,6 +6,7 @@ import {
   historySlice,
   isAbortError,
   MAX_INPUT_CHARS,
+  messageSegments,
   newMessageId,
   PARTIAL_TURN_TEXT,
   partialTurnMessage,
@@ -92,6 +93,26 @@ describe("chat helpers", () => {
     const wire = JSON.stringify(target);
     assert.ok(!wire.includes("tool_calls"), "history never carries tool-call state");
     assert.ok(!wire.includes("woocommerce_list_products"), "history never carries tool names");
+  });
+
+  test("messageSegments splits fenced blocks and inline code without producing HTML", () => {
+    assert.deepEqual(messageSegments("plain only"), [{ type: "text", value: "plain only" }]);
+    assert.deepEqual(messageSegments("run `npm run check` now"), [
+      { type: "text", value: "run " },
+      { type: "code", value: "npm run check" },
+      { type: "text", value: " now" },
+    ]);
+    assert.deepEqual(messageSegments("a\n```js\n<b>x</b>\n```\nb"), [
+      { type: "text", value: "a\n" },
+      { type: "codeblock", value: "<b>x</b>\n" },
+      { type: "text", value: "\nb" },
+    ]);
+    // Segments carry text only — any markup stays inert text, never HTML.
+    const html = "<img src=x onerror=alert(1)>";
+    const segs = messageSegments(html);
+    assert.equal(segs.length, 1);
+    assert.equal(segs[0]?.type, "text");
+    assert.equal(segs[0]?.value, html);
   });
 
   test("partialTurnMessage preserves chips for a turn that failed after tools ran", () => {

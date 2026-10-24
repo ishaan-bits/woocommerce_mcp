@@ -60,6 +60,16 @@ function credentialPayload(
     : { mode: "bearer", value: form.credentialValue };
 }
 
+function healthDot(health: "healthy" | "degraded" | "disabled" | "unknown" | "missing"): string {
+  return health === "healthy"
+    ? "is-healthy"
+    : health === "degraded"
+      ? "is-error"
+      : health === "disabled"
+        ? "is-off"
+        : "is-warn";
+}
+
 /**
  * MCP servers (D24 + M11/D34): status for every upstream, expandable tool
  * lists, and — for admins — enable/disable plus add/edit/remove of
@@ -205,27 +215,30 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
   };
 
   return (
-    <section aria-labelledby="servers-heading">
+    <section aria-labelledby="servers-heading" className="stack">
       <div className="row space-between page-head">
-        <h1 id="servers-heading">MCP servers</h1>
+        <div>
+          <p className="eyebrow">Infrastructure</p>
+          <h1 id="servers-heading">MCP servers</h1>
+          <p className="muted">
+            Upstream discovery, health and registration. The three built-in servers are deploy-time configured; admins
+            can register more by URL with an optional static credential (encrypted by the gateway, never shown again).
+          </p>
+        </div>
         <div className="row">
           {me.role === "admin" && formOpen === null && (
             <button type="button" className="btn btn-primary" onClick={openAdd}>
+              <svg className="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
               Add server
             </button>
           )}
-          <button type="button" className="btn btn-secondary" onClick={() => void refresh()} disabled={state.status === "loading"}>
-            Refresh
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => void refresh()} disabled={state.status === "loading"}>
+            {state.status === "loading" ? "Refreshing…" : "Refresh"}
           </button>
         </div>
       </div>
-      <p className="muted">
-        The three built-in servers (WooCommerce, Inventory, Support) are registered at deploy time via the gateway&apos;s{" "}
-        <code>*_MCP_URL</code> environment. Admins can additionally register extra MCP servers here by URL with an optional
-        static credential — the credential is encrypted by the gateway and never shown again.
-      </p>
       {checkedAt !== null && (
-        <p className="muted small">Last checked {formatLocalTime(new Date(checkedAt).toISOString())}</p>
+        <p className="muted tiny">Last checked {formatLocalTime(new Date(checkedAt).toISOString())}</p>
       )}
 
       {actionOk !== null && <Banner tone="ok">{actionOk}</Banner>}
@@ -246,9 +259,9 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
               {formError}
             </Banner>
           )}
-          <p>
+          <div className="field">
             <label htmlFor="upstream-name">
-              Name <span className="muted small">3–48 characters</span>
+              Name <span className="muted small">· 3–48 characters</span>
             </label>
             <input
               id="upstream-name"
@@ -259,10 +272,10 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
               maxLength={48}
               placeholder="Acme Shop"
             />
-          </p>
-          <p>
+          </div>
+          <div className="field">
             <label htmlFor="upstream-url">
-              MCP server URL <span className="muted small">https recommended</span>
+              MCP server URL <span className="muted small">· https recommended</span>
             </label>
             <input
               id="upstream-url"
@@ -271,18 +284,22 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
               required
               placeholder="https://mcp.example.test/mcp"
             />
-          </p>
-          <p>
-            <label>
-              <input
-                type="checkbox"
-                checked={form.enabled}
-                onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
-              />{" "}
-              Enabled (tools discoverable and callable)
-            </label>
-          </p>
-          <p>
+            <p className="muted tiny">
+              Private and metadata addresses are refused unless explicitly allow-listed (SSRF guard, enforced by the
+              gateway).
+            </p>
+          </div>
+          <div className="checkbox-row">
+            <input
+              type="checkbox"
+              id="upstream-enabled"
+              className="checkbox"
+              checked={form.enabled}
+              onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
+            />
+            <label htmlFor="upstream-enabled">Enabled — tools discoverable and callable</label>
+          </div>
+          <div className="field">
             <label htmlFor="upstream-cred-mode">Static credential</label>
             <select
               id="upstream-cred-mode"
@@ -294,13 +311,11 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
               <option value="header">Custom header</option>
               {formOpen === "edit" && <option value="clear">Clear stored credential</option>}
             </select>
-          </p>
+          </div>
           {(form.credentialMode === "bearer" || form.credentialMode === "header") && (
             <>
-              <p>
-                <label htmlFor="upstream-cred-value">
-                  Credential value <span className="muted small">stored encrypted; never displayed again</span>
-                </label>
+              <div className="field">
+                <label htmlFor="upstream-cred-value">Credential value</label>
                 <input
                   id="upstream-cred-value"
                   type="password"
@@ -309,9 +324,13 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                   required
                   autoComplete="off"
                 />
-              </p>
+                <p className="muted tiny">
+                  Shown once here, then stored encrypted at rest. It never appears in the browser, API responses or logs
+                  again.
+                </p>
+              </div>
               {form.credentialMode === "header" && (
-                <p>
+                <div className="field">
                   <label htmlFor="upstream-cred-header">Header name</label>
                   <input
                     id="upstream-cred-header"
@@ -320,7 +339,7 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                     required
                     placeholder="x-api-key"
                   />
-                </p>
+                </div>
               )}
             </>
           )}
@@ -343,7 +362,7 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
         </form>
       )}
 
-      <div aria-busy={state.status === "loading"}>
+      <div aria-busy={state.status === "loading"} className="stack">
         {state.status === "loading" && <Skeleton rows={4} />}
         {state.status === "error" && (
           <ErrorBanner
@@ -367,9 +386,10 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
             const label = upstreamLabel(entry.id, entry.status.name);
             const isAdminRow = me.role === "admin" && entry.status.source === "admin";
             return (
-              <article key={entry.id} className="card server-card">
+              <article key={entry.id} className={`server-card${entry.status.enabled ? "" : " is-disabled"}`}>
                 <div className="row space-between">
                   <div className="row">
+                    <span className={`status-dot ${healthDot(health)}`} aria-hidden="true" />
                     <h2 className="server-name">{label}</h2>
                     <Badge tone={tone === "success" ? "success" : tone === "error" ? "error" : tone === "neutral" ? "neutral" : "warn"}>
                       {upstreamHealthText(entry.status)}
@@ -384,7 +404,7 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                         {modeLabel}
                       </Badge>
                     )}
-                    <span className="muted small">{entry.tools.length} tools</span>
+                    <span className="muted small">{entry.tools.length} tool{entry.tools.length === 1 ? "" : "s"}</span>
                   </div>
                   <div className="row">
                     <button
@@ -431,9 +451,9 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                   </div>
                 </div>
                 {isAdminRow && entry.status.url !== undefined && (
-                  <p className="muted small">
-                    <code>{sanitizeError(entry.status.url)}</code>
-                    {entry.status.has_credential === true && <span> · credential stored (encrypted)</span>}
+                  <p className="row tight muted small">
+                    <span className="endpoint">{sanitizeError(entry.status.url)}</span>
+                    {entry.status.has_credential === true && <Badge tone="muted" title="Stored encrypted server-side; the value never leaves the gateway">credential stored</Badge>}
                   </p>
                 )}
                 {errorText !== null && (
@@ -442,15 +462,16 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                   </p>
                 )}
                 {entry.status.configured && (
-                  <p className="muted small">Status as of this page load — refresh to re-check.</p>
+                  <p className="muted tiny">Status as of this page load — refresh to re-check.</p>
                 )}
                 <div id={`server-tools-${entry.id}`} hidden={!isOpen}>
+                  <div className="divider" />
                   {entry.tools.length === 0 ? (
                     <p className="muted small">No tools discovered (server disabled or unreachable).</p>
                   ) : (
-                    <ul className="tool-mini-list">
+                    <ul className="tool-mini-list" style={{ flexDirection: "column", gap: 6 }}>
                       {entry.tools.map((tool) => (
-                        <li key={tool.qualified_name}>
+                        <li key={tool.qualified_name} className="row tight" style={{ gap: 10 }}>
                           <code>{tool.name}</code>
                           <span className="muted small">{tool.description !== "" ? tool.description : "no description"}</span>
                         </li>
