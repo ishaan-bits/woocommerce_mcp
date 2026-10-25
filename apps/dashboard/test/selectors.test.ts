@@ -10,6 +10,7 @@ import {
   upstreamHealth,
   upstreamHealthText,
   upstreamHealthTone,
+  upstreamStatsSummary,
 } from "../src/lib/selectors.ts";
 
 function status(overrides: Partial<UpstreamStatusView> = {}): UpstreamStatusView {
@@ -101,5 +102,34 @@ describe("grouping and filtering", () => {
     assert.equal(toolCountSummary(5, 5), "5 tools");
     assert.equal(toolCountSummary(2, 5), "2 of 5 tools");
     assert.equal(toolCountSummary(0, 0), "0 tools");
+  });
+});
+
+describe("upstreamStatsSummary (observability line)", () => {
+  test("absent stats render nothing (never invented numbers)", () => {
+    assert.equal(upstreamStatsSummary(undefined), null);
+    assert.equal(upstreamStatsSummary(null), null);
+  });
+
+  test("an upstream that was never called says so", () => {
+    assert.equal(
+      upstreamStatsSummary({ calls: 0, errors: 0, avgDurationMs: 0, lastCalledAt: null }),
+      "No tool calls yet",
+    );
+  });
+
+  test("calls, errors, latency and last-call time summarise on one line", () => {
+    const line = upstreamStatsSummary({
+      calls: 42,
+      errors: 2,
+      avgDurationMs: 120,
+      lastCalledAt: "2026-10-26T10:31:05.000Z",
+    });
+    assert.ok(line !== null);
+    assert.ok(line.startsWith("42 calls · 2 errors · avg 120 ms · last "), line);
+    assert.equal(
+      upstreamStatsSummary({ calls: 1, errors: 0, avgDurationMs: 5, lastCalledAt: null }),
+      "1 call · 0 errors · avg 5 ms",
+    );
   });
 });

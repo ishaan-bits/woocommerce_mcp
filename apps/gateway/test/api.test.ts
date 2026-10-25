@@ -595,6 +595,70 @@ describe("dashboard tool/upstream endpoints (D6, D24)", () => {
     }
   });
 
+  test("GET /upstreams carries observability stats per server (stand-out 8), safe for members", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    // Seed audited tool calls: 2 ok + 1 error for woocommerce, 1 ok for inventory.
+    for (const entry of [
+      { upstreamId: "woocommerce", toolName: "list_products", outcome: "success", durationMs: 100 },
+      { upstreamId: "woocommerce", toolName: "list_orders", outcome: "success", durationMs: 200 },
+      { upstreamId: "woocommerce", toolName: "get_order", outcome: "error", durationMs: 300 },
+      { upstreamId: "inventory", toolName: "list_products", outcome: "success", durationMs: 50 },
+    ]) {
+      await fx.auditRepo.append({
+        action: "tool_call",
+        keyId: null,
+        userId: "11111111-1111-4111-8111-111111111111",
+        role: "admin",
+        upstreamId: entry.upstreamId,
+        toolName: entry.toolName,
+        qualifiedName: `${entry.upstreamId}_${entry.toolName}`,
+        outcome: entry.outcome as "success" | "error",
+        durationMs: entry.durationMs,
+        errorCode: entry.outcome === "error" ? "upstream_error" : null,
+      });
+    }
+
+    const response = await call(active, "GET", "/upstreams", fx.adminKey);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      upstreams: Array<{
+        id: string;
+        url?: string;
+        stats?: { upstreamId: string; calls: number; errors: number; avgDurationMs: number; maxDurationMs: number; lastCalledAt: string | null };
+      }>;
+    };
+    const woo = body.upstreams.find((entry) => entry.id === "woocommerce");
+    const inv = body.upstreams.find((entry) => entry.id === "inventory");
+    const support = body.upstreams.find((entry) => entry.id === "support");
+    assert.deepEqual(
+      woo?.stats,
+      {
+        upstreamId: "woocommerce",
+        calls: 3,
+        errors: 1,
+        avgDurationMs: 200,
+        maxDurationMs: 300,
+        lastCalledAt: woo?.stats?.lastCalledAt ?? "",
+      },
+      "woocommerce stats: 3 calls, 1 error, avg 200ms, max 300ms",
+    );
+    assert.ok(typeof woo?.stats?.lastCalledAt === "string", "lastCalledAt is set once calls exist");
+    assert.equal(inv?.stats?.calls, 1);
+    assert.equal(inv?.stats?.errors, 0);
+    assert.equal(support?.stats, undefined, "an upstream with no calls has no stats object (never invented)");
+
+    // Members get the same non-sensitive metrics but still never see URLs.
+    const member = await call(active, "GET", "/upstreams", fx.readerKey);
+    assert.equal(member.status, 200);
+    const memberBody = (await member.json()) as { upstreams: Array<{ id: string; url?: string; stats?: { calls: number } }> };
+    const memberWoo = memberBody.upstreams.find((entry) => entry.id === "woocommerce");
+    assert.equal(memberWoo?.stats?.calls, 3, "metrics are not sensitive — members see them too");
+    for (const entry of memberBody.upstreams) {
+      assert.equal(entry.url, undefined, "URLs stay admin-only (C4)");
+    }
+  });
+
   test("GET /upstreams covers every fixed upstream id with configured flags", async () => {
     const fx = makeFixture();
     active = await startApi(fx);

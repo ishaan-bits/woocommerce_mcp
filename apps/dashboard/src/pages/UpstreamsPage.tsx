@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ApiClient, MeResponse, ToolView, UpstreamStatusView } from "../api/client.ts";
 import { failed, loaded, loading, toFailure, type LoadState } from "../state.ts";
 import { formatLocalTime } from "../lib/audit.ts";
-import { sanitizeError, upstreamHealth, upstreamHealthText, upstreamHealthTone, groupToolsByUpstream } from "../lib/selectors.ts";
+import { sanitizeError, upstreamHealth, upstreamHealthText, upstreamHealthTone, groupToolsByUpstream, upstreamStatsSummary } from "../lib/selectors.ts";
 import { roleLabel, storeModeLabel, upstreamLabel } from "../lib/permissions.ts";
 import { Badge, Banner, EmptyState, ErrorBanner, Skeleton } from "../components/ui.tsx";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
@@ -459,6 +459,11 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                 {errorText !== null && (
                   <p className="small error-text server-error" title={entry.status.last_error ?? undefined}>
                     Last error: {errorText}
+                  </p>
+                )}
+                {upstreamStatsSummary(entry.status.stats) !== null && (
+                  <p className="muted small" title="Aggregate tool-call metrics from the audit log (this gateway's history)">
+                    {upstreamStatsSummary(entry.status.stats)}
                   </p>
                 )}
                 {entry.status.configured && (

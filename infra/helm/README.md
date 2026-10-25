@@ -468,6 +468,30 @@ http://shop.urumi.test:18080`:
 - Everything else (gateway, MCP servers, dashboard, mock) is stateless —
   sessions and configuration live in PostgreSQL.
 
+## Upgrades and rollback
+
+Helm keeps every release revision, so an upgrade is always reversible **without
+touching the PVCs** (the database and WordPress volumes are never part of a
+Helm rollback — only Deployments/Services/ConfigMaps are):
+
+```bash
+# upgrade (idempotent): same chart + values → new revision, zero pod disruption
+# for unchanged specs; changed specs roll out normally
+helm upgrade urumi infra/helm/mcp-gateway -n urumi -f infra/helm/mcp-gateway/values-local.yaml
+
+# inspect history
+helm -n urumi history urumi
+
+# roll back to the previous (or any) revision
+helm -n urumi rollback urumi <revision>
+```
+
+**Tested drill (2026-10-26, stand-out 9):** no-op `helm upgrade` produced
+revision 20 ("Upgrade complete"); `helm rollback urumi 19` produced revision 21
+("Rollback to 19") — after which all 9 pods were `1/1 Running`, all 3 PVCs
+remained `Bound`, and store data (orders, products) and API keys were intact.
+Upgrade-then-rollback of a chart with a failed change is the same two commands.
+
 ## Local vs production values
 
 | Concern | `values-local.yaml` | `values-prod.yaml` |

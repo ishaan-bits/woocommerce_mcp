@@ -83,6 +83,18 @@ export interface UpstreamStatusView {
   /** Admin-only: whether a static credential is stored (the value never leaves the gateway). */
   has_credential?: boolean;
   credential_mode?: "bearer" | "header" | null;
+  /** Observability (stand-out 8): aggregate tool-call metrics from the audit log. */
+  stats?: UpstreamStatsView;
+}
+
+/** Wire shape of GET /api/upstreams[].stats (mirrors the gateway response). */
+export interface UpstreamStatsView {
+  upstreamId: string;
+  calls: number;
+  errors: number;
+  avgDurationMs: number;
+  maxDurationMs: number;
+  lastCalledAt: string | null;
 }
 
 export interface ToolsResponse {

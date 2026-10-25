@@ -510,18 +510,58 @@ delete the PVCs or the kind cluster only if you explicitly want to lose the
 data (marked destructive in that document). To stop the local demo access
 points only: `pkill -f "port-forward"`.
 
-## Stand-out items attempted
+## Standout Features Implemented
 
-Which optional stand-out items were attempted, and where each lives
-(full table with evidence: [docs/requirement-matrix.md §0.9](./docs/requirement-matrix.md)):
+Status of the assignment's "Other ways to stand out" categories, with the
+evidence behind each claim (an honest ✅ means implemented **and** covered by
+tests; "verified in cluster" means checked against the running kind cluster):
 
-| Attempted | Where to find |
-| --- | --- |
-| Tool permissions (restricted tools rejected when called directly) | `apps/gateway/src/auth/authorization.ts` + dashboard `lib/permissions.ts` (parity-tested) |
-| SSRF protection on admin-added upstream URLs | `apps/gateway/src/config.ts` C4 classifier + `upstream-crud.test.ts` |
-| NetworkPolicies / non-root containers | `infra/helm/mcp-gateway/templates/networkpolicy.yaml` (documented, disabled on kind), all images non-root |
-| Upstream credentials encrypted at rest (AES-256-GCM) | `apps/gateway/src/upstream-credentials.ts` + `upstream-credentials.test.ts` |
-| VPS/k3s deployment | outline only in `infra/helm/README.md` — **not executed** |
+| Category | Status | Where | Tests | In cluster? | Limitations |
+| --- | --- | --- | --- | --- | --- |
+| **2. Tool permissions** | ✅ implemented | per-user grants + reader write-ceiling in `apps/gateway/src/auth/authorization.ts`; **unauthorized tools hidden from `tools/list`** (`apps/gateway/src/mcp-server.ts`) and rejected if called directly; identical rule for chat and external clients | `authz-e2e.test.ts` (hiding + rejection), `authorization.test.ts`, dashboard `permissions.test.ts` parity | ✅ verified 2026-10-26: admin sees all 9 tools, member sees only their 5 granted reads (writes hidden) | dashboard *catalogue* intentionally lists everything with permission badges — it is an inspection view, not the client tool list |
+| **6. Security hardening** | ✅ implemented | SSRF allow-list + private-address classifier on every upstream URL (`config.ts`), AES-256-GCM credential vault (`upstream-credentials.ts`, D34), non-root images, `automountServiceAccountToken: false`, log scrubbing | `ssrf.test.ts`, `upstream-credentials.test.ts`, `logger.test.ts`, helm assertions 7/7 | ✅ verified (assertions + live redaction checks) | NetworkPolicy template exists but kind's CNI cannot enforce it (documented) |
+| **8. Observability** | ✅ implemented | per-server tool-call metrics (calls, errors, avg/max latency, last call) aggregated from the audit log: `toolStats()` in `db/postgres-audit-repository.ts`, served on `GET /api/upstreams` (`stats`), rendered on the Upstreams page; **clear failure reasons** (`upstream-registry.ts` describeError) | `api.test.ts` (stats shape + member safety), `postgres.test.ts` (SQL aggregation), dashboard `selectors.test.ts` | ✅ verified 2026-10-26: live stats (e.g. woocommerce 215 calls / 2 errors / avg 33 ms) and `last_error` now reads "connection failed — the server is not reachable from the gateway" during a pod-kill drill | metrics cover this gateway's own audit history (not a time-series DB) |
+| **9. Upgrades and rollback** | ✅ documented **and tested** | `infra/helm/README.md` "Upgrades and rollback" | verified drill (below) | ✅ verified 2026-10-26: `helm upgrade` → revision 20; `helm rollback` → revision 21; 9/9 pods, 3 PVCs, all data intact | none |
+| 1. VPS deployment | 🟡 documented only | `values-prod.yaml`, helm README VPS outline | — | ❌ never deployed | no reliable free VPS at ₹0 — explicitly not claimed |
+| 7. Scaling | 🟡 prepared | prod `replicas: 2` + `sessionAffinity`, Postgres-backed sessions, per-key rate limits | rate-limit suites | multi-replica not drill-tested | rate limiter is per-process (documented trade-off) |
+| 3. OAuth · 5. Hosted MCP servers · 4. Many tools | not attempted | — | — | — | working core prioritized per the PDF |
+| Bonus: multi-store provisioning | **not attempted** | — | — | — | PDF says attempt only after the core; deliberately skipped |
+
+## Submission checklist
+
+**Mandatory requirements** — ✅ complete and verified (local Kubernetes, Helm
+local+prod values, everything in-cluster with persistent storage, Ingress +
+local domains, probes/limits, no hardcoded secrets, first-written WooCommerce
+MCP with 5 tools and documented REST rationale, internal-only upstreams,
+gateway add/edit/disable/remove with encrypted static credentials, one MCP
+endpoint with qualified-name collision handling, failure isolation + timeouts,
+server-side credentials, 3 upstreams, roles/keys/revocation/hashed storage,
+audit log in dashboard, chat agent with tool loop acting as the user). The
+**two user-A chat lines of the definition of done remain quota-blocked** (see
+Known limitations) — everything else in the DoD is live-executed
+(`docs/demo-runbook.md` T0–T11).
+
+**Multi-store provisioning bonus** — **not implemented** (by choice).
+
+**Other standout categories** — see "Standout Features Implemented" above:
+✅ 2 (tool permissions), ✅ 6 (security hardening), ✅ 8 (observability),
+✅ 9 (upgrades/rollback); 🟡 1 (VPS — documented), 🟡 7 (scaling — prepared);
+not attempted: 3, 4, 5.
+
+**Demo video requirements** — outline ready in
+`docs/recording-script.md` (7-minute script incl. the honest chat-quota
+fallback); **the video itself is not yet recorded**.
+
+**GitHub repository** — `https://github.com/ishaan-bits/woocommerce_mcp`,
+`main` branch, clean history, no secrets (scanned), assignment PDF included.
+
+**Remaining submission actions** (in order):
+1. Record the demo video (`docs/recording-script.md`) and submit the form.
+2. Optional: one live chat turn when the Groq quota resets → flip D3/D4 in
+   `docs/requirement-matrix.md` from ⛔ to ✅ with evidence.
+3. Optional: rebuild images at deploy time on any future host (the fix for
+   the body-parser advisory is in the lockfile; running images carry it since
+   the 2026-10-26 rebuild).
 
 ## Roadmap
 

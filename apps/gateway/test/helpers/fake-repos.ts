@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type AggregatedTool, type AuditLogEntry, type UpstreamConfig, type UpstreamHealth, type UserRole } from "@mcp/shared";
-import type { AuditFilters, AuditRepository, NewAuditEntry } from "../../src/db/audit-repository.ts";
+import type { AuditFilters, AuditRepository, NewAuditEntry, UpstreamToolStats } from "../../src/db/audit-repository.ts";
 import type {
   AuthRepository,
   CreateKeyResult,
@@ -309,6 +309,40 @@ export class FakeAuditRepository implements AuditRepository {
   /** Test convenience: rows matching an action, newest first. */
   byAction(action: AuditLogEntry["action"]): AuditLogEntry[] {
     return this.entries.filter((entry) => entry.action === action).map(({ raw: _raw, ...entry }) => entry);
+  }
+
+  async toolStats(): Promise<UpstreamToolStats[]> {
+    type MutableStats = {
+      upstreamId: string;
+      calls: number;
+      errors: number;
+      avgDurationMs: number;
+      maxDurationMs: number;
+      lastCalledAt: string | null;
+    };
+    const byUpstream = new Map<string, MutableStats>();
+    for (const entry of this.entries) {
+      if (entry.action !== "tool_call" || entry.upstreamId === null) continue;
+      const current = byUpstream.get(entry.upstreamId) ?? {
+        upstreamId: entry.upstreamId,
+        calls: 0,
+        errors: 0,
+        avgDurationMs: 0,
+        maxDurationMs: 0,
+        lastCalledAt: null as string | null,
+      };
+      current.calls += 1;
+      if (entry.outcome === "error") current.errors += 1;
+      current.maxDurationMs = Math.max(current.maxDurationMs, entry.durationMs);
+      // Running mean, rounded like the SQL round(avg(...)).
+      current.avgDurationMs = Math.round(
+        (current.avgDurationMs * (current.calls - 1) + entry.durationMs) / current.calls,
+      );
+      const at = entry.occurredAt;
+      if (current.lastCalledAt === null || at > current.lastCalledAt) current.lastCalledAt = at;
+      byUpstream.set(entry.upstreamId, current);
+    }
+    return [...byUpstream.values()] as UpstreamToolStats[];
   }
 }
 

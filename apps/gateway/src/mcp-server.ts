@@ -56,15 +56,19 @@ export function createGatewayMcpServer(options: GatewayMcpServerOptions): Server
     },
   );
 
-  // Discovery is authenticated but not per-tool authorized: the list shows
-  // what exists; authorization is enforced (and audited) at execution time.
+  // Discovery shows only what the caller may call (stand-out 2): the same
+  // authorize predicate that guards execution filters the list, so a client
+  // never sees tools it cannot use. Rejection at execution time is unchanged
+  // (defence in depth), and the chat agent offers tools by the same rule.
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const aggregated = await registry.listAggregatedTools();
-    const tools: Tool[] = aggregated.map((tool) => ({
-      name: tool.qualifiedName,
-      description: tool.description,
-      inputSchema: tool.inputSchema as unknown as Tool["inputSchema"],
-    }));
+    const tools: Tool[] = aggregated
+      .filter((tool) => authorize(tool.qualifiedName).allowed)
+      .map((tool) => ({
+        name: tool.qualifiedName,
+        description: tool.description,
+        inputSchema: tool.inputSchema as unknown as Tool["inputSchema"],
+      }));
     return { tools };
   });
 

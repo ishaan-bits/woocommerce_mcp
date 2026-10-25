@@ -1041,3 +1041,44 @@ closed-window bail, partial state, exactly-once tool execution), `test/chat-api.
 (Retry-After + chips on the wire, in-request recovery), dashboard
 `test/connection.test.ts` (provider vs connectivity) and `test/chat.test.ts` +
 `test/client.test.ts` (retry target + error details).
+
+## D36 — Tool discovery shows only callable tools; observability from the audit log
+
+**Context.** The stand-out audit (2026-10-26) found two genuine gaps against the
+assignment's own wording. Stand-out 2 says restricted tools must be "hidden
+from the tool list **and** rejected if called directly" — we enforced rejection
+but deliberately listed everything ("the list shows what exists"; an earlier
+D-note). Stand-out 8 (metrics per server: calls, error rate, latency) was
+missing entirely; `last_error` even rendered a bare `TypeError`.
+
+**Decision.**
+1. **`tools/list` is filtered by the same `authorize` predicate that guards
+   execution.** One rule everywhere: *what you can call is what you can see* —
+   on `/mcp` for external clients, in the chat agent's offering (already
+   filtered), and implicitly in the dashboard (which keeps its full catalogue
+   view with explicit per-tool permission badges — an inspection surface, not
+   the client list). Hiding is presentation only: execution-time rejection,
+   audit rows and the reader write-ceiling are unchanged (defence in depth).
+   Trade-off: an admin registering a brand-new upstream sees its tools only
+   after granting themselves access (Team) — same rule for everyone, which is
+   the point of "no admin bypass" (C2). The old "listed but denied" policy is
+   preserved in `upstream-crud.test.ts`'s history as the pre-stand-out shape.
+2. **Observability is computed, not collected anew**: `toolStats()` aggregates
+   the existing append-only `audit_log` (calls / errors / avg+max latency /
+   last-call per upstream — one `GROUP BY`, no new tables, no secrets, no
+   time-series dependency) and is served additively on `GET /api/upstreams`.
+   Failure reasons use fixed, sanitized wording (`describeError`):
+   "connection failed — the server is not reachable from the gateway",
+   "timed out — the server did not answer in time" (B3: never echo URLs or
+   stacks). ₹0 and interview-explainable.
+
+**Alternatives considered.** Per-tool visibility grants (over-engineering);
+a metrics sidecar/OTel stack (paid-hosting temptation, violates ₹0 discipline);
+`error.message` passthrough for `last_error` (B3 leak risk — fixed strings won).
+
+**Trade-offs.** Discovery is now personalized, so "the same key sees the same
+list" depends on grants — intentional. `toolStats` grows with the audit log
+(fine at this scale; a summary table would be the next step if it ever matters).
+Coverage: `authz-e2e.test.ts` (hiding, both directions), `upstream-crud.test.ts`
+(hidden-until-granted golden path), `api.test.ts` + `postgres.test.ts` (stats),
+dashboard `selectors.test.ts` (summary line); live-verified on kind 2026-10-26.

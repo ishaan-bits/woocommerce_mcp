@@ -4,6 +4,7 @@
  * so the logic stays testable outside the DOM.
  */
 
+import { formatLocalTime } from "./audit.ts";
 import type { ToolView, UpstreamStatusView } from "../api/client.ts";
 
 export type UpstreamHealth =
@@ -109,4 +110,25 @@ export function filterTools(
 /** Count summary text, e.g. "12 of 30 tools". */
 export function toolCountSummary(shown: number, total: number): string {
   return shown === total ? `${total} tools` : `${shown} of ${total} tools`;
+}
+
+/**
+ * One-line observability summary for an upstream's tool-call metrics
+ * (stand-out 8). Returns null when the gateway sent no stats so the UI can
+ * hide the line instead of inventing numbers.
+ */
+export function upstreamStatsSummary(
+  stats: { calls: number; errors: number; avgDurationMs: number; lastCalledAt: string | null } | null | undefined,
+): string | null {
+  if (stats === null || stats === undefined) return null;
+  if (stats.calls === 0) return "No tool calls yet";
+  const parts = [
+    `${stats.calls} call${stats.calls === 1 ? "" : "s"}`,
+    `${stats.errors} error${stats.errors === 1 ? "" : "s"}`,
+    `avg ${stats.avgDurationMs} ms`,
+  ];
+  if (stats.lastCalledAt !== null) {
+    parts.push(`last ${formatLocalTime(stats.lastCalledAt)}`);
+  }
+  return parts.join(" · ");
 }

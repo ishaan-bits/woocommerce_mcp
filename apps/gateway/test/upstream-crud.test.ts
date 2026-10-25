@@ -301,7 +301,7 @@ describe("admin upstream management (D34)", () => {
     }
   });
 
-  test("golden path: a registered server's tools join tools/list and are callable; grants still gate members", async () => {
+  test("golden path: a registered server's tools are hidden until granted, then listed and callable (stand-out 2)", async () => {
     const { harness, repo } = await start();
     const fake = await startFakeUpstream({
       name: "acme-fake",
@@ -316,12 +316,17 @@ describe("admin upstream management (D34)", () => {
       assert.equal(created.status, 201);
       const id = String(created.json.id);
 
-      // The MCP client sees the new upstream's tools immediately (lazy connect).
+      // Stand-out 2: tools the caller may not use are HIDDEN from tools/list
+      // (the same authorize predicate guards discovery and execution), so the
+      // ungranted dynamic tool is invisible even though the upstream is live.
       const listed = await harness.client.listTools();
-      assert.ok(listed.tools.some((tool) => tool.name === `${id}_list_widgets`));
+      assert.ok(
+        !listed.tools.some((tool) => tool.name === `${id}_list_widgets`),
+        "ungranted tools must be hidden from the tool list",
+      );
 
-      // The admin demo principal has no grant for the new upstream: denied
-      // with the standard permission-denied protocol error.
+      // If it were called anyway (e.g. a stale cached name), the call is
+      // still denied with the standard permission-denied protocol error.
       let denied: unknown = null;
       try {
         await harness.client.callTool({ name: `${id}_list_widgets`, arguments: {} });
@@ -346,6 +351,12 @@ describe("admin upstream management (D34)", () => {
         new StreamableHTTPClientTransport(new URL(`${harness.origin}/mcp`), {
           requestInit: { headers: { authorization: `Bearer ${harness.adminKey}` } },
         }),
+      );
+      // Now that the grant exists, the same tool is visible in tools/list.
+      const listedAfterGrant = await client.listTools();
+      assert.ok(
+        listedAfterGrant.tools.some((tool) => tool.name === `${id}_list_widgets`),
+        "granted tools must appear in the tool list",
       );
       const called = await client.callTool({ name: `${id}_list_widgets`, arguments: { q: "x" } });
       assert.notEqual(called.isError, true);

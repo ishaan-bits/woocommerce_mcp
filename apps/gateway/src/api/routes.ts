@@ -4,6 +4,7 @@ import { Router, type Request, type Response } from "express";
 import { AgentInputError, AgentTurnError, type ChatAgent } from "../agent/agent.ts";
 import { ProviderError } from "../agent/provider.ts";
 import type { AuditWriter } from "../audit.ts";
+import type { UpstreamToolStats } from "../db/audit-repository.ts";
 import { authorizeAdminApi } from "../auth/authorization.ts";
 import { generateApiKey } from "../auth/keys.ts";
 import { principalOf } from "../auth/middleware.ts";
@@ -650,6 +651,14 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
     }
     const isAdmin = principal.role === "admin";
     const health = deps.registry.health();
+    // Observability (stand-out 8): per-server metrics aggregated from the
+    // audit log. Failures degrade to "no stats" — never block the endpoint.
+    let statsById = new Map<string, UpstreamToolStats>();
+    try {
+      statsById = new Map((await deps.auditRepo.toolStats()).map((stat) => [stat.upstreamId, stat]));
+    } catch (error) {
+      deps.logger.error("upstream_stats_failed", { error: String(error) });
+    }
 
     const rows: Array<{
       id: string;
@@ -663,6 +672,8 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
       url?: string;
       has_credential?: boolean;
       credential_mode?: "bearer" | "header" | null;
+      /** Observability (stand-out 8): aggregate tool-call metrics, non-sensitive. */
+      stats?: UpstreamToolStats;
     }> = [];
 
     for (const id of UPSTREAM_IDS) {
@@ -678,6 +689,7 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
         // store) — deploy-time config, never a runtime switch.
         mode: id === "woocommerce" ? (deps.woocommerceStoreMode ?? null) : null,
         source: "env",
+        stats: statsById.get(id),
       });
     }
 
@@ -694,6 +706,7 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
             last_error: entry?.lastErrorMessage ?? null,
             mode: null,
             source: "admin",
+            stats: statsById.get(record.id),
             // Admin-only detail: the upstream URL (C4) and whether a static
             // credential is stored — the decrypted value is never returned.
             ...(isAdmin

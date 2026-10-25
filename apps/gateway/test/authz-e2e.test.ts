@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { PERMISSION_DENIED } from "../src/mcp-server.ts";
-import { startGatewayHarness } from "./helpers/gateway-harness.ts";
+import { READER_USER_ID, startGatewayHarness } from "./helpers/gateway-harness.ts";
 
 /**
  * End-to-end authorization over the real gateway (fakes only at the
@@ -77,7 +77,9 @@ describe("end-to-end authorization over MCP", () => {
         // Passes the reader write-ceiling (not a write verb), upstream 'support'
         // is granted, but the exact tool grant is absent — and the tool need
         // not exist anywhere: authorization runs before validation/routing.
-        await reader.callTool({ name: "support_list_tickets", arguments: {} });
+        // (A name no server exposes keeps this probe independent of the demo
+        // seed grants, which do cover the real read tools.)
+        await reader.callTool({ name: "support_get_ticket", arguments: {} });
       } catch (error) {
         denied = error;
       }
@@ -89,7 +91,7 @@ describe("end-to-end authorization over MCP", () => {
       const denial = denials[0];
       assert.ok(denial);
       assert.equal(denial.errorCode, "grant_forbidden");
-      assert.equal(denial.qualifiedName, "support_list_tickets");
+      assert.equal(denial.qualifiedName, "support_get_ticket");
     } finally {
       await reader.close();
       await harness.close();
@@ -117,6 +119,63 @@ describe("end-to-end authorization over MCP", () => {
       const failures = harness.auditRepo.byAction("auth_failed");
       assert.ok(failures.length >= 2);
       assert.ok(!JSON.stringify(failures).includes(`umk_${"A".repeat(43)}`));
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("tools/list hides tools the caller may not call — writes hidden from members (stand-out 2)", async () => {
+    const harness = await startGatewayHarness();
+    const reader = await connectReader(harness.origin, harness.readerKey);
+    const admin = await connectReader(harness.origin, harness.adminKey);
+    try {
+      const readerTools = (await reader.listTools()).tools.map((tool) => tool.name);
+      // Member: read tools it may call stay discoverable…
+      assert.ok(readerTools.includes("woocommerce_list_products"));
+      assert.ok(readerTools.includes("inventory_list_products"));
+      // …while write tools (denied by the reader ceiling) are HIDDEN, not
+      // merely rejected — the assignment's stand-out 2 wording.
+      // (inventory_adjust_stock really exists in the harness registry, so
+      // this asserts genuine hiding, not a vacuous absence.)
+      assert.ok(!readerTools.includes("inventory_adjust_stock"), "write tools must be hidden from the member list");
+
+      // Admin: the full catalogue, including write tools.
+      const adminTools = (await admin.listTools()).tools.map((tool) => tool.name);
+      assert.ok(adminTools.includes("inventory_adjust_stock"));
+      assert.ok(adminTools.includes("woocommerce_list_products"));
+      assert.ok(
+        adminTools.length > readerTools.length,
+        "the admin catalogue is a superset of the member's",
+      );
+
+      // Hiding is presentation only — direct calls to hidden tools are still
+      // rejected server-side (the preceding test pins the -32003 behaviour).
+    } finally {
+      await reader.close();
+      await admin.close();
+      await harness.close();
+    }
+  });
+
+  test("tools/list hides every tool of a server the caller has no grant for", async () => {
+    const harness = await startGatewayHarness();
+    try {
+      // Remove the reader's inventory grant entirely (BEFORE connecting —
+      // the session principal is captured at connect time); inventory tools
+      // must vanish from discovery while other granted reads survive.
+      await harness.authRepo.updateUser(READER_USER_ID, {
+        allowedUpstreams: ["woocommerce", "support"],
+        allowedTools: ["tools:woocommerce_list_products", "tools:woocommerce_get_order"],
+      });
+      const reader = await connectReader(harness.origin, harness.readerKey);
+      try {
+        const listed = (await reader.listTools()).tools.map((tool) => tool.name);
+        assert.ok(!listed.some((name) => name.startsWith("inventory_")), "ungranted upstream tools are hidden");
+        assert.ok(listed.includes("woocommerce_list_products"));
+        assert.ok(listed.includes("woocommerce_get_order"));
+      } finally {
+        await reader.close();
+      }
     } finally {
       await harness.close();
     }

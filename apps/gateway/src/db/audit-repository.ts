@@ -35,4 +35,21 @@ export interface AuditRepository {
   append(entry: NewAuditEntry): Promise<void>;
   /** Newest first; `beforeId` is a keyset cursor on the BIGSERIAL id. */
   recent(limit: number, beforeId?: string, filters?: AuditFilters): Promise<AuditLogEntry[]>;
+  /**
+   * Per-server tool-call aggregate for observability (stand-out 8): calls,
+   * errors, latency and last-call time, grouped by upstream. Read-only
+   * aggregation over the audit log — no new state, no secrets involved.
+   */
+  toolStats(): Promise<UpstreamToolStats[]>;
+}
+
+/** Aggregate metrics for one upstream, computed from audited tool calls. */
+export interface UpstreamToolStats {
+  readonly upstreamId: string;
+  readonly calls: number;
+  readonly errors: number;
+  readonly avgDurationMs: number;
+  readonly maxDurationMs: number;
+  /** ISO timestamp of the most recent tool call, or null when never called. */
+  readonly lastCalledAt: string | null;
 }

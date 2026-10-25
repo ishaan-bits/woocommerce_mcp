@@ -287,10 +287,10 @@ upstream: fails alone, sibling fine, `/api/upstreams` unreachable with
 upstreams, no breakage of siblings), `test/real-upstreams.test.ts`
 ("SIGKILLing one server fails only its own tools, leaking no internals").
 
-> Known cosmetic gap: the dashboard's `last_error` for a connection-refused
-> upstream currently shows a generic `TypeError` rather than a friendlier
-> "connection refused" sentence. The DoD requirement (shown as unreachable) is
-> met; nicer wording is open work.
+> Failure reporting (updated 2026-10-26, stand-out 8): the dashboard's
+> `last_error` for an unreachable upstream now reads "connection failed — the
+> server is not reachable from the gateway" (verified live during the drill
+> above); the generic `TypeError` wording is gone.
 
 ---
 

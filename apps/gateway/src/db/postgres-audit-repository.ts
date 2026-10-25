@@ -1,5 +1,5 @@
 import type { AuditLogEntry } from "@mcp/shared";
-import type { AuditFilters, AuditRepository, NewAuditEntry } from "./audit-repository.ts";
+import type { AuditFilters, AuditRepository, NewAuditEntry, UpstreamToolStats } from "./audit-repository.ts";
 import type { Pool } from "./pool.ts";
 
 interface AuditRow {
@@ -15,6 +15,15 @@ interface AuditRow {
   outcome: string;
   duration_ms: number;
   error_code: string | null;
+}
+
+interface ToolStatsRow {
+  upstream_id: string;
+  calls: number;
+  errors: number;
+  avg_duration_ms: number;
+  max_duration_ms: number;
+  last_called_at: Date | null;
 }
 
 function toAuditEntry(row: AuditRow): AuditLogEntry {
@@ -100,6 +109,30 @@ export function createPostgresAuditRepository(pool: Pool): AuditRepository {
         params,
       );
       return result.rows.map(toAuditEntry);
+    },
+
+    async toolStats(): Promise<UpstreamToolStats[]> {
+      // Pure aggregation over the append-only audit log (C6 keeps it that
+      // way): one GROUP BY, parameterless, no user input reaches the SQL.
+      const result = await pool.query<ToolStatsRow>(
+        `SELECT upstream_id,
+                count(*)::int AS calls,
+                count(*) FILTER (WHERE outcome = 'error')::int AS errors,
+                coalesce(round(avg(duration_ms)), 0)::int AS avg_duration_ms,
+                coalesce(max(duration_ms), 0)::int AS max_duration_ms,
+                max(occurred_at) AS last_called_at
+           FROM audit_log
+          WHERE action = 'tool_call' AND upstream_id IS NOT NULL
+          GROUP BY upstream_id`,
+      );
+      return result.rows.map((row) => ({
+        upstreamId: row.upstream_id,
+        calls: row.calls,
+        errors: row.errors,
+        avgDurationMs: row.avg_duration_ms,
+        maxDurationMs: row.max_duration_ms,
+        lastCalledAt: row.last_called_at === null ? null : row.last_called_at.toISOString(),
+      }));
     },
   };
 }

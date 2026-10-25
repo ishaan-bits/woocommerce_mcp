@@ -117,7 +117,7 @@ items, which the PDF itself marks non-mandatory.
 | --- | --- | --- |
 | Bonus: multi-store provisioning | not attempted (PDF: attempt only after core; explicitly out of Milestone 11 scope) | — |
 | Stand-out 1: VPS (k3s) deployment | 🟡 outline only — documented, **not implemented or verified** | `infra/helm/README.md` "Deploying to a future VPS (outline — prepared, not executed here)" |
-| Stand-out 2: tool permissions — restricted tools **rejected** when called directly | ✅ rejection verified (§2 live parity); restricted tools are **still listed** by `/mcp` discovery (by design, D-noted in `mcp-server.ts`) → hiding them from the list is **not** claimed | `apps/gateway/src/auth/authorization.ts`, dashboard `lib/permissions.ts`; parity tests both sides |
+| Stand-out 2: tool permissions — restricted tools **hidden from the tool list** and **rejected** when called directly | ✅ implemented + verified | `apps/gateway/src/mcp-server.ts` (tools/list filtered by the same authorize predicate as execution), `auth/authorization.ts`; `authz-e2e.test.ts` (hiding + rejection); **live 2026-10-26**: admin 9 tools, member 5 (writes hidden). The dashboard catalogue keeps listing everything with permission badges — an inspection view, not the client list |
 | Stand-out 3: OAuth on the gateway | not attempted | — |
 | Stand-out 4: handling many tools | not attempted | — |
 | Stand-out 5: hosted MCP servers by container image | not attempted | — |
@@ -125,8 +125,8 @@ items, which the PDF itself marks non-mandatory.
 | Stand-out 6: NetworkPolicies / non-root | 🟡 deny-by-default `NetworkPolicy` template exists but disabled (kind's kindnet can't enforce it, documented); containers run non-root ✅ | `templates/networkpolicy.yaml`, `infra/helm/README.md` "Milestone 8 security posture" |
 | Stand-out 6: **upstream credentials encrypted at rest** | ✅ AES-256-GCM vault (Phase 1): ciphertext in Postgres, AAD-bound to the upstream id, 503 fail-closed without the key | `apps/gateway/src/upstream-credentials.ts`, `upstream-credentials.test.ts`, migration `004_dynamic_upstreams.sql` |
 | Stand-out 7: multi-replica gateway | not attempted (single replica); rate limits exist (per-bucket keys, `limits.ts`) | `values-prod.yaml` shows the 2-replica shape |
-| Stand-out 8: metrics (calls/error rate/latency per server) | ❌ not implemented; "clear reporting why unreachable" 🟡 via `last_error` in `GET /api/upstreams` (rendered text is a generic `TypeError` — known cosmetic gap) | `GET /api/upstreams` |
-| Stand-out 9: upgrade/rollback with Helm | 🟡 upgrade commands documented; no executed rollback drill | `infra/helm/README.md` |
+| Stand-out 8: metrics (calls/error rate/latency per server) + clear failure reasons | ✅ implemented + verified | `db/postgres-audit-repository.ts` `toolStats()` (SQL aggregation over the audit log), `GET /api/upstreams` `stats` field, Upstreams page line, `upstream-registry.ts` friendly `describeError`; tests: `api.test.ts`, `postgres.test.ts`, dashboard `selectors.test.ts`; **live 2026-10-26**: real stats shown, and `last_error` during a pod-kill reads "connection failed — the server is not reachable from the gateway" (was `TypeError`) |
+| Stand-out 9: upgrade/rollback with Helm | ✅ documented **and tested** | `infra/helm/README.md` "Upgrades and rollback"; drill **2026-10-26**: `helm upgrade` → revision 20, `helm rollback` → revision 21, 9/9 pods + 3 PVCs + all data intact |
 
 ### 0.10 Discrepancy log (PDF vs repository at Milestone 11 start)
 
@@ -297,6 +297,23 @@ deployed). What this pass added, with evidence:
 | Link integrity + command drift check | local link scan **52 ok / 0 broken** (fixed one pre-existing `infra/helm/README.md` relative link); `npm run check` → `scripts/check.sh` confirmed |
 | Full gates re-run | `TEST_DATABASE_URL=… bash scripts/check.sh` → **rc 0, 574/574**; helm security assertions **ASSERT OK 7/7**; `npm audit` 0; secret scans 0 (demo keys absent from git status/diff, file 0600) |
 
+## 13. Post-audit improvements — stand-outs 2 + 8 (2026-10-26)
+
+Two highest-value gaps selected from the stand-out audit (all nine categories
+evaluated in the milestone report; OAuth / hosted servers / many-tools /
+multi-store deliberately not attempted; VPS needs external hosting):
+
+| Change | Files | Tests | Cluster verification (2026-10-26) |
+| --- | --- | --- | --- |
+| **Hide unauthorized tools from `tools/list`** (stand-out 2) — same `authorize` predicate as execution; chat already filtered | `apps/gateway/src/mcp-server.ts`; `upstream-crud.test.ts` golden path re-pinned to hidden-until-granted; `authz-e2e.test.ts` +2 tests; harness grants now mirror migration-005 seeds (`support_list_tickets`); `authz-e2e` probe retargeted to a name no server exposes | gateway suite green | admin `tools/list` = 9 (writes included), member = 5 reads (writes hidden); direct calls to hidden tools still `-32003` (unchanged) |
+| **Observability metrics + clear failure reasons** (stand-out 8) | `db/audit-repository.ts` (`toolStats`, `UpstreamToolStats`), `db/postgres-audit-repository.ts` (SQL GROUP BY over `audit_log`), `api/routes.ts` (`stats` on `GET /api/upstreams`), `upstream-registry.ts` (`describeError` → friendly fixed strings), dashboard `client.ts`/`selectors.ts`/`UpstreamsPage.tsx` | `api.test.ts` (+1), `postgres.test.ts` (+1), dashboard `selectors.test.ts` (+3) | `/api/upstreams` shows real stats (woocommerce 215 calls / 2 errors / avg 33 ms); pod-kill drill: `last_error` = "connection failed — the server is not reachable from the gateway"; sibling upstream kept serving |
+| **Helm upgrade/rollback drill** (stand-out 9 evidence) | `infra/helm/README.md` "Upgrades and rollback" (new section) | helm lint 2/2, assertions 7/7 | `helm upgrade` → revision 20; `helm rollback` → revision 21; 9/9 pods, 3 PVCs Bound, orders/keys intact |
+
+Gate after the change: `TEST_DATABASE_URL=… bash scripts/check.sh` → **rc 0,
+582/582** (110 dashboard + 325 gateway incl. 15 PostgreSQL integration + 39
+inventory + 38 support + 70 woocommerce); `npm audit` 0 (body-parser fix
+included in the rebuilt images).
+
 ## Explicitly not claimed
 
 - **The chat agent's live LLM turn (DoD D3/D4) is NOT claimed as re-verified in
@@ -304,9 +321,10 @@ deployed). What this pass added, with evidence:
   account (real `429`s on 2026-10-22); the code handles them honestly (D35) but
   a quota limitation is not "fixed by code". Mock/deterministic coverage and
   the historical Milestone 9 live run stand in until quota resets.
-- **The dashboard's `last_error` for a dead upstream renders a generic
-  `TypeError`** instead of a friendlier sentence. The DoD requirement (shown as
-  unreachable) is met; nicer wording is open work.
+- ~~The dashboard's `last_error` for a dead upstream renders a generic
+  `TypeError`~~ — **resolved 2026-10-26** (stand-out 8): unreachable upstreams
+  now report "connection failed — the server is not reachable from the
+  gateway" (live-verified during a pod-kill drill).
 - **No paid services, no new live LLM spend:** the one allowed Groq end-to-end call
   belongs to Milestone 9 (`scripts/llm-smoke.sh`, opt-in); it was not re-run this
   milestone. All Phase D work is deterministic/mocked.

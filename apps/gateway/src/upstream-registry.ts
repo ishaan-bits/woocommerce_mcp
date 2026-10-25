@@ -119,6 +119,19 @@ function describeError(error: unknown): string {
     return `MCP error ${error.code}`;
   }
   if (error instanceof Error) {
+    // Network-stack failures arrive as TypeError("fetch failed") / AbortError
+    // with little detail. Translate the common cases into operator language
+    // using FIXED strings only (B3: never echo URLs, hostnames or stacks).
+    const causeCode = (() => {
+      const cause = (error as { cause?: unknown }).cause;
+      return typeof cause === "object" && cause !== null ? String((cause as { code?: unknown }).code ?? "") : "";
+    })();
+    if (error.name === "AbortError" || error.name === "TimeoutError") {
+      return "timed out — the server did not answer in time";
+    }
+    if (causeCode === "ECONNREFUSED" || /fetch failed/i.test(error.message)) {
+      return "connection failed — the server is not reachable from the gateway";
+    }
     return error.name;
   }
   return "unknown error";

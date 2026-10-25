@@ -228,6 +228,7 @@ export async function startGatewayHarness(options: StartGatewayOptions = {}): Pr
     "inventory_list_products",
     "inventory_adjust_stock",
     "support_create_ticket",
+    "support_list_tickets",
   ]);
   for (const spec of specs) {
     for (const tool of spec.tools) {
