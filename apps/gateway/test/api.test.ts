@@ -595,6 +595,30 @@ describe("dashboard tool/upstream endpoints (D6, D24)", () => {
     }
   });
 
+  test("GET /upstreams?refresh=1 re-probes upstreams live; plain GET stays cached (REGRESSION)", async () => {
+    const fx = makeFixture();
+    active = await startApi(fx);
+    const registry = fx.registry as unknown as { refreshCalls: number };
+    assert.equal(registry.refreshCalls, 0);
+
+    // Plain GET: fast path — no live probe (health is the cached last-known).
+    const plain = await call(active, "GET", "/upstreams", fx.adminKey);
+    assert.equal(plain.status, 200);
+    assert.equal(registry.refreshCalls, 0, "plain GET must not force probes");
+
+    // ?refresh=1: the dashboard Refresh button — exactly one live re-probe.
+    const refreshed = await call(active, "GET", "/upstreams?refresh=1", fx.adminKey);
+    assert.equal(refreshed.status, 200);
+    assert.equal(registry.refreshCalls, 1, "refresh=1 must trigger one live re-probe");
+    const body = (await refreshed.json()) as { upstreams: unknown[] };
+    assert.ok(Array.isArray(body.upstreams) && body.upstreams.length > 0);
+
+    // Members may refresh too (status is not admin-only).
+    const member = await call(active, "GET", "/upstreams?refresh=1", fx.readerKey);
+    assert.equal(member.status, 200);
+    assert.equal(registry.refreshCalls, 2);
+  });
+
   test("GET /upstreams carries observability stats per server (stand-out 8), safe for members", async () => {
     const fx = makeFixture();
     active = await startApi(fx);

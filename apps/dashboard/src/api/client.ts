@@ -337,8 +337,9 @@ export function createApiClient(fetchImpl: FetchLike = (...args) => fetch(...arg
     tools(): Promise<ToolsResponse> {
       return request<ToolsResponse>("GET", "/tools");
     },
-    upstreams(): Promise<UpstreamsResponse> {
-      return request<UpstreamsResponse>("GET", "/upstreams");
+    /** `refresh` re-probes every upstream live (the Upstreams page's Refresh). */
+    upstreams(refresh = false): Promise<UpstreamsResponse> {
+      return request<UpstreamsResponse>("GET", refresh ? "/upstreams?refresh=1" : "/upstreams");
     },
     /** Server-enforced, admin-only; ids are validated against the registry upstream. */
     setUpstream(id: string, enabled: boolean): Promise<{ id: string; enabled: boolean; changed: boolean }> {

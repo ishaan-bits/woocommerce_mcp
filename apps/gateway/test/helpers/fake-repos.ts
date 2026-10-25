@@ -495,7 +495,11 @@ export class FakeUpstreamRegistry implements UpstreamRegistry {
     return true;
   }
 
-  async refresh(): Promise<void> {}
+  /** Test spy: how many times a live re-probe was requested (routes ?refresh=1). */
+  refreshCalls = 0;
+  async refresh(): Promise<void> {
+    this.refreshCalls += 1;
+  }
 
   async close(): Promise<void> {}
 }

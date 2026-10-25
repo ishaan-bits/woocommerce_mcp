@@ -551,6 +551,58 @@ PASS/BLOCKED labels in [docs/requirement-matrix.md §15](./docs/requirement-matr
 (including the NetworkPolicy enforcement probe). Summary: 12 PASS, 1 BLOCKED
 (chat-agent product creation — Groq quota, provider untouched), 0 FAIL.
 
+### Expected results & recovery (scaling drill)
+
+A healthy run ends with `RESULT: PASS — multi-replica gateway verified …`
+followed by `PASS: restored deploy/gateway to 1 replica(s)`. If a check shows
+`FAIL`, the script still restores the replica count automatically (trap); to
+re-check by hand: `kubectl -n urumi get pods`, `kubectl -n urumi get deploy
+gateway -o jsonpath='{.spec.replicas}'`, and re-run the drill. Nothing it does
+touches PVCs, databases or secrets.
+
+### Security controls: active by default vs optional
+
+| Control | State | Evidence |
+| --- | --- | --- |
+| API keys hashed (`sha256(key‖pepper)`) + revocable | **active** | `auth-keys.test.ts`, live revoke → 401 (security-demo 3) |
+| Per-user grants, no admin bypass; ungranted tools hidden **and** rejected | **active** | `authz-e2e.test.ts`, live admin 9 vs member 5 tools |
+| Upstream credentials AES-256-GCM at rest, never in responses/logs | **active** | `upstream-credentials.test.ts`, redaction live checks, security-demo 7 |
+| SSRF guard on upstream URLs (allow-list + private/metadata classifier) | **active** | `ssrf.test.ts`, security-demo 2 (boot refusal) |
+| Rate limits (per-key + login throttle) | **active** | `m8-security.test.ts`, security-demo 5–6 |
+| Non-root containers; ServiceAccount tokens not mounted | **active** | 7 `runAsNonRoot` in renders, assertion 2 |
+| No Kubernetes RBAC grants (workloads never touch the K8s API) | **active** | assertion 8 |
+| Sticky-session Service (`sessionAffinity: ClientIP`) for multi-replica | **active** | assertion 9 + `scripts/scale-drill.sh` |
+| **NetworkPolicy (same-namespace-only ingress)** | **optional — off by default** | template real and **enforcement verified on this CNI** (deny-probe blocked, selective, restored); activation **with** `allowIngressNamespaces: [{kubernetes.io/metadata.name: ingress-nginx}]` keeps the demo working (verified live: dashboard 200, storefront 200, same-ns 200). Enabling without the exception blocks the Ingress |
+| TLS / real DNS / public VPS | **not active locally** | documented only — no public deployment claimed |
+
+### Explaining this in an interview (cheat-sheet)
+
+1. **Architecture:** "One MCP gateway is both an MCP *server* (to chat/IDE
+   clients) and an MCP *client* (to three upstream servers). Everything funnels
+   through one `executeToolCall` pipeline — the same authz, rate limits and
+   audit for every caller (D30)."
+2. **Tool names:** "Tools are aggregated as `<upstream>_<tool>` — collisions
+   are impossible by construction; discovery is filtered by what you may call,
+   so ungranted tools are hidden and still rejected if invoked."
+3. **Credentials:** "Client keys never leave the gateway (hashed at rest);
+   upstream credentials are AES-256-GCM ciphertext in Postgres, plaintext only
+   on the wire hop to the upstream (D34). Members see booleans, never values."
+4. **Failure handling:** "One dead upstream fails alone (timeouts, structural
+   errors, per-upstream health); the dashboard reports *why* ('connection
+   failed — not reachable from the gateway'); metrics come from aggregating the
+   audit log (D35/stand-out 8)."
+5. **Scaling:** "Web sessions are Postgres-backed; MCP transport sessions are
+   per-pod, so the Service pins sessions with ClientIP affinity (D37). The
+   drill proves 2 replicas serve sessions and each reaches every upstream — it
+   is explicitly *not* a session-migration test."
+6. **Helm story:** "One chart, two values files; upgrades/rollbacks are
+   revisions over the same PVCs (tested: rev 20 → 21). Production only changes
+   values: DNS, TLS, Secrets, storage class, replicas."
+7. **Honest limits:** "Chat's live LLM turn is quota-blocked (free tier); the
+   VPS path is documented, not deployed; NetworkPolicy is ready and enforced
+   by the CNI but intentionally off until the ingress namespace is
+   allow-listed."
+
 ## Submission checklist
 
 **Mandatory requirements** — ✅ complete and verified (local Kubernetes, Helm

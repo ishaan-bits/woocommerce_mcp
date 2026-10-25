@@ -97,7 +97,7 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
     const id = ++seq.current;
     setState(loading());
     try {
-      const [upstreamRes, toolsRes] = await Promise.all([api.upstreams(), api.tools()]);
+      const [upstreamRes, toolsRes] = await Promise.all([api.upstreams(true), api.tools()]);
       if (id !== seq.current) return;
       setState(loaded({ upstreams: upstreamRes.upstreams, tools: toolsRes.tools }));
       setCheckedAt(Date.now());
@@ -467,7 +467,7 @@ export function UpstreamsPage({ api, me }: { api: ApiClient; me: MeResponse }) {
                   </p>
                 )}
                 {entry.status.configured && (
-                  <p className="muted tiny">Status as of this page load — refresh to re-check.</p>
+                  <p className="muted tiny">Refresh re-probes every server live (not cached state).</p>
                 )}
                 <div id={`server-tools-${entry.id}`} hidden={!isOpen}>
                   <div className="divider" />

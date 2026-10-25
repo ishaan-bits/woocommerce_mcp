@@ -363,6 +363,16 @@ default**; enabling requires the exception. Live status: **not enabled** (by
 choice) — do not claim the policy is active in the running cluster, only that
 it is real, enforced by the CNI when enabled, and correctly rendered.
 
+## 16. Quality pass — reproducibility, a real observability fix, security activation test (2026-10-26)
+
+| Item | Label | Evidence |
+| --- | --- | --- |
+| Scaling drill re-run after fixes | PASS | `bash scripts/scale-drill.sh` → RESULT: PASS (2 replicas, both ready, per-replica upstreams, one MCP session across 4 requests, restored to 1) |
+| **Defect fixed: stale upstream health after an outage restore** (stand-out 8) | PASS | Reproduced live: pod `1/1` while `GET /api/upstreams` still said `reachable:false`; the UI promised "refresh to re-check" but the endpoint returned cached state. Fix: `registry.refresh()` now force-probes (TTL bypass) and `GET /api/upstreams?refresh=1` runs it; the Upstreams page Refresh button passes it. Live proof: outage→restore → plain GET `{inventory: False}` (stale) → `refresh=1` `{inventory: True}`. Regression test: `api.test.ts` "…?refresh=1 re-probes upstreams live; plain GET stays cached" |
+| Security sweep refreshed | PASS | `security-demo.sh` **7/7** (ClusterIP, SSRF boot refusal, revoked-key 401, reader 403+audit, burst rate limit, login throttle, log scrubbing); non-root ×7 in renders; assertion suite now 10/10 |
+| NetworkPolicy activation does not break the demo | PASS | Applied the real `mcp-gateway-allow-in-namespace` policy **with** `allowIngressNamespaces=[ingress-nginx]` live: dashboard 200, storefront 200, gateway→wordpress (same-ns) 200; policy then deleted (default state restored) |
+| Many-tools bonus (4) | NOT IMPLEMENTED — not needed at current scale | 9 tools; grants-filtered listing, qualified names, dashboard search already cover the mechanisms. The PDF's search-then-execute meta-tool is justified at "hundreds of tools" only. Recommended if ever needed: `search_tools`/`run_tool` pair offered above ~25 granted tools |
+
 ## Explicitly not claimed
 
 - **The chat agent's live LLM turn (DoD D3/D4) is NOT claimed as re-verified in

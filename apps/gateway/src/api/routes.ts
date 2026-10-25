@@ -650,6 +650,16 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
       return;
     }
     const isAdmin = principal.role === "admin";
+    // ?refresh=1 re-probes every enabled upstream before answering, so the
+    // dashboard's Refresh button reflects live state (otherwise health is the
+    // cached last-known outcome and can be stale right after an outage).
+    if (req.query.refresh === "1") {
+      try {
+        await deps.registry.refresh();
+      } catch (error) {
+        deps.logger.error("upstream_health_refresh_failed", { error: String(error) });
+      }
+    }
     const health = deps.registry.health();
     // Observability (stand-out 8): per-server metrics aggregated from the
     // audit log. Failures degrade to "no stats" — never block the endpoint.

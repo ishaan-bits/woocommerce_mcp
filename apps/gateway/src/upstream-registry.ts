@@ -285,10 +285,10 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
     }
   }
 
-  async function toolsFor(state: UpstreamState): Promise<ToolDescriptor[]> {
+  async function toolsFor(state: UpstreamState, force = false): Promise<ToolDescriptor[]> {
     const ttlExpired =
       state.cached !== null && now() - state.cached.fetchedAt >= options.toolCacheTtlMs;
-    if (state.cached !== null && !ttlExpired) {
+    if (!force && state.cached !== null && !ttlExpired) {
       return state.cached.tools;
     }
     try {
@@ -499,10 +499,25 @@ export function createUpstreamRegistry(options: UpstreamRegistryOptions): Upstre
     },
 
     async refresh(): Promise<void> {
-      const tools = await this.listAggregatedTools();
+      // Force a live re-probe of every enabled upstream (bypassing the tool
+      // cache) so health/reachable/last_error reflect reality NOW — the
+      // dashboard's Refresh button promises a re-check, and a stale
+      // "unreachable" after an outage-restore is exactly wrong (stand-out 8).
+      let tools = 0;
+      for (const state of states) {
+        if (!enabledOf(state)) {
+          continue;
+        }
+        try {
+          tools += (await toolsFor(state, true)).length;
+        } catch {
+          // Failure is already recorded in state.lastErrorMessage; keep
+          // refreshing the remaining upstreams.
+        }
+      }
       logger.info("tool_registry_refreshed", {
         upstreams: states.filter((state) => enabledOf(state)).length,
-        tools: tools.length,
+        tools,
       });
     },
 
