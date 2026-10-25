@@ -124,7 +124,7 @@ items, which the PDF itself marks non-mandatory.
 | Stand-out 6: security hardening — SSRF protection when admin adds a URL | ✅ for config URLs **and** admin-entered dynamic URLs (Phase 1): the C4 allow-list + private-address classifier run on create/edit; metadata addresses refused at boot | `apps/gateway/src/config.ts` (`assertUpstreamTargetAllowed`), `upstream-crud.test.ts` ("URL validation applies the C4 private-address allow-list") |
 | Stand-out 6: NetworkPolicies / non-root | 🟡 deny-by-default `NetworkPolicy` template exists but disabled (kind's kindnet can't enforce it, documented); containers run non-root ✅ | `templates/networkpolicy.yaml`, `infra/helm/README.md` "Milestone 8 security posture" |
 | Stand-out 6: **upstream credentials encrypted at rest** | ✅ AES-256-GCM vault (Phase 1): ciphertext in Postgres, AAD-bound to the upstream id, 503 fail-closed without the key | `apps/gateway/src/upstream-credentials.ts`, `upstream-credentials.test.ts`, migration `004_dynamic_upstreams.sql` |
-| Stand-out 7: multi-replica gateway | not attempted (single replica); rate limits exist (per-bucket keys, `limits.ts`) | `values-prod.yaml` shows the 2-replica shape |
+| Stand-out 7: multi-replica gateway + rate limits per key | ✅ implemented **and verified** | per-key rate limits (`limits.ts`) + PG-backed web sessions + Service `sessionAffinity: ClientIP` (MCP transports are per-pod in-memory — D37); chart assertions 8/9; **drill 2026-10-26**: `replicas=2` → both pods reach all 3 upstreams (`/readyz` per pod), one MCP session survived initialize→tools/list→tools/call→tools/list through the Service, dashboard login OK, restored to 1. Local values keep 1 replica (RAM) |
 | Stand-out 8: metrics (calls/error rate/latency per server) + clear failure reasons | ✅ implemented + verified | `db/postgres-audit-repository.ts` `toolStats()` (SQL aggregation over the audit log), `GET /api/upstreams` `stats` field, Upstreams page line, `upstream-registry.ts` friendly `describeError`; tests: `api.test.ts`, `postgres.test.ts`, dashboard `selectors.test.ts`; **live 2026-10-26**: real stats shown, and `last_error` during a pod-kill reads "connection failed — the server is not reachable from the gateway" (was `TypeError`) |
 | Stand-out 9: upgrade/rollback with Helm | ✅ documented **and tested** | `infra/helm/README.md` "Upgrades and rollback"; drill **2026-10-26**: `helm upgrade` → revision 20, `helm rollback` → revision 21, 9/9 pods + 3 PVCs + all data intact |
 
@@ -313,6 +313,22 @@ Gate after the change: `TEST_DATABASE_URL=… bash scripts/check.sh` → **rc 0,
 582/582** (110 dashboard + 325 gateway incl. 15 PostgreSQL integration + 39
 inventory + 38 support + 70 woocommerce); `npm audit` 0 (body-parser fix
 included in the rebuilt images).
+
+## 14. Post-audit improvements — stand-out 7 + verification sweep (2026-10-26)
+
+Bonus-phase selection from the stand-out audit (A–E priorities): the only
+category with a real, safely closable gap was **scaling** (7); security (B) got
+a verification sweep + two new chart assertions; many-tools (E) was evaluated
+and correctly left alone; multi-store bonus judged unachievable within scope.
+
+| Change | Files | Evidence |
+| --- | --- | --- |
+| Multi-replica gateway verified + documented (D37) | `infra/helm/README.md` "Scaling the gateway", `docs/decisions.md` D37 | live drill: 2 pods, per-pod upstream connectivity, single MCP session across requests (ClientIP affinity live-confirmed), dashboard PG session OK |
+| Chart assertions 8–9 (least-privilege RBAC-free renders; multi-replica pinning) | `scripts/security/assert-helm-security.sh` | `ASSERT OK` 9/9 inside `check.sh`; prod `gateway.replicas: 2` enforced |
+| Live security sweep refreshed | `scripts/security-demo.sh` | **7/7 PASS 2026-10-26** (ClusterIP internals, SSRF boot refusal, revoked-key 401, reader 403+audit, burst rate-limit, login throttle, log scrubbing) |
+| Many-tools (4) evaluated, no code | this section + README | 9 tools; grants-filtered listing + dashboard search + qualified names already scale; per PDF "implement only if genuinely needed" |
+
+Gate: `check.sh` rc 0, **582/582**, helm assertions **9/9**, `npm audit` 0.
 
 ## Explicitly not claimed
 

@@ -492,6 +492,35 @@ revision 20 ("Upgrade complete"); `helm rollback urumi 19` produced revision 21
 remained `Bound`, and store data (orders, products) and API keys were intact.
 Upgrade-then-rollback of a chart with a failed change is the same two commands.
 
+## Scaling the gateway (multi-replica)
+
+`values-prod.yaml` runs **2 gateway replicas**; the local values keep 1 (RAM).
+The chart is multi-replica-safe by construction:
+
+- **MCP transport sessions** (`mcp-session-id`) live **in memory per gateway
+  pod** (`app.ts`), so the gateway Service hardcodes `sessionAffinity:
+  ClientIP` — a session's requests stay on the pod that created it.
+- **Dashboard cookie sessions** are PostgreSQL-backed (`web_sessions`) and
+  work from any replica.
+- Per-key **rate limits are per process** — with N replicas each key gets up
+  to N× the single-process burst (documented trade-off; a shared limiter would
+  need external state and is out of scope at this scale).
+
+**Tested drill (2026-10-26, stand-out 7):**
+
+```bash
+kubectl -n urumi scale deploy/gateway --replicas=2
+# both pods report ready and independently reach every upstream
+#   (exec /readyz in each pod), and a single MCP session — initialize →
+#   tools/list → tools/call → tools/list — survives across requests
+#   through the Service (ClientIP affinity pins it). Dashboard login works.
+kubectl -n urumi scale deploy/gateway --replicas=1   # restore local state
+```
+
+Chart assertions `8`/`9` in `scripts/security/assert-helm-security.sh` pin
+the two invariants: no Kubernetes RBAC objects (these workloads never touch
+the K8s API) and `sessionAffinity: ClientIP` + `gateway.replicas: 2` in prod.
+
 ## Local vs production values
 
 | Concern | `values-local.yaml` | `values-prod.yaml` |

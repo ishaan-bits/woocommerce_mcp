@@ -1082,3 +1082,31 @@ list" depends on grants — intentional. `toolStats` grows with the audit log
 Coverage: `authz-e2e.test.ts` (hiding, both directions), `upstream-crud.test.ts`
 (hidden-until-granted golden path), `api.test.ts` + `postgres.test.ts` (stats),
 dashboard `selectors.test.ts` (summary line); live-verified on kind 2026-10-26.
+
+## D37 — Multi-replica gateway: sticky MCP sessions, shared web sessions
+
+**Context.** Stand-out 7 asks for more than one gateway replica with sessions
+and upstream connections still working. The audit (2026-10-26) found the real
+constraint: MCP transport sessions are an **in-memory `Map` per gateway pod**
+(`app.ts`), while dashboard cookie sessions live in PostgreSQL.
+
+**Decision.** Keep MCP sessions in-process (no new state service — ₹0 and
+simple) and make routing replica-safe instead: the gateway Service hardcodes
+`sessionAffinity: ClientIP` in the chart, so a session's requests always land
+on its own pod. Web sessions are already replica-agnostic (Postgres).
+Rate limits stay per-process per-key (each key's burst grows with replicas —
+the honest trade-off versus a shared limiter, which would need external state).
+Verification: chart assertions 8/9 (no RBAC objects; affinity + prod
+replicas=2) and a live two-replica drill (both pods reach all upstreams; one
+MCP session completed initialize → tools/list → tools/call → tools/list
+through the Service; dashboard login fine; restored to 1 replica).
+
+**Alternatives considered.** Shared session store (Redis/Postgres for MCP
+transports) — rejected: new dependency + protocol-surface risk for no
+assignment benefit at this scale. Per-replica Ingress without affinity —
+rejected: breaks Streamable HTTP sessions (a documented MCP gotcha).
+
+**Trade-offs.** ClientIP affinity assumes one client IP per caller (fine
+behind the documented port-forward/Ingress; a large NAT'd audience would want
+cookie/hash affinity at the LB). Scaling adds RAM cost on small hosts — local
+values therefore keep 1 replica and document the drill.

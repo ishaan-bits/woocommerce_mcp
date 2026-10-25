@@ -142,4 +142,22 @@ for render in local prod; do
   [ "$mode" = "$want" ] || fail "$render render: store mode '$mode' disagrees with store URL '$url' (expected '$want')"
 done
 
+echo "==> 8. least privilege: no Kubernetes RBAC grant objects in any render"
+for render in local prod; do
+  if grep -qE "^kind: (Role|RoleBinding|ClusterRole|ClusterRoleBinding)$" "$WORKDIR/$render.yaml"; then
+    fail "$render render contains RBAC grant objects — these workloads never talk to the Kubernetes API"
+  fi
+done
+
+echo "==> 9. multi-replica safety: gateway Service pins MCP sessions; prod runs 2 replicas"
+# MCP transport sessions live in memory per gateway pod (app.ts), so sticky
+# routing (sessionAffinity: ClientIP) is what makes replicas > 1 safe. The
+# dashboard's cookie sessions are PostgreSQL-backed and replica-agnostic.
+for render in local prod; do
+  grep -q "sessionAffinity: ClientIP" "$WORKDIR/$render.yaml" \
+    || fail "$render render: gateway Service missing sessionAffinity: ClientIP"
+done
+prod_replicas=$(awk '/^gateway:/ {g=1} g && /replicas:/ {print $2; exit}' "$CHART/values-prod.yaml")
+[ "$prod_replicas" = "2" ] || fail "values-prod.yaml gateway.replicas is '$prod_replicas', expected 2"
+
 echo "ASSERT OK: helm security assertions passed (local + prod renders)"
