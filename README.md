@@ -51,9 +51,12 @@ with the two demo identities (admin-demo / reader-demo). Everything is verified
 free-tier quota (below). For a guided walkthrough
 see [docs/recording-script.md](./docs/recording-script.md) (5–7 minute outline).
 
-**Test results (2026-10-23).** `scripts/check.sh` → **574/574** (106 dashboard +
+**Test results (2026-10-26).** `scripts/check.sh` → **575/575** (107 dashboard +
 321 gateway incl. 14 PostgreSQL integration + 39 inventory + 38 support + 70
-woocommerce), Helm security assertions 7/7, `npm audit` 0, secret scans clean.
+woocommerce), Helm security assertions 7/7, `npm audit` **0 vulnerabilities**
+(a high-severity `body-parser` DoS advisory, GHSA-27r3-jxmh-p828, was resolved
+by a lockfile-only bump to `body-parser@2.4.0` — no manifest or API changes),
+secret scans clean.
 
 **Dashboard UI.** The React dashboard is a dark-first developer control plane
 (refined violet/indigo design system, collapsible icon sidebar, per-page
