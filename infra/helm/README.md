@@ -410,8 +410,10 @@ public host exists); Ingress routing was still a gap at this point — the
 chart's Ingress was rendered and dry-run-validated only (since closed in
 Milestone 11 Phase 3: `ingress-nginx` installed on kind, storefront route
 added, both hosts verified — see "Access" above); NetworkPolicy
-enforcement (Kind's kindnet does not enforce policies — the local values keep
-it off); multi-replica gateway behaviour (local values use 1
+enforcement (VERIFIED 2026-10-26: kindnet in kind v0.33 DOES enforce —
+see the probe in `docs/requirement-matrix.md` §15; the local values keep the
+policy off only because the ingress-nginx namespace must first be allow-listed
+via `networkPolicy.allowIngressNamespaces`); multi-replica gateway behaviour (local values use 1
 replica; prod values specify 2 with `sessionAffinity: ClientIP` on the
 Service).
 
@@ -506,16 +508,17 @@ The chart is multi-replica-safe by construction:
   to N× the single-process burst (documented trade-off; a shared limiter would
   need external state and is out of scope at this scale).
 
-**Tested drill (2026-10-26, stand-out 7):**
+**Tested drill (2026-10-26, stand-out 7)** — automated and safe to re-run:
 
 ```bash
-kubectl -n urumi scale deploy/gateway --replicas=2
-# both pods report ready and independently reach every upstream
-#   (exec /readyz in each pod), and a single MCP session — initialize →
-#   tools/list → tools/call → tools/list — survives across requests
-#   through the Service (ClientIP affinity pins it). Dashboard login works.
-kubectl -n urumi scale deploy/gateway --replicas=1   # restore local state
+bash scripts/scale-drill.sh
 ```
+
+The script saves the original replica count, scales to 2, waits for both,
+checks per-replica upstream reachability (each pod's own `/readyz`), runs a
+real MCP session through the Service (initialize → tools/list → tools/call →
+tools/list on one session), prints PASS/FAIL per step with the checks clearly
+distinguished, and restores the replica count via a trap even on failure.
 
 Chart assertions `8`/`9` in `scripts/security/assert-helm-security.sh` pin
 the two invariants: no Kubernetes RBAC objects (these workloads never touch
@@ -533,7 +536,7 @@ the K8s API) and `sessionAffinity: ClientIP` + `gateway.replicas: 2` in prod.
 | Dashboard `/api` | pod nginx proxies to `http://gateway:8080` | `gatewayUpstream: ""` — Ingress owns `/api` |
 | Access | NodePorts + port-forward | Ingress (`/mcp` + `/api` → gateway, `/` → dashboard), TLS left **off** until a real certificate is supplied |
 | Persistence | 1 Gi | 10 Gi (StorageClass name optional) |
-| NetworkPolicy | off (kindnet does not enforce) | on (requires an enforcing CNI) |
+| NetworkPolicy | off (enable + allow-list the ingress namespace; enforcement verified on this CNI) | on (`networkPolicy.enabled: true` + `allowIngressNamespaces`) |
 
 ## Production checklist (operator-supplied — this repo cannot provide these)
 
@@ -598,7 +601,7 @@ helm upgrade --install urumi infra/helm/mcp-gateway \
 | `kind load docker-image … content digest not found` | Multi-platform index issue — use the `ctr` import loop above. |
 | Config change has no effect | ConfigMaps are read at pod start: `kubectl -n urumi rollout restart deploy/<name>` after edits. |
 | Gateway exits with `Invalid configuration: …` | The Secret is missing keys (or the wrong Secret name): check `secrets.existingSecret` and the seven required keys. |
-| `NetworkPolicy` breaks probes after enabling | Some CNIs treat kubelet probe traffic as external. Verify on your CNI; the local values keep the policy off for exactly this reason. |
+| `NetworkPolicy` breaks probes or the Ingress after enabling | Some CNIs treat kubelet probe traffic as external, and the default policy blocks cross-namespace traffic (the ingress-nginx namespace). Add `networkPolicy.allowIngressNamespaces` and verify probes; enforcement on this cluster is verified (matrix §15). |
 
 ## Cleanup (preserves data by default)
 

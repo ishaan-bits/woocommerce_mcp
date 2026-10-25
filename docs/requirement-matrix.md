@@ -122,7 +122,7 @@ items, which the PDF itself marks non-mandatory.
 | Stand-out 4: handling many tools | not attempted | — |
 | Stand-out 5: hosted MCP servers by container image | not attempted | — |
 | Stand-out 6: security hardening — SSRF protection when admin adds a URL | ✅ for config URLs **and** admin-entered dynamic URLs (Phase 1): the C4 allow-list + private-address classifier run on create/edit; metadata addresses refused at boot | `apps/gateway/src/config.ts` (`assertUpstreamTargetAllowed`), `upstream-crud.test.ts` ("URL validation applies the C4 private-address allow-list") |
-| Stand-out 6: NetworkPolicies / non-root | 🟡 deny-by-default `NetworkPolicy` template exists but disabled (kind's kindnet can't enforce it, documented); containers run non-root ✅ | `templates/networkpolicy.yaml`, `infra/helm/README.md` "Milestone 8 security posture" |
+| Stand-out 6: NetworkPolicies / non-root | ✅ **enforcement verified** + non-root | `templates/networkpolicy.yaml` (same-namespace-only ingress + `networkPolicy.allowIngressNamespaces` exception for the Ingress controller); **live probe 2026-10-26: kindnet (kind v0.33) DOES enforce** — deny-all on one pod blocked same-namespace traffic, unselected pods unaffected, policy deleted → restored; kept disabled by default because enabling it without the ingress-namespace exception breaks the demo Ingress; containers run non-root ✅ |
 | Stand-out 6: **upstream credentials encrypted at rest** | ✅ AES-256-GCM vault (Phase 1): ciphertext in Postgres, AAD-bound to the upstream id, 503 fail-closed without the key | `apps/gateway/src/upstream-credentials.ts`, `upstream-credentials.test.ts`, migration `004_dynamic_upstreams.sql` |
 | Stand-out 7: multi-replica gateway + rate limits per key | ✅ implemented **and verified** | per-key rate limits (`limits.ts`) + PG-backed web sessions + Service `sessionAffinity: ClientIP` (MCP transports are per-pod in-memory — D37); chart assertions 8/9; **drill 2026-10-26**: `replicas=2` → both pods reach all 3 upstreams (`/readyz` per pod), one MCP session survived initialize→tools/list→tools/call→tools/list through the Service, dashboard login OK, restored to 1. Local values keep 1 replica (RAM) |
 | Stand-out 8: metrics (calls/error rate/latency per server) + clear failure reasons | ✅ implemented + verified | `db/postgres-audit-repository.ts` `toolStats()` (SQL aggregation over the audit log), `GET /api/upstreams` `stats` field, Upstreams page line, `upstream-registry.ts` friendly `describeError`; tests: `api.test.ts`, `postgres.test.ts`, dashboard `selectors.test.ts`; **live 2026-10-26**: real stats shown, and `last_error` during a pod-kill reads "connection failed — the server is not reachable from the gateway" (was `TypeError`) |
@@ -329,6 +329,39 @@ and correctly left alone; multi-store bonus judged unachievable within scope.
 | Many-tools (4) evaluated, no code | this section + README | 9 tools; grants-filtered listing + dashboard search + qualified names already scale; per PDF "implement only if genuinely needed" |
 
 Gate: `check.sh` rc 0, **582/582**, helm assertions **9/9**, `npm audit` 0.
+
+## 15. Verification run — mandatory workflows + NetworkPolicy investigation (2026-10-26)
+
+Labels: **PASS** (executed and succeeded now) · **FAIL** · **BLOCKED** (cannot run here) · **NOT IMPLEMENTED**.
+
+| # | Mandatory DoD / requirement check | Label | Evidence from this run |
+| --- | --- | --- | --- |
+| 1 | Storefront + WooCommerce admin accessible | PASS | `shop /` 200, `wp-login.php` 200, dashboard 200 (via ingress) |
+| 2 | Product created through the gateway flow (chat LLM postponed → gateway MCP tool directly) | PASS | `woocommerce_create_product` via `/mcp` → "DoD Drill Product" (`DOD-DRILL-001`) visible on `/shop/` |
+| 2b | …through the chat agent itself | BLOCKED | Groq free-tier quota (postponed by decision; provider untouched) |
+| 3 | Manually placed order visible in WooCommerce and retrievable | PASS | browser-placed order **#19** retrieved via member `woocommerce_list_orders` `[14,15,17,19]` + `get_order` |
+| 4 | External MCP client with a member key connects, discovers permitted tools, retrieves the same order | PASS | member `tools/list` = exactly 5 permitted reads; `get_order #19` ok |
+| 5 | Request routing through two upstreams | PASS | one session: `woocommerce_list_products` + `inventory_list_products` both ok |
+| 6 | Revoking a key rejects the next request | PASS | **disposable** member key issued via `POST /api/keys` → worked → revoked → next request rejected (primary credentials untouched) |
+| 7 | Disabling an upstream removes tools from discovery and prevents execution | PASS | member list 5→4 (inventory gone); forced call → `Upstream 'inventory' is disabled`; re-enable → 5 |
+| 8 | Unavailable upstream does not bring down others | PASS | `inventory-mcp` scaled to 0 → inventory call fails alone, woocommerce ok |
+| 9 | Dashboard reports upstream health correctly | PASS | `/api/upstreams`: inventory `reachable=false` + "connection failed — the server is not reachable from the gateway"; woocommerce healthy |
+| 10 | Audit log: user, server, tool, timestamp, duration, outcome | PASS | product creation → admin; member calls → member; `key_created`/`key_revoked`; `upstream_disabled`/`upstream_enabled`; row fields complete (e.g. woocommerce/list_products/success/55 ms) |
+| 11 | Local K8s/Helm requirements (probes, limits, boundaries, secrets) | PASS | 9/9 deployments with liveness+readiness+limits; 3 PVCs Bound; internals ClusterIP (only demo NodePorts); helm assertions **10/10** |
+| 12 | Persistent data intact | PASS | orders 14/15/17/19 + 5 products (4 seeded + the DoD drill product, left intentionally) |
+| 13 | Scaling (stand-out 7) reproducible | PASS | `bash scripts/scale-drill.sh` → **RESULT: PASS** (2 replicas, per-replica upstreams, one MCP session across 4 requests; restored to 1) |
+
+**NetworkPolicy investigation (Milestone C):** the long-standing caveat was
+**wrong for this cluster**. Empirical probe (deny-all-ingress policy on the
+*unused mock-store pod only*, deleted afterwards): the request was **blocked**
+(reproduced twice), an unselected service stayed at 200, and removing the
+policy restored access → **kindnet (kind v0.33) enforces NetworkPolicy**.
+Consequence discovered: the template policy (same-namespace only) would block
+the `ingress-nginx` namespace — hence the new `networkPolicy.allowIngressNamespaces`
+exception knob (rendering pinned by assertion 10). Policy remains **disabled by
+default**; enabling requires the exception. Live status: **not enabled** (by
+choice) — do not claim the policy is active in the running cluster, only that
+it is real, enforced by the CNI when enabled, and correctly rendered.
 
 ## Explicitly not claimed
 

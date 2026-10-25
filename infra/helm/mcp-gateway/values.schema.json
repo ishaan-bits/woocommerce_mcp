@@ -203,7 +203,12 @@
     "networkPolicy": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "allowIngressNamespaces": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "namespaceSelector matchLabels allowed to reach the pods (e.g. the ingress controller's namespace)"
+        }
       },
       "required": ["enabled"]
     }

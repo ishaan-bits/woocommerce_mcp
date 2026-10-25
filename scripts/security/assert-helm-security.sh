@@ -160,4 +160,31 @@ done
 prod_replicas=$(awk '/^gateway:/ {g=1} g && /replicas:/ {print $2; exit}' "$CHART/values-prod.yaml")
 [ "$prod_replicas" = "2" ] || fail "values-prod.yaml gateway.replicas is '$prod_replicas', expected 2"
 
+echo "==> 10. NetworkPolicy template: same-namespace + explicit ingress-namespace exception renders correctly"
+# The policy is REAL and (verified 2026-10-26) ENFORCED by this cluster's CNI.
+# It stays disabled by default because enabling it also blocks cross-namespace
+# traffic — this check pins the documented exception path for the Ingress.
+netpol=$(helm template urumi "$CHART" -f "$CHART/values-local.yaml" \
+  --set networkPolicy.enabled=true \
+  --set-json 'networkPolicy.allowIngressNamespaces=[{"kubernetes.io/metadata.name":"ingress-nginx"}]')
+# case matching (no pipes): this script runs with pipefail, and `printf | grep -q`
+# is a false failure when grep -q exits early on a match.
+case "$netpol" in
+  *"kind: NetworkPolicy"*) ;;
+  *) fail "networkPolicy.enabled=true renders no NetworkPolicy" ;;
+esac
+case "$netpol" in
+  *"name: mcp-gateway-allow-in-namespace"*) ;;
+  *) fail "NetworkPolicy name missing" ;;
+esac
+case "$netpol" in
+  *"kubernetes.io/metadata.name: ingress-nginx"*) ;;
+  *) fail "allowIngressNamespaces exception did not render into the policy" ;;
+esac
+disabled=$(helm template urumi "$CHART" -f "$CHART/values-local.yaml")
+case "$disabled" in
+  *"kind: NetworkPolicy"*) fail "NetworkPolicy must stay disabled by default (values default)" ;;
+  *) ;;
+esac
+
 echo "ASSERT OK: helm security assertions passed (local + prod renders)"

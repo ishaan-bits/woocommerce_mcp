@@ -112,9 +112,13 @@ Pre-open two browser tabs: `http://dashboard.urumi.test:18080` and
 
 ### 6:30–7:00 — Production story + wrap
 - **Screen:** `infra/helm/README.md` "Deploying to a future VPS" heading.
+- **Do (optional, 30s):** terminal `bash scripts/scale-drill.sh` — it prints
+  PASS lines (2 replicas, per-replica upstreams, one MCP session across
+  requests) and restores the original replica count automatically.
 - **Say:** "Local and VPS differ only through Helm values — real DNS, TLS at
-  the ingress, operator-managed Secrets, storage class, 2 gateway replicas.
-  The VPS path is documented but not executed — nothing public is claimed.
+  the ingress, operator-managed Secrets, storage class, 2 gateway replicas
+  (this drill proves sessions and upstreams survive multi-replica). The VPS
+  path is documented but not executed — nothing public is claimed.
   Everything is free-tier tooling; total cost zero."
 - **Do:** end on the dashboard overview.
 

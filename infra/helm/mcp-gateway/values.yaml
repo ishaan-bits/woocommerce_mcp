@@ -288,3 +288,8 @@ ingress:
 # that enforces NetworkPolicy — Kind's kindnet does not.
 networkPolicy:
   enabled: false
+  # Extra namespaces allowed to reach the pods (added to the same-namespace
+  # rule). Example — keep the Ingress controller reachable when enabling:
+  #   allowIngressNamespaces:
+  #     - kubernetes.io/metadata.name: ingress-nginx
+  allowIngressNamespaces: []

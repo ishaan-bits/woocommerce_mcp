@@ -519,13 +519,37 @@ tests; "verified in cluster" means checked against the running kind cluster):
 | Category | Status | Where | Tests | In cluster? | Limitations |
 | --- | --- | --- | --- | --- | --- |
 | **2. Tool permissions** | ✅ implemented | per-user grants + reader write-ceiling in `apps/gateway/src/auth/authorization.ts`; **unauthorized tools hidden from `tools/list`** (`apps/gateway/src/mcp-server.ts`) and rejected if called directly; identical rule for chat and external clients | `authz-e2e.test.ts` (hiding + rejection), `authorization.test.ts`, dashboard `permissions.test.ts` parity | ✅ verified 2026-10-26: admin sees all 9 tools, member sees only their 5 granted reads (writes hidden) | dashboard *catalogue* intentionally lists everything with permission badges — it is an inspection view, not the client tool list |
-| **6. Security hardening** | ✅ implemented | SSRF allow-list + private-address classifier on every upstream URL (`config.ts`), AES-256-GCM credential vault (`upstream-credentials.ts`, D34), non-root images, `automountServiceAccountToken: false`, log scrubbing | `ssrf.test.ts`, `upstream-credentials.test.ts`, `logger.test.ts`, helm assertions 7/7 | ✅ verified (assertions + live redaction checks) | NetworkPolicy template exists but kind's CNI cannot enforce it (documented) |
+| **6. Security hardening** | ✅ implemented | SSRF allow-list + private-address classifier (`config.ts`), AES-256-GCM credential vault (D34), non-root images, `automountServiceAccountToken: false`, NetworkPolicy template with `allowIngressNamespaces` exception, log scrubbing | `ssrf.test.ts`, `upstream-credentials.test.ts`, `logger.test.ts`, helm assertions 10/10 | ✅ verified — **NetworkPolicy enforcement proven live** (deny-policy probe: blocked, selective, restored; kindnet kind v0.33 enforces) | policy stays disabled by default: enabling without the ingress-namespace exception blocks the demo Ingress |
 | **8. Observability** | ✅ implemented | per-server tool-call metrics (calls, errors, avg/max latency, last call) aggregated from the audit log: `toolStats()` in `db/postgres-audit-repository.ts`, served on `GET /api/upstreams` (`stats`), rendered on the Upstreams page; **clear failure reasons** (`upstream-registry.ts` describeError) | `api.test.ts` (stats shape + member safety), `postgres.test.ts` (SQL aggregation), dashboard `selectors.test.ts` | ✅ verified 2026-10-26: live stats (e.g. woocommerce 215 calls / 2 errors / avg 33 ms) and `last_error` now reads "connection failed — the server is not reachable from the gateway" during a pod-kill drill | metrics cover this gateway's own audit history (not a time-series DB) |
 | **9. Upgrades and rollback** | ✅ documented **and tested** | `infra/helm/README.md` "Upgrades and rollback" | verified drill (below) | ✅ verified 2026-10-26: `helm upgrade` → revision 20; `helm rollback` → revision 21; 9/9 pods, 3 PVCs, all data intact | none |
 | 1. VPS deployment | 🟡 documented only | `values-prod.yaml`, helm README VPS outline | — | ❌ never deployed | no reliable free VPS at ₹0 — explicitly not claimed |
 | **7. Scaling** | ✅ implemented & **verified** | 2 gateway replicas with **sticky MCP sessions** (Service `sessionAffinity: ClientIP` — MCP transports are per-pod in-memory, D37), PG-backed dashboard sessions, per-key rate limits | chart assertions 8/9; rate-limit suites | ✅ 2026-10-26 drill: 2 pods, both reach all upstreams, one MCP session ran initialize→tools/list→tools/call→tools/list through the Service; dashboard login OK | rate limiter is per-process (documented trade-off, D37); local values keep 1 replica (RAM) |
 | 4. Many tools | ✅ evaluated — **not needed** | 9 tools across 3 servers: grants-filtered `tools/list`, dashboard search/filter, qualified names for collisions | — | — | scale-out strategy would add abstraction the PDF itself says to avoid at this size |\n| 3. OAuth · 5. Hosted MCP servers | not attempted | — | — | — | working core prioritized per the PDF |
 | Bonus: multi-store provisioning | **not attempted** | — | — | — | PDF says attempt only after the core; deliberately skipped |
+
+### Reproduce the scaling verification (stand-out 7)
+
+```bash
+bash scripts/scale-drill.sh
+```
+
+Output interpretation: each line is `PASS`/`FAIL`/`BLOCKED`. Two checks must
+not be confused — **check 2** proves *each replica independently reaches every
+upstream* (`/readyz` inside each pod, explicitly labelled "NOT a session
+test"); **check 3** proves *MCP session continuity* (initialize → tools/list →
+tools/call → tools/list on ONE session through the Service while 2 replicas
+run). Sessions are pinned to their pod by `sessionAffinity: ClientIP` — the
+documented design (D37) — so this is **not** a cross-replica session-migration
+test (in-memory MCP sessions cannot migrate). The script restores the original
+replica count via a trap even on failure, never touches PVCs/data, and never
+prints credentials. Latest run (2026-10-26): **RESULT: PASS**.
+
+### Latest verification status (2026-10-26)
+
+Every mandatory definition-of-done item was re-verified live with
+PASS/BLOCKED labels in [docs/requirement-matrix.md §15](./docs/requirement-matrix.md)
+(including the NetworkPolicy enforcement probe). Summary: 12 PASS, 1 BLOCKED
+(chat-agent product creation — Groq quota, provider untouched), 0 FAIL.
 
 ## Submission checklist
 

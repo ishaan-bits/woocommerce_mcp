@@ -304,7 +304,7 @@ service resumed after restore. In-process twin: `test/dod-flow.test.ts` "D9".
 
 | Control | Notes |
 | --- | --- |
-| TLS | Terminated at Ingress; cluster-internal traffic stays on the private network (documented as accepted risk for local; NetworkPolicy in prod values). |
+| TLS | Terminated at Ingress; cluster-internal traffic stays on the private network (accepted risk for local; NetworkPolicy ready and CNI-enforced when enabled). |
 | Secrets in git | Impossible by policy: `.env` git-ignored, `.env.example` holds placeholders only, real values only in Kubernetes Secrets. |
 | Least-privilege RBAC | **Each workload has its own ServiceAccount with `automountServiceAccountToken: false`** (Milestone 8); no `cluster-admin`; the gateway's DB role can `INSERT`/`SELECT` only. |
 | Dependency hygiene | `npm audit` in the check script; lockfile committed; free/open-source dependencies only (budget constraint). |
@@ -427,7 +427,7 @@ bind admins too").
 - **Formal cryptographic review** — we use standard library primitives (SHA-256, CSPRNG,
   `timingSafeEqual`) and standard constructions only.
 - **Non-HTTP lateral movement inside the cluster** — the chart ships a
-  namespace-internal NetworkPolicy (`networkPolicy.enabled`, on in production values),
+  namespace-internal NetworkPolicy (`networkPolicy.enabled`; enforcement VERIFIED on this cluster's CNI — kindnet kind v0.33 — via a live deny-policy probe on 2026-10-26; kept disabled locally only because the ingress-nginx namespace must be allow-listed (`networkPolicy.allowIngressNamespaces`) or the demo Ingress is blocked),
   but enforcement depends on the CNI; egress and per-workload policies remain out of
   scope (documented limitation, not a planned control).
 
