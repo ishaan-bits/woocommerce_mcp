@@ -22,6 +22,16 @@ gateway:
   # of svc/gateway when the ingress controller is not running. Feeds
   # GET /api/settings → the dashboard's Settings page.
   publicUrl: "http://dashboard.urumi.test:18080"
+  # Phase One: optional local LLM fallback (Ollama on the Mac host). The
+  # gateway reaches it via host.docker.internal (verified from pods). The
+  # hosted Groq provider stays primary; on 429/outage the local model answers.
+  # Requires `brew services start ollama` + `ollama pull qwen2.5:3b` on the
+  # host — the app works without it (fallback simply stays unused/errors).
+  llm:
+    fallback:
+      provider: "ollama"
+      baseUrl: "http://host.docker.internal:11434/v1"
+      model: "qwen2.5:3b"
   # Local kind runs plain-http MCP services (ClusterIP, no TLS); D34's
   # registration policy allows http:// URLs so an admin can register a local
   # server from the dashboard. Production (values-prod) keeps https-only.

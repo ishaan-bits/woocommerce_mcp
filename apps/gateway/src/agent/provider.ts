@@ -126,6 +126,8 @@ export interface ProviderResponse {
 
 export interface ChatProvider {
   readonly model: string;
+  /** Human-readable provider identity for reporting (e.g. "groq:openai/gpt-oss-120b"). */
+  readonly label: string;
   complete(request: ProviderRequest): Promise<ProviderResponse>;
 }
 
@@ -137,15 +139,17 @@ type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
  */
 export class OpenAiCompatProvider implements ChatProvider {
   readonly model: string;
+  readonly label: string;
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly fetchImpl: FetchLike;
 
-  constructor(config: LlmConfig, fetchImpl: FetchLike = (...args) => fetch(...args)) {
+  constructor(config: LlmConfig, fetchImpl: FetchLike = (...args) => fetch(...args), label?: string) {
     // Trailing-slash tolerant: `${base}/chat/completions`.
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.apiKey = config.apiKey;
     this.model = config.model;
+    this.label = label ?? config.model;
     this.fetchImpl = fetchImpl;
   }
 

@@ -66,12 +66,15 @@ export class AgentInputError extends Error {
 export class AgentTurnError extends ProviderError {
   readonly toolCalls: ToolCallReport[];
   readonly rounds: number;
+  /** True when both the primary and the local fallback failed (Phase One). */
+  readonly bothProvidersFailed: boolean;
 
   constructor(cause: ProviderError, toolCalls: ToolCallReport[], rounds: number) {
     super(cause.kind, cause.message, cause.status, cause.retryAfterMs);
     this.name = "AgentTurnError";
     this.toolCalls = toolCalls;
     this.rounds = rounds;
+    this.bothProvidersFailed = cause instanceof BothProvidersError;
   }
 }
 
@@ -105,10 +108,18 @@ export interface ChatResult {
   reply: string;
   toolCalls: ToolCallReport[];
   rounds: number;
+  /** Which provider produced the final reply (e.g. "groq:openai/gpt-oss-120b", "ollama:qwen2.5:3b"). */
+  provider: string;
 }
 
 export interface ChatAgentOptions {
   provider: ChatProvider;
+  /**
+   * Optional local fallback (Ollama). Used only when the primary fails for a
+   * reason the fallback can survive (429, connection loss, timeout, rejected
+   * key) — attempted at most once per completion, never re-executing tools.
+   */
+  fallbackProvider?: ChatProvider | null;
   registry: UpstreamRegistry;
   logger: Logger;
   audit: AuditWriter;
@@ -149,6 +160,7 @@ const SYSTEM_PROMPT = [
 export function createChatAgent(options: ChatAgentOptions): ChatAgent {
   const {
     provider,
+    fallbackProvider = null,
     registry,
     logger,
     audit,
@@ -208,6 +220,7 @@ export function createChatAgent(options: ChatAgentOptions): ChatAgent {
      * retryAfterMs so the user gets an honest wait hint and can retry later.
      */
     async function completeWithRetry(
+      target: ChatProvider,
       wire: ProviderMessage[],
       completedToolCalls: ToolCallReport[],
       completedRounds: number,
@@ -222,7 +235,7 @@ export function createChatAgent(options: ChatAgentOptions): ChatAgent {
           );
         }
         try {
-          return await provider.complete({ messages: wire, tools: toolDefinitions, timeoutMs: remaining });
+          return await target.complete({ messages: wire, tools: toolDefinitions, timeoutMs: remaining });
         } catch (error) {
           const providerError = error instanceof ProviderError ? error : null;
           const retryable =
@@ -249,8 +262,60 @@ export function createChatAgent(options: ChatAgentOptions): ChatAgent {
       }
     }
 
+    // Provider chain (Phase One): primary first; a configured local fallback
+    // (Ollama) catches provider-side failures — never tool-side ones. Tool
+    // execution happens strictly AFTER a successful completion, so falling
+    // back can never duplicate a tool call (case G). If the primary's key is
+    // rejected we stop asking it for the rest of the turn (no retry storm on
+    // an invalid key, case D).
+    let providerUsed = provider.label;
+    let primaryRejected = false;
+
+    async function completeViaChain(
+      wire: ProviderMessage[],
+      completedToolCalls: ToolCallReport[],
+      completedRounds: number,
+    ): Promise<ProviderResponse> {
+      let primaryError: unknown = null;
+      if (!primaryRejected) {
+        try {
+          const response = await completeWithRetry(provider, wire, completedToolCalls, completedRounds);
+          providerUsed = provider.label;
+          return response;
+        } catch (error) {
+          primaryError = error;
+          if (error instanceof ProviderError && error.kind === "rejected") {
+            primaryRejected = true;
+          }
+          if (fallbackProvider === null) {
+            throw error;
+          }
+          logger.warn("chat_provider_fallback", {
+            primary: provider.label,
+            primary_kind: error instanceof ProviderError ? error.kind : "unknown",
+          });
+        }
+      }
+      // Fallback: at most once per completion, same bounded retry policy.
+      const target = fallbackProvider;
+      if (target === null) {
+        throw primaryError;
+      }
+      try {
+        const response = await completeWithRetry(target, wire, completedToolCalls, completedRounds);
+        providerUsed = target.label;
+        return response;
+      } catch (fallbackError) {
+        throw wrapPartialError(
+          bothProvidersFailed(primaryError, fallbackError),
+          completedToolCalls,
+          completedRounds,
+        );
+      }
+    }
+
     for (let round = 0; round <= maxToolRounds; round++) {
-      const response = await completeWithRetry(messages, toolCalls, rounds);
+      const response = await completeViaChain(messages, toolCalls, rounds);
 
       if (response.toolCalls.length === 0 || round === maxToolRounds) {
         // Final answer (or the round budget is spent: stop without executing
@@ -261,7 +326,7 @@ export function createChatAgent(options: ChatAgentOptions): ChatAgent {
             : (response.content ?? "").trim() !== ""
               ? (response.content as string).trim()
               : "The model returned an empty response.";
-        return { reply, toolCalls, rounds: round + 1 };
+        return { reply, toolCalls, rounds: round + 1, provider: providerUsed };
       }
 
       rounds = round + 1;
@@ -349,6 +414,31 @@ async function runToolCall(
         message: `Tool call rejected: ${outcome.message}`,
       };
   }
+}
+
+/**
+ * Marker error for "primary AND local fallback failed" so the route can give
+ * the user an honest, distinct message (Phase One 2.4 case F).
+ */
+export class BothProvidersError extends ProviderError {
+  constructor(kind: ProviderError["kind"], message: string, status?: number, retryAfterMs?: number) {
+    super(kind, message, status, retryAfterMs);
+    this.name = "BothProvidersError";
+  }
+}
+
+/**
+ * Both providers failed: one sanitized error naming both failure kinds (never
+ * URLs, keys or bodies), carrying the best available wait hint.
+ */
+function bothProvidersFailed(primary: unknown, fallback: unknown): ProviderError {
+  const p = primary instanceof ProviderError ? primary : null;
+  const f = fallback instanceof ProviderError ? fallback : null;
+  const kind = f?.kind ?? "unavailable";
+  const message =
+    `the primary provider failed (${p?.kind ?? "unknown"}); ` +
+    `the local fallback also failed (${f?.kind ?? "unknown"})`;
+  return new BothProvidersError(kind, message, f?.status ?? p?.status, f?.retryAfterMs ?? p?.retryAfterMs);
 }
 
 /** Attach partial turn state to a provider failure once tools have run. */

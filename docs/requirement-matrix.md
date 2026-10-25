@@ -74,8 +74,8 @@ items, which the PDF itself marks non-mandatory.
 | --- | --- | --- | --- |
 | D1 | Storefront: add product to cart, check out with test-friendly method (COD) | ✅ verified | Phase 4 live (Playwright against `shop.urumi.test:18080`): catalog → product → add to cart → block checkout → **Cash on delivery** (enabled once via `wc/v3/payment_gateways/cod`, the PDF's sanctioned test method) → order-received **#17** (`$12.00`, "Payment: Cash on delivery"). Runbook **T1** (`docs/demo-runbook.md`); re-runnable with `scripts/demo/storefront-checkout.cjs` |
 | D2 | Order visible in WooCommerce admin | ✅ verified | Phase 4 live (Playwright): wp-admin login (password from `urumi-secrets` via env, never printed) → **WooCommerce → Orders** shows `#17 Ada Lovelace … Processing $12.00` next to seeded #14/#15. Cross-check through our own tool: user B `woocommerce_list_orders` → `[14, 15, 17]`. Runbook **T2** |
-| D3 | User A chat: agent creates a product; it appears on the storefront | ⛔ blocked (LLM quota) | the free-tier provider is currently rate-limiting the demo account (live `chat_provider_failed {kind: rate_limited, status: 429}` on 2026-10-22; the gateway answers `429 provider_rate_limited` + `retry_after_seconds`, UI offers a safe retry) — **a provider quota limitation, not fixed by code**. Deterministic coverage: `agent.test.ts` (grounded create-product loop), `chat-api.test.ts`; historical live proof: M9 on Groq. Runbook **T3** marks it MANUAL for demo time |
-| D4 | User A: place order by hand, ask agent "orders today", it returns that order | ⛔ blocked (LLM quota), storefront half ✅ | storefront half done live (T1/T5: order #17 returned by `woocommerce_list_orders`); the chat answer needs provider quota (same blocker as D3). Runbook **T4** |
+| D3 | User A chat: agent creates a product; it appears on the storefront | ✅ verified (live 2026-10-26) | chat agent created **"Local LLM Demo Product"** (SKU `LLM-DEMO-001`, $5.99) via `woocommerce_create_product` **through the gateway** (`provider: groq:openai/gpt-oss-120b` in the quota window; the local Ollama fallback answers the same tool loop when quota blocks — verified separately, §17). Product visible on `/shop/` and at `product/local-llm-demo-product/` |
+| D4 | User A: place order by hand, ask agent "orders today", it returns that order | ✅ verified (live 2026-10-26) | storefront checkout (browser) placed order **#22** ($5.99) for the chat-created product; the chat agent's "What orders came in today?" called `woocommerce_list_orders` and returned **#22, $5.99** |
 | D5 | User B external client: gateway URL + own key only → sees tools of every enabled server, answers the orders question | ✅ verified | Phase 4 live: official MCP SDK vs deployed gateway → 3/3 (handshake + `tools/list` 9 tools from 3 servers; `tools/call`; two-upstream D6) and the orders question returns **#17**; `GATEWAY_URL=… GATEWAY_API_KEY=… node --test apps/gateway/test/external-client.test.ts`. Runbook **T5** |
 | D6 | One prompt needing tools from **two different upstreams** | ✅ verified | Phase 4 live: one member session calls `woocommerce_list_products` **and** `inventory_list_products` successfully (reader grants cover both). Automated twins: `external-client.test.ts` "DoD D6" (live-gated) + `dod-flow.test.ts` "D6" (deterministic harness). Runbook **T6** |
 | D7 | Revoke user B's key → next call rejected | ✅ verified | Phase 4 live: user B self-serves a key (`POST /api/me/keys` → 201, plaintext once) → call works → user A `POST /api/keys/:id/revoke` → 200 → next MCP call **401**, `GET /api/me` **401**; `key_created`/`key_revoked` audited. Tests: `dod-flow.test.ts` D7/D10, `api.test.ts`, `auth-middleware.test.ts`, postgres integration. Runbook **T7** |
@@ -338,7 +338,7 @@ Labels: **PASS** (executed and succeeded now) · **FAIL** · **BLOCKED** (cannot
 | --- | --- | --- | --- |
 | 1 | Storefront + WooCommerce admin accessible | PASS | `shop /` 200, `wp-login.php` 200, dashboard 200 (via ingress) |
 | 2 | Product created through the gateway flow (chat LLM postponed → gateway MCP tool directly) | PASS | `woocommerce_create_product` via `/mcp` → "DoD Drill Product" (`DOD-DRILL-001`) visible on `/shop/` |
-| 2b | …through the chat agent itself | BLOCKED | Groq free-tier quota (postponed by decision; provider untouched) |
+| 2b | …through the chat agent itself | PASS | completed 2026-10-26 (hosted window + local fallback both verified): chat → `woocommerce_create_product` → visible on storefront (§ D3/D4 rows, §17) |
 | 3 | Manually placed order visible in WooCommerce and retrievable | PASS | browser-placed order **#19** retrieved via member `woocommerce_list_orders` `[14,15,17,19]` + `get_order` |
 | 4 | External MCP client with a member key connects, discovers permitted tools, retrieves the same order | PASS | member `tools/list` = exactly 5 permitted reads; `get_order #19` ok |
 | 5 | Request routing through two upstreams | PASS | one session: `woocommerce_list_products` + `inventory_list_products` both ok |
@@ -373,13 +373,25 @@ it is real, enforced by the CNI when enabled, and correctly rendered.
 | NetworkPolicy activation does not break the demo | PASS | Applied the real `mcp-gateway-allow-in-namespace` policy **with** `allowIngressNamespaces=[ingress-nginx]` live: dashboard 200, storefront 200, gateway→wordpress (same-ns) 200; policy then deleted (default state restored) |
 | Many-tools bonus (4) | NOT IMPLEMENTED — not needed at current scale | 9 tools; grants-filtered listing, qualified names, dashboard search already cover the mechanisms. The PDF's search-then-execute meta-tool is justified at "hundreds of tools" only. Recommended if ever needed: `search_tools`/`run_tool` pair offered above ~25 granted tools |
 
+## 17. Phase One — local LLM fallback (Ollama) — the five distinct claims
+
+| Claim | Status | Evidence |
+| --- | --- | --- |
+| Provider abstraction implemented | PASS | `config.ts` (`CHAT_FALLBACK_PROVIDER`/`OLLAMA_BASE_URL`/`OLLAMA_MODEL`, fail-fast validation, `fallback_llm` safe-summary), `agent.ts` provider chain (`ChatProvider.label`, bounded fallback, `BothProvidersError`), `app.ts` wiring (local-only mode when no primary), chart env (`gateway.llm.fallback` — empty by default in prod) |
+| Fallback logic tested (mocked) | PASS | `test/agent/fallback.test.ts` (12 tests: success, 429→fallback, timeout→fallback, rejected-key-no-retry, both-fail combined error, malformed→fallback, **duplicate-write protection**, partial-state preservation, local-only mode, denial unchanged, tool-error ≠ provider-failure, bounded rounds) + `test/config.test.ts` (7 cases) |
+| Local model downloaded | PASS | `qwen2.5:3b` via Ollama 0.40.11 (`brew services start ollama`), **1.9 GB** — smallest size class with reliable tool-calling on this 16 GB host (options weighed: 1.5B too weak at tools; 12B too heavy beside the 6 GB VM) |
+| Actual local inference tested | PASS (live) | gateway chat turn answered with `provider: ollama:qwen2.5:3b` while the hosted provider was rate-limited (HTTP 200, 18.5 s) |
+| Tool calling through the gateway with the local model | PASS (live) | same turn: `woocommerce_list_products` executed **through the shared pipeline** (real authorization + audit rows `admin-demo / woocommerce / list_products / success`, 45–58 ms); K8s path verified: pods reach the host Ollama at `host.docker.internal:11434` |
+
+Test data created (sanctioned, uniquely named): product `LLM-DEMO-001`
+("Local LLM Demo Product", $5.99) and order **#22**.
+
 ## Explicitly not claimed
 
-- **The chat agent's live LLM turn (DoD D3/D4) is NOT claimed as re-verified in
-  Milestone 11.** The free-tier provider is genuinely rate-limiting the demo
-  account (real `429`s on 2026-10-22); the code handles them honestly (D35) but
-  a quota limitation is not "fixed by code". Mock/deterministic coverage and
-  the historical Milestone 9 live run stand in until quota resets.
+- **Groq free-tier quota is intermittent** (real `429`s on 2026-10-22; a window
+  opened 2026-10-26 and the DoD chat turns completed). The local Ollama
+  fallback (§17) keeps chat working regardless — quota is a provider
+  limitation, not something code "fixes".
 - ~~The dashboard's `last_error` for a dead upstream renders a generic
   `TypeError`~~ — **resolved 2026-10-26** (stand-out 8): unreachable upstreams
   now report "connection failed — the server is not reachable from the

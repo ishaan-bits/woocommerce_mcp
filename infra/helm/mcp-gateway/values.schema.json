@@ -32,7 +32,16 @@
           "properties": {
             "model": { "type": "string", "minLength": 1 },
             "baseUrl": { "type": "string" },
-            "requestTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 120000 }
+            "requestTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 120000 },
+            "fallback": {
+              "type": "object",
+              "properties": {
+                "provider": { "type": "string", "enum": ["", "ollama"] },
+                "baseUrl": { "type": "string" },
+                "model": { "type": "string" }
+              },
+              "required": ["provider", "baseUrl", "model"]
+            }
           },
           "required": ["model", "baseUrl", "requestTimeoutMs"]
         },

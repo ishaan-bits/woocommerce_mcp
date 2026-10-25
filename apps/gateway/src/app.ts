@@ -12,7 +12,7 @@ import { createAuditWriter } from "./audit.ts";
 import { createAuthMiddleware, principalOf } from "./auth/middleware.ts";
 import { authorizeToolCall } from "./auth/authorization.ts";
 import { unionUpstreamIds } from "./routing.ts";
-import type { AppConfig } from "./config.ts";
+import { DEFAULT_LLM_BASE_URL, type AppConfig } from "./config.ts";
 import type { AuditRepository } from "./db/audit-repository.ts";
 import type { AuthRepository } from "./db/auth-repository.ts";
 import type { DynamicUpstreamRepository } from "./db/dynamic-upstream-repository.ts";
@@ -150,10 +150,32 @@ export function createApp(options: CreateAppOptions): McpApp {
   // (GROQ_API_KEY or LLM_BASE_URL). Tests inject a scripted provider; the
   // production path builds the OpenAI-compatible client from config. Either
   // way it runs with the *same* rate limiter and audit writer as /mcp.
+  // Provider chain (Phase One): the hosted/primary provider when configured;
+  // an optional local Ollama fallback (never mandatory). Local-only mode: with
+  // no primary configured but a fallback set, the local provider IS the
+  // provider (documented policy — no invalid-key retry loops).
+  const primaryLlm = config.llm;
+  const fallbackLlm = config.fallbackLlm;
+  const primaryLabel =
+    primaryLlm === null
+      ? "none"
+      : primaryLlm.baseUrl === DEFAULT_LLM_BASE_URL
+        ? `groq:${primaryLlm.model}`
+        : `llm:${primaryLlm.model}`;
   const chatAgent =
-    config.llm !== null
+    primaryLlm !== null || fallbackLlm !== null
       ? createChatAgent({
-          provider: options.provider ?? new OpenAiCompatProvider(config.llm),
+          provider:
+            options.provider ??
+            new OpenAiCompatProvider(
+              primaryLlm ?? (fallbackLlm as NonNullable<typeof fallbackLlm>),
+              undefined,
+              primaryLlm !== null ? primaryLabel : fallbackLlm?.providerLabel,
+            ),
+          fallbackProvider:
+            primaryLlm !== null && fallbackLlm !== null
+              ? new OpenAiCompatProvider(fallbackLlm, undefined, fallbackLlm.providerLabel)
+              : null,
           registry,
           logger,
           audit,

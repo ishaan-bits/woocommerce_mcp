@@ -7,6 +7,7 @@ import {
   isAbortError,
   MAX_INPUT_CHARS,
   messageSegments,
+  providerLabel,
   newMessageId,
   PARTIAL_TURN_TEXT,
   partialTurnMessage,
@@ -160,5 +161,14 @@ describe("chat helpers", () => {
     for (const prompt of EXAMPLE_PROMPTS) {
       assert.ok(prompt.length > 0 && prompt.length <= MAX_INPUT_CHARS);
     }
+  });
+});
+
+describe("providerLabel (which model answered)", () => {
+  test("local models read naturally; hosted labels pass through", () => {
+    assert.equal(providerLabel("ollama:qwen2.5:3b"), "local model qwen2.5:3b");
+    assert.equal(providerLabel("groq:openai/gpt-oss-120b"), "groq:openai/gpt-oss-120b");
+    assert.equal(providerLabel(undefined), null);
+    assert.equal(providerLabel(""), null);
   });
 });

@@ -56,6 +56,13 @@ data:
   {{- if .Values.gateway.llm.baseUrl }}
   LLM_BASE_URL: {{ .Values.gateway.llm.baseUrl | quote }}
   {{- end }}
+  {{- if .Values.gateway.llm.fallback.provider }}
+  # Optional local fallback (Phase One): Ollama on the host, no API key.
+  # Empty provider = disabled — the gateway must never require Ollama.
+  CHAT_FALLBACK_PROVIDER: {{ .Values.gateway.llm.fallback.provider | quote }}
+  OLLAMA_BASE_URL: {{ .Values.gateway.llm.fallback.baseUrl | quote }}
+  OLLAMA_MODEL: {{ .Values.gateway.llm.fallback.model | quote }}
+  {{- end }}
   # Milestone 10 (Phase A/B): display label for the woocommerce upstream —
   # which backing store the MCP was pointed at at deploy time. Purely
   # informational for GET /api/upstreams; never a runtime switch.

@@ -393,3 +393,85 @@ describe("GATEWAY_PUBLIC_URL (MCP connection instructions, M10)", () => {
     }
   });
 });
+
+
+describe("local LLM fallback configuration (Phase One)", () => {
+  const base = {
+    API_KEY_PEPPER: "test-pepper-1234567890",
+    DATABASE_URL: "postgres://user:pass@localhost:5432/db",
+    GROQ_API_KEY: "gsk_test_fake_key_never_real",
+    WOOCOMMERCE_MCP_URL: "http://woocommerce-mcp:8081/mcp",
+  };
+
+  test("absent fallback config means no fallback (production default)", () => {
+    const config = loadConfig(base);
+    assert.equal(config.fallbackLlm, null);
+  });
+
+  test("CHAT_FALLBACK_PROVIDER=ollama + OLLAMA_MODEL enables a keyless local provider", () => {
+    const config = loadConfig({
+      ...base,
+      CHAT_FALLBACK_PROVIDER: "ollama",
+      OLLAMA_MODEL: "qwen2.5:3b",
+    });
+    assert.equal(config.fallbackLlm?.providerLabel, "ollama:qwen2.5:3b");
+    assert.equal(config.fallbackLlm?.apiKey, "", "local inference needs no API key");
+    assert.equal(config.fallbackLlm?.baseUrl, "http://host.docker.internal:11434/v1");
+  });
+
+  test("OLLAMA_BASE_URL overrides the default host connection", () => {
+    const config = loadConfig({
+      ...base,
+      CHAT_FALLBACK_PROVIDER: "ollama",
+      OLLAMA_MODEL: "qwen2.5:3b",
+      OLLAMA_BASE_URL: "http://127.0.0.1:11434/v1",
+    });
+    assert.equal(config.fallbackLlm?.baseUrl, "http://127.0.0.1:11434/v1");
+  });
+
+  test("provider without a model is a clear configuration error", () => {
+    assert.throws(
+      () => loadConfig({ ...base, CHAT_FALLBACK_PROVIDER: "ollama" }),
+      (error: unknown) => String(error).includes("OLLAMA_MODEL is required"),
+    );
+  });
+
+  test("model without a provider is a clear configuration error", () => {
+    assert.throws(
+      () => loadConfig({ ...base, OLLAMA_MODEL: "qwen2.5:3b" }),
+      (error: unknown) => String(error).includes("CHAT_FALLBACK_PROVIDER is missing"),
+    );
+  });
+
+  test("unknown fallback provider names and non-URL bases are rejected", () => {
+    assert.throws(
+      () => loadConfig({ ...base, CHAT_FALLBACK_PROVIDER: "openai-local", OLLAMA_MODEL: "m" }),
+      (error: unknown) => String(error).includes("CHAT_FALLBACK_PROVIDER"),
+    );
+    assert.throws(
+      () =>
+        loadConfig({
+          ...base,
+          CHAT_FALLBACK_PROVIDER: "ollama",
+          OLLAMA_MODEL: "m",
+          OLLAMA_BASE_URL: "not-a-url",
+        }),
+      (error: unknown) => String(error).includes("OLLAMA_BASE_URL"),
+    );
+  });
+
+  test("local-only mode: fallback without any primary still configures the agent", () => {
+    const config = loadConfig({
+      API_KEY_PEPPER: "test-pepper-1234567890",
+      DATABASE_URL: "postgres://user:pass@localhost:5432/db",
+      WOOCOMMERCE_MCP_URL: "http://woocommerce-mcp:8081/mcp",
+      CHAT_FALLBACK_PROVIDER: "ollama",
+      OLLAMA_MODEL: "qwen2.5:3b",
+    });
+    assert.equal(config.llm, null, "no primary provider");
+    assert.equal(config.fallbackLlm?.model, "qwen2.5:3b");
+    const summary = safeConfigSummary(config);
+    assert.equal(summary.fallback_llm.configured, true);
+    assert.equal(summary.llm.configured, false);
+  });
+});

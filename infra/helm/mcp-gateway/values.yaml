@@ -56,6 +56,14 @@ gateway:
     model: "openai/gpt-oss-120b"       # Groq free-tier default (README, D29)
     baseUrl: ""                        # "" = provider default (api.groq.com)
     requestTimeoutMs: 45000
+    # Optional local fallback (Phase One): Ollama on the developer machine,
+    # reached from pods via host.docker.internal. Set provider to "ollama" and
+    # a model to enable; empty provider = no fallback (production default —
+    # the app must never REQUIRE Ollama). No API key is involved.
+    fallback:
+      provider: ""
+      baseUrl: "http://host.docker.internal:11434/v1"
+      model: ""
   # Externally reachable base URL of this gateway (no path) — rendered into
   # GATEWAY_PUBLIC_URL so GET /api/settings can print accurate MCP-client
   # connection instructions. "" = unknown: the endpoint then returns null and

@@ -21,6 +21,7 @@ export interface ScriptedTurn {
 
 export class ScriptedProvider implements ChatProvider {
   readonly model = "scripted-test-double";
+  label = "scripted";
   readonly requests: ProviderRequest[] = [];
   private readonly queue: ScriptedTurn[];
 

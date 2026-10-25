@@ -13,6 +13,8 @@ export interface ChatMessage {
   toolCalls?: Array<{ name: string; outcome: string; error?: string }>;
   /** Assistant turns produced by a failed request can be retried. */
   rounds?: number;
+  /** Which provider produced this reply (e.g. "ollama:qwen2.5:3b"). */
+  provider?: string;
 }
 
 /** How many prior turns we send back (the server bounds this too). */
@@ -162,4 +164,14 @@ function pushInline(segments: MessageSegment[], chunk: string): void {
   if (last < chunk.length) {
     segments.push({ type: "text", value: chunk.slice(last) });
   }
+}
+
+/**
+ * Short, honest label for which model served a reply (Phase One 2.8).
+ * Returns null when the gateway sent no provider info.
+ */
+export function providerLabel(provider: string | null | undefined): string | null {
+  if (provider === null || provider === undefined || provider === "") return null;
+  if (provider.startsWith("ollama:")) return `local model ${provider.slice("ollama:".length)}`;
+  return provider;
 }

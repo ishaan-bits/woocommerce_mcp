@@ -100,6 +100,46 @@ beginner-friendly language.
 
 ---
 
+## Architecture at a glance
+
+Two flows matter. First, a **tool call** — the browser never talks to an
+upstream MCP server directly; every call goes through the authenticated
+gateway, which enforces permissions and writes an audit row:
+
+```mermaid
+flowchart LR
+  U["User / client<br/>(browser chat, IDE, MCP Inspector)"] -->|"POST /mcp or /api/chat<br/>Bearer key or session"| G["MCP gateway<br/>authn → authz → rate limit → audit"]
+  G -->|"qualified tool name<br/>&lt;upstream&gt;_&lt;tool&gt;| R["Upstream registry<br/>(enabled servers only)"]
+  R --> W["woocommerce-mcp"]
+  R --> I["inventory-mcp"]
+  R --> S["support-mcp"]
+  W --> ST["WordPress + WooCommerce<br/>+ MariaDB (PVC)"]
+  I --> D1["seeded demo data"]
+  S --> D2["seeded demo data"]
+  G -.->|never exposed to the browser| ST
+```
+
+Second, a **chat turn** — the chat agent is *inside* the gateway process and
+re-uses the exact same execution pipeline as `/mcp`:
+
+```mermaid
+flowchart LR
+  U["User (dashboard chat)"] --> A["Chat agent (gateway)<br/>history + tool definitions"]
+  A --> P["LLM provider<br/>primary: hosted · fallback: local Ollama"]
+  P -->|"tool_calls (validated)| A
+  A -->|"same executeToolCall pipeline<br/>authz + rate limit + audit"| G["MCP gateway"]
+  G --> W["authorized upstream tool"]
+  W -->|"tool result (untrusted data)"| A
+  A --> P
+  P -->|"final answer"| U
+```
+
+Three run-time contexts, one code path: **local host inference** (Ollama on
+the Mac, reached by the gateway via `host.docker.internal` — optional, never
+required) · **Kubernetes application components** (everything above runs in
+the `urumi` namespace on kind) · **production-like Helm values** (same chart;
+DNS, TLS, Secrets, storage class and replicas change — no code changes).
+
 ## Current status
 
 **Milestone 0 complete (scaffold), Milestone 1 complete (WooCommerce MCP server),
@@ -357,6 +397,38 @@ reads every credential from a Kubernetes Secret (dev placeholders locally,
 operator-created in production). An API key must be bootstrapped before any
 tool call — exact commands in [infra/helm/README.md](./infra/helm/README.md).
 
+### Optional local LLM (Ollama) — chat fallback
+
+The chat agent's **primary** provider is the hosted Groq free tier (whose
+quota is often exhausted — a real HTTP 429). An **optional local fallback**
+lets chat keep working with **zero cost and zero external dependency**:
+
+```bash
+brew install ollama && brew services start ollama   # free, local, no API key
+ollama pull qwen2.5:3b                              # ~1.9 GB; verified tool-calling
+```
+
+Then `values-local.yaml` (already wired) enables it:
+
+```yaml
+gateway:
+  llm:
+    fallback:
+      provider: "ollama"
+      baseUrl: "http://host.docker.internal:11434/v1"   # verified reachable from pods
+      model: "qwen2.5:3b"
+```
+
+Behaviour (documented policy, `docs/decisions.md` D39): primary succeeds →
+primary answers; primary 429 / unreachable / timeout / invalid key → the
+local model answers **through the same gateway tool loop** (never a second
+execution path); both fail → one honest error naming both, the turn's
+completed tool calls are preserved, and Retry re-sends safely. The response
+reports `provider` (e.g. `ollama:qwen2.5:3b`) and the chat UI shows
+"Using local model …". **Ollama is never mandatory**: production values leave
+it unset, the gateway boots and everything else works without it, and it is
+not exposed through Ingress.
+
 ### Local URLs, login flow, and troubleshooting
 
 The local domain approach (K6): the chart's Ingress gives the demo two stable
@@ -574,6 +646,59 @@ touches PVCs, databases or secrets.
 | Sticky-session Service (`sessionAffinity: ClientIP`) for multi-replica | **active** | assertion 9 + `scripts/scale-drill.sh` |
 | **NetworkPolicy (same-namespace-only ingress)** | **optional — off by default** | template real and **enforcement verified on this CNI** (deny-probe blocked, selective, restored); activation **with** `allowIngressNamespaces: [{kubernetes.io/metadata.name: ingress-nginx}]` keeps the demo working (verified live: dashboard 200, storefront 200, same-ns 200). Enabling without the exception blocks the Ingress |
 | TLS / real DNS / public VPS | **not active locally** | documented only — no public deployment claimed |
+
+### Explaining this in an interview (30 s / 2 min / 5 min)
+
+**30 seconds.** "A team **MCP gateway on Kubernetes**: one authenticated
+endpoint in front of a real WooCommerce store and two more backends. Every
+tool call — from the dashboard chat or any IDE — goes through one pipeline
+that enforces per-user permissions, rate limits and an audit trail, with
+encrypted upstream credentials. It scales to two gateway replicas and falls
+back to a **local LLM (Ollama)** when the free-tier provider is
+rate-limited — all at ₹0."
+
+**2 minutes.** Everything in the 30-second pitch, plus: tools are named
+`<upstream>_<tool>` so collisions are impossible; ungranted tools are hidden
+*and* rejected; one dead upstream fails alone and the dashboard says why;
+chat runs the same `executeToolCall` path as `/mcp` (no privileged back door);
+keys are stored as `sha256(key‖pepper)`; upstream credentials are AES-256-GCM
+at rest; upgrades/rollbacks are Helm revisions over persistent volumes; an
+automated `scripts/scale-drill.sh` proves two replicas serve sessions
+(ClientIP affinity — MCP sessions are per-pod by design).
+
+**5 minutes.** All of the above, then walk `docs/demo-runbook.md` T1–T11
+live: storefront checkout → order in WooCommerce admin → external MCP client
+with a member key → two-upstream prompt → revoke a disposable key → disable
+an upstream → kill a pod (isolation + health) → audit attribution →
+`bash scripts/scale-drill.sh` → chat with the local model if the hosted quota
+is blocked. Finish with the honest limitations.
+
+### The trade-offs worth being able to defend
+
+- **Why a gateway at all?** N clients × M backends becomes N+M integrations
+  instead of N×M, and one place enforces identity, permissions, limits and
+  auditing. Cost: a hop and a single component to operate.
+- **Why hashed API keys?** A leaked database must not leak usable
+  credentials (`sha256(key‖pepper)`, revocable, prefix for lookup only).
+- **Why can't the browser execute upstream tools directly?** Upstream
+  credentials live server-side; the browser holds only a user key. This keeps
+  SSRF, credentials and audit in one enforced choke point.
+- **How do tool permissions work?** Per-user grant lists + a role ceiling
+  (members cannot call write verbs even if granted) — identical for chat and
+  external clients (D30).
+- **How does failure isolation work?** Per-upstream timeouts, bounded
+  concurrency, structural errors (`isError`/clear messages), health tracked
+  per server — one outage never takes the list down.
+- **Sessions with multiple replicas:** dashboard sessions are Postgres-backed
+  (replica-agnostic); MCP transport sessions are per-pod, so the Service pins
+  them with `ClientIP` affinity (D37). The drill proves continuity, not
+  session migration.
+- **Why is Ollama optional?** The assignment must not depend on any
+  provider's quota — the local fallback keeps chat usable at ₹0, and
+  production never requires a developer's laptop.
+- **What remains unimplemented:** live VPS deployment (documented only),
+  OAuth, hosted MCP-server orchestration, multi-store provisioning, and the
+  many-tools meta-tool (evaluated: unnecessary at nine tools).
 
 ### Explaining this in an interview (cheat-sheet)
 

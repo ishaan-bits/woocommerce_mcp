@@ -1110,3 +1110,38 @@ rejected: breaks Streamable HTTP sessions (a documented MCP gotcha).
 behind the documented port-forward/Ingress; a large NAT'd audience would want
 cookie/hash affinity at the LB). Scaling adds RAM cost on small hosts — local
 values therefore keep 1 replica and document the drill.
+
+## D38 — Upstream health: cached for speed, refreshed on demand
+
+**Context.** `/api/upstreams` deliberately makes no connections (fast status
+page), so `reachable` is the *last known* outcome — after an outage restore the
+dashboard showed `reachable:false` for a healthy pod.
+
+**Decision.** Keep the fast cached path for reads and make the Refresh button
+honest: `GET /api/upstreams?refresh=1` force-probes every enabled upstream
+(tool-cache bypass) before answering; the plain GET stays cached. Trade-off:
+refresh costs one round-trip per upstream (~50 ms each) — acceptable for an
+explicit user action. Regression test pins "plain GET probes nothing;
+refresh=1 probes exactly once" (`api.test.ts`).
+
+## D39 — Chat provider chain: hosted primary, optional local Ollama fallback
+
+**Context.** The hosted free-tier provider returns HTTP 429 when its quota is
+exhausted; the assignment must not depend on any provider's quota (₹0), and a
+local model must never bypass the gateway tool loop.
+
+**Decision.** Reuse the existing `ChatProvider` abstraction for an optional
+local fallback (Ollama's OpenAI-compatible endpoint, `host.docker.internal`
+— verified reachable from pods). Policy: primary succeeds → primary; primary
+429 / unreachable / timeout / **rejected key** → the fallback (at most once
+per completion; an invalid primary key is never re-asked within a turn); both
+fail → one sanitized error naming both kinds (`BothProvidersError`), the
+turn's completed tool calls preserved, safe Retry. Every response reports
+`provider` (UI shows "Using local model …"). Fallback runs the SAME
+`executeToolCall` pipeline — no second execution path, no broader permissions
+than the user. Configuration is env-only (`CHAT_FALLBACK_PROVIDER`,
+`OLLAMA_BASE_URL`, `OLLAMA_MODEL`) with fail-fast validation; production
+leaves it unset and never requires Ollama. Tool execution happens only after a
+successful completion, so a provider fallback can never duplicate a tool call
+(case G). Evidence: `fallback.test.ts` (12) + `config.test.ts` (7) + live
+2026-10-26 (`provider: ollama:qwen2.5:3b` answering with real tool calls).

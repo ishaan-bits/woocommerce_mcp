@@ -235,6 +235,8 @@ export interface ChatResponse {
   reply: string;
   tool_calls: ChatToolCall[];
   rounds: number;
+  /** Which provider produced the reply (e.g. "groq:openai/gpt-oss-120b", "ollama:qwen2.5:3b"). */
+  provider?: string;
 }
 
 export interface ChatTurn {

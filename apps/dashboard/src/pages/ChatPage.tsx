@@ -18,6 +18,7 @@ import {
   messageSegments,
   newMessageId,
   partialTurnMessage,
+  providerLabel,
   retryTarget,
   toolChipLabel,
   toolUpstream,
@@ -98,6 +99,7 @@ export function ChatPage({ api }: { api: ApiClient }) {
           content: response.reply,
           toolCalls: response.tool_calls,
           rounds: response.rounds,
+          provider: response.provider,
         });
         setRounds(response.rounds);
         setAgentMissing(false);
@@ -218,6 +220,12 @@ export function ChatPage({ api }: { api: ApiClient }) {
                     );
                   })}
                 </ul>
+              )}
+              {message.role === "assistant" && message.provider !== undefined && providerLabel(message.provider) !== null && (
+                <span className="muted small chat-rounds" title="Which provider produced this reply">
+                  {message.provider.startsWith("ollama:") ? "Using " : "via "}
+                  {providerLabel(message.provider)}
+                </span>
               )}
               {message.role === "assistant" && message.rounds !== undefined && (
                 <span className="muted small chat-rounds">{message.rounds} round{message.rounds === 1 ? "" : "s"}</span>

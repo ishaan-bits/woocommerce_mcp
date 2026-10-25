@@ -1,7 +1,7 @@
 import { API_PREFIX, UPSTREAM_IDS, type ApiKeyPrincipal, type AuditAction, type ToolCallOutcome } from "@mcp/shared";
 import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
-import { AgentInputError, AgentTurnError, type ChatAgent } from "../agent/agent.ts";
+import { AgentInputError, AgentTurnError, BothProvidersError, type ChatAgent } from "../agent/agent.ts";
 import { ProviderError } from "../agent/provider.ts";
 import type { AuditWriter } from "../audit.ts";
 import type { UpstreamToolStats } from "../db/audit-repository.ts";
@@ -585,6 +585,9 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
         reply: result.reply,
         tool_calls: result.toolCalls,
         rounds: result.rounds,
+        // Which provider produced this reply (primary vs local fallback) —
+        // the UI may show it; it never contains credentials (Phase One 2.4).
+        provider: result.provider,
       });
     } catch (error) {
       if (error instanceof AgentInputError) {
@@ -626,7 +629,11 @@ export function createApiRouter(deps: ApiRouterDeps): Router {
           default:
             res.status(502).json({
               error: "provider_error",
-              message: "The LLM provider could not complete the request; try again.",
+              message:
+                error instanceof BothProvidersError ||
+                (error instanceof AgentTurnError && error.bothProvidersFailed)
+                  ? "The LLM provider and the local fallback could not complete the request; try again."
+                  : "The LLM provider could not complete the request; try again.",
               ...partial,
             });
             return;

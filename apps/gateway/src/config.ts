@@ -56,6 +56,13 @@ export interface AppConfig {
    */
   llm: LlmConfig | null;
   /**
+   * Optional local fallback provider (Ollama, OpenAI-compatible). Used when
+   * the primary provider is rate-limited/unavailable, or as the sole provider
+   * in local-only mode (no primary configured). Never required for the
+   * gateway to boot or for any non-chat feature.
+   */
+  fallbackLlm: (LlmConfig & { providerLabel: string }) | null;
+  /**
    * Which backing store the WooCommerce upstream points at: "mock" (the
    * in-cluster demo store) or "real" (the in-cluster WordPress/WooCommerce
    * store). Purely a display label for the dashboard — the actual URL is
@@ -309,6 +316,26 @@ const envSchema = z.object({
     .min(1_000, "LLM_REQUEST_TIMEOUT_MS must be between 1000 and 120000")
     .max(120_000, "LLM_REQUEST_TIMEOUT_MS must be between 1000 and 120000")
     .default(45_000),
+  chatFallbackProvider: z
+    .string()
+    .trim()
+    .refine((value) => value === "" || value === "ollama", "CHAT_FALLBACK_PROVIDER must be 'ollama' when set")
+    .optional(),
+  ollamaBaseUrl: z
+    .string()
+    .refine(
+      (value) => {
+        try {
+          const url = new URL(value);
+          return url.protocol === "http:" || url.protocol === "https:";
+        } catch {
+          return false;
+        }
+      },
+      "OLLAMA_BASE_URL must be an absolute http:// or https:// URL",
+    )
+    .optional(),
+  ollamaModel: z.string().optional(),
   woocommerceStoreMode: z
     .string()
     .trim()
@@ -404,6 +431,9 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     groqModel: trimmed(env, "GROQ_MODEL"),
     llmBaseUrl: trimmed(env, "LLM_BASE_URL"),
     llmRequestTimeoutMs: trimmed(env, "LLM_REQUEST_TIMEOUT_MS"),
+    chatFallbackProvider: trimmed(env, "CHAT_FALLBACK_PROVIDER"),
+    ollamaBaseUrl: trimmed(env, "OLLAMA_BASE_URL"),
+    ollamaModel: trimmed(env, "OLLAMA_MODEL"),
     woocommerceStoreMode: trimmed(env, "WOOCOMMERCE_STORE_MODE"),
     gatewayPublicUrl: trimmed(env, "GATEWAY_PUBLIC_URL"),
     dynamicUpstreamTlsPolicy: trimmed(env, "DYNAMIC_UPSTREAM_TLS_POLICY"),
@@ -454,6 +484,9 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     llmRequestTimeoutMs: 45_000,
     groqApiKey: undefined as string | undefined,
     llmBaseUrl: undefined as string | undefined,
+    chatFallbackProvider: undefined as string | undefined,
+    ollamaBaseUrl: undefined as string | undefined,
+    ollamaModel: undefined as string | undefined,
     woocommerceStoreMode: undefined as string | undefined,
     gatewayPublicUrl: undefined as string | undefined,
     dynamicUpstreamTlsPolicy: "allow-http" as "allow-http" | "https-only",
@@ -488,6 +521,16 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     );
   }
 
+  // Phase One: validated BEFORE the fail-fast check so a bad fallback config
+  // joins every other issue in one report (never a silent partial config).
+  const fallbackLlm = buildFallbackLlm(
+    data.chatFallbackProvider,
+    data.ollamaBaseUrl,
+    data.ollamaModel,
+    data.llmRequestTimeoutMs,
+    issues,
+  );
+
   if (issues.length > 0) {
     throw new ConfigurationError(issues);
   }
@@ -513,10 +556,49 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     trustProxy: data.trustProxy,
     sessionCookieSecure: data.sessionCookieSecure,
     llm: buildLlmConfig(data.groqApiKey, data.llmBaseUrl, data.groqModel, data.llmRequestTimeoutMs),
+    fallbackLlm,
     woocommerceStoreMode: data.woocommerceStoreMode === "mock" || data.woocommerceStoreMode === "real" ? data.woocommerceStoreMode : null,
     gatewayPublicUrl: data.gatewayPublicUrl === undefined || data.gatewayPublicUrl === "" ? null : data.gatewayPublicUrl,
     dynamicUpstreamTlsPolicy: data.dynamicUpstreamTlsPolicy === "https-only" ? "https-only" : "allow-http",
     dynamicUpstreamCredentialKey,
+  };
+}
+
+/** Default base URL for the optional local Ollama fallback (host-run, never public). */
+export const DEFAULT_OLLAMA_BASE_URL = "http://host.docker.internal:11434/v1";
+
+/**
+ * Optional local fallback (Ollama). Enabled only when
+ * CHAT_FALLBACK_PROVIDER=ollama AND OLLAMA_MODEL is set; OLLAMA_MODEL is
+ * required in that case (a fallback without a model is a configuration error).
+ * The URL is operator configuration (env), never user-controlled.
+ */
+function buildFallbackLlm(
+  provider: string | undefined,
+  baseUrl: string | undefined,
+  model: string | undefined,
+  requestTimeoutMs: number,
+  issues: string[],
+): (LlmConfig & { providerLabel: string }) | null {
+  const providerName = provider ?? "";
+  const modelName = model ?? "";
+  if (providerName === "" && modelName === "") {
+    return null;
+  }
+  if (providerName === "") {
+    issues.push("OLLAMA_MODEL is set but CHAT_FALLBACK_PROVIDER is missing (set CHAT_FALLBACK_PROVIDER=ollama)");
+    return null;
+  }
+  if (modelName === "") {
+    issues.push("OLLAMA_MODEL is required when CHAT_FALLBACK_PROVIDER is set");
+    return null;
+  }
+  return {
+    baseUrl: baseUrl === undefined || baseUrl === "" ? DEFAULT_OLLAMA_BASE_URL : baseUrl,
+    apiKey: "",
+    model: modelName,
+    requestTimeoutMs,
+    providerLabel: `ollama:${modelName}`,
   };
 }
 
@@ -558,6 +640,8 @@ export interface SafeConfigSummary {
   upstreams: Array<{ id: string; origin: string }>;
   /** Milestone 9: presence only — the key itself is never logged (D29). */
   llm: { configured: boolean; model: string | null; key_present: boolean; base_url: string | null };
+  /** Local fallback presence only (no secrets involved; URL is operator config). */
+  fallback_llm: { configured: boolean; provider: string | null; model: string | null };
   woocommerce_store_mode: "mock" | "real" | null;
   /** D33: cookie Secure policy in effect (auto | true | false). */
   session_cookie_secure: SessionCookieSecureMode;
@@ -582,6 +666,11 @@ export function safeConfigSummary(config: AppConfig): SafeConfigSummary {
       model: config.llm?.model ?? null,
       key_present: (config.llm?.apiKey.length ?? 0) > 0,
       base_url: config.llm === null ? null : new URL(config.llm.baseUrl).origin,
+    },
+    fallback_llm: {
+      configured: config.fallbackLlm !== null,
+      provider: config.fallbackLlm?.providerLabel.split(":")[0] ?? null,
+      model: config.fallbackLlm?.model ?? null,
     },
     woocommerce_store_mode: config.woocommerceStoreMode,
     session_cookie_secure: config.sessionCookieSecure,

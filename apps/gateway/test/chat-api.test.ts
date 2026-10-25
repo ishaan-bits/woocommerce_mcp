@@ -78,6 +78,7 @@ describe("POST /api/chat", () => {
       });
       assert.equal(status, 200);
       assert.equal(json.reply, "You have products in the catalog.");
+      assert.equal(json.provider, "scripted", "the response reports which provider answered");
       assert.deepEqual(json.tool_calls, [{ name: "woocommerce_list_products", outcome: "success" }]);
 
       // Exactly one tool_call audit row for the executed call.

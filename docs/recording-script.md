@@ -21,6 +21,20 @@ USER_B_KEY=$(python3 -c "import json;print(json.load(open('.tmp/demo-keys.json')
 Pre-open two browser tabs: `http://dashboard.urumi.test:18080` and
 `http://shop.urumi.test:18080`. Close any tab showing cookies/devtools headers.
 
+## Pre-recording checklist (5 minutes)
+
+- [ ] `kubectl -n urumi get pods` → 9/9 `1/1`
+- [ ] Ingress: `http://dashboard.urumi.test:18080` and `http://shop.urumi.test:18080` open
+- [ ] Dashboard loads; sign-in works with the key from `.tmp/demo-keys.json`
+- [ ] Storefront `/shop/` shows products
+- [ ] Upstreams page: 3 servers healthy (Refresh re-probes live)
+- [ ] Persistent data: a couple of orders visible (WooCommerce → Orders)
+- [ ] Browser console clean (no errors on load)
+- [ ] **Local model check (if you will demo chat):** `ollama serve` running,
+      `ollama list` shows `qwen2.5:3b`, and one chat message answers
+- [ ] No secrets visible in any open window/terminal
+- [ ] `bash scripts/scale-drill.sh` optional pre-run (self-restoring)
+
 ## Do-not-show checklist (every frame)
 
 - No API keys (`umk_…`), passwords, WooCommerce `ck_/cs_…`, `Authorization`
@@ -98,17 +112,21 @@ Pre-open two browser tabs: `http://dashboard.urumi.test:18080` and
 - **Say:** "Revoke takes effect on the next call. Disabling or killing an
   upstream isolates it — siblings keep serving — and the dashboard shows why."
 
-### 5:45–6:30 — Chat agent (honest version)
+### 5:45–6:45 — Chat agent with the tool loop (verified working)
 - **Screen:** Chat as admin.
-- **If quota allows (unlikely):** one grounded question with a tool chip.
-- **If 429 (expected):** let the banner show *"Chat failed … You can retry in
-  about N s"* and say: **"The demo's LLM provider is the Groq free tier and
-  it's currently rate-limiting us. That's an external quota limitation — the
-  gateway handles it correctly: bounded, Retry-After-aware retries in-request,
-  no double-billing or duplicate tool calls, and the topbar correctly stays
-  'Connected' because the gateway is healthy. The tool loop itself is verified
-  by deterministic tests."**
-- **Never:** fake an LLM response or switch providers on camera.
+- **Do (live):** ask *"List my products."* — watch the tool chip
+  (`woocommerce_list_products`) and the grounded answer. The reply shows which
+  model answered ("via groq:…" or **"Using local model qwen2.5:3b"** when the
+  free-tier quota is exhausted — the local Ollama fallback runs the exact same
+  gateway tool loop).
+- **Do (optional):** *"Create a product named …"* → the chip shows
+  `woocommerce_create_product` → open the storefront to see it.
+- **Say:** "One tool loop for every model — hosted or local, tool calls go
+  through the same gateway authorization and audit as everything else. If the
+  free tier 429s, the local model answers instead; the response says which
+  provider produced it."
+- **Never:** fake an LLM response; if both providers fail, show the honest
+  banner (names both, keeps the turn's tool chips, safe Retry).
 
 ### 6:30–7:00 — Production story + wrap
 - **Screen:** `infra/helm/README.md` "Deploying to a future VPS" heading.

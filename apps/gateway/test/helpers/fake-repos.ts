@@ -448,8 +448,17 @@ export class FakeUpstreamRegistry implements UpstreamRegistry {
       .map((tool) => ({ ...tool, enabled: true }));
   }
 
-  async callTool(): Promise<never> {
-    throw new Error("FakeUpstreamRegistry.callTool is not used by these tests");
+  /** Test hook: recorded executions (duplicate-write assertions). */
+  readonly calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  /** Test hook: how callTool answers when exercised (e.g. by the chat agent). */
+  callToolImpl: ((name: string, args: Record<string, unknown>) => Promise<import("@modelcontextprotocol/sdk/types.js").CallToolResult>) | null = null;
+
+  async callTool(qualifiedName: string, args: Record<string, unknown>): Promise<import("@modelcontextprotocol/sdk/types.js").CallToolResult> {
+    this.calls.push({ name: qualifiedName, args });
+    if (this.callToolImpl === null) {
+      throw new Error("FakeUpstreamRegistry.callToolImpl not set for this test");
+    }
+    return this.callToolImpl(qualifiedName, args);
   }
 
   health(): UpstreamHealth[] {
