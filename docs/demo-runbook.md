@@ -15,8 +15,11 @@ ever claimed as verified:
 
 Browser steps (T1–T4) are **dual-status**: their scripted check passed live, but
 for a demo you perform them **by hand in a browser** — count them as MANUAL
-steps when rehearsing. Groq-dependent steps (T3–T4 chat half) are ⛔ BLOCKED by
-the provider's free-tier quota (see "Chat reliability" at the end). Everything
+steps when rehearsing. The chat steps (T3–T4) are **verified live**
+(2026-10-26: hosted Groq window *and* the local Ollama fallback both completed
+the tool loop — see "Chat reliability") but remain 👤 MANUAL to perform on
+camera; the hosted provider's quota is intermittent, so plan to show the
+"Using local model" fallback if Groq 429s. Everything
 in this runbook is the **local** kind demo — the public VPS/k3s deployment is
 documented (`infra/helm/README.md` "Deploying to a future VPS") but **not
 executed or verified**; no public deployment exists.
@@ -142,8 +145,9 @@ order tools, 70 tests) + `apps/gateway/test/external-client.test.ts`.
 Login at `http://dashboard.urumi.test:18080` with `$USER_A_KEY`, open **Chat**.
 
 **T3. Ask the agent to create a product (name + price); the product appears on
-the storefront.** 👤 **MANUAL** at demo time.
-⛔ **BLOCKED right now**: the configured free-tier LLM provider (Groq) is
+the storefront.** ✅ **LIVE** (2026-10-26: "Local LLM Demo Product" created via
+the chat tool loop through the gateway and visible on `/shop/`) ·
+**👤 MANUAL at demo time**. If the hosted provider is rate-limited,
 rate-limiting the demo account (`chat_provider_failed {kind: rate_limited,
 status: 429}` observed 2026-10-22; the gateway answers `429
 provider_rate_limited` with `retry_after_seconds` and the UI offers "Retry last
@@ -158,8 +162,9 @@ injection containment, exactly-one audit row per call),
 (chat offered tools follow upstream enable/disable).
 
 **T4. Place an order by hand on the storefront, then ask "what orders came in
-today" — it returns that order.** 👤 **MANUAL** (chat half ⛔ same quota
-blocker as T3). The storefront half is exactly T1 (✅ LIVE, order #17), and
+today" — it returns that order.** ✅ **LIVE** (2026-10-26: order #22 returned
+with its real timestamp via `woocommerce_list_orders`) · **👤 MANUAL at demo
+time**. The storefront half is exactly T1 (✅ LIVE, order #17), and
 the same question is answered by the external client as user B in T5 (✅ LIVE)
 — only the chat UI answer needs the provider quota.
 

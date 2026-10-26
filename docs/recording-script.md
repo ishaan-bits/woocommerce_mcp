@@ -65,9 +65,10 @@ Pre-open two browser tabs: `http://dashboard.urumi.test:18080` and
 - **Screen:** Chat → ask *"List the products in the store and show each
   product's actual ID, name, and price, plus the pagination facts."*
 - **Do:** point at the answer — one **real id per product** (21, 20, 13, 12,
-  11, 10), real prices, and `Total products: 6 · More pages: No` — the tool
-  result carries explicit `total_products`/`total_pages`/`has_more` from the
-  store's own API metadata (no invented ranges or pages).
+  11, 10, …), real prices, and the store's own `Total products: N · More
+  pages: No` line (7 products as of 2026-10-26) — the tool result carries
+  explicit `total_products`/`total_pages`/`has_more` from the store's API
+  metadata (no invented ranges or pages).
 
 ### 2:30–3:15 — External MCP client + discovery (beat 7)
 - **Screen:** MCP Inspector (or the SDK test output) with **user B's** key.

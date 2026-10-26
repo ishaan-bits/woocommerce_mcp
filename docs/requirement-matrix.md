@@ -261,7 +261,7 @@ existing cluster (no resets, no PVC touches, ₹0):
 | Failure isolation (D9) | inventory outage fails alone (`… is unreachable (the connection failed)`), woocommerce keeps serving real products, `reachable:false` + `last_error` in `/api/upstreams`, clean recovery | `dod-flow.test.ts` D9, `mcp-failure.test.ts`, `real-upstreams.test.ts` |
 | Audit attribution (D10) | 14 `tool_call` rows under user B, `key_revoked` under user A (naming the key), `upstream_disabled/enabled` under user A | `dod-flow.test.ts` D10, `postgres.test.ts` |
 | Persistence (restart clause) | `rollout restart` of gateway + wordpress → orders `[14,15,17]`, 4 products, keys and audit intact | `postgres.test.ts` (migrations idempotent) |
-| Chat agent as user A (D3/D4) | ⛔ **not re-run live**: free-tier provider quota exhausted (real 429s observed; gateway handles them correctly per D35) | `agent.test.ts`, `chat-api.test.ts` (incl. mocked 429/retry/recovery) |
+| Chat agent as user A (D3/D4) | ✅ **completed later (2026-10-26)** — see the D3/D4 rows and §17 (hosted window + local Ollama fallback); at the time of this Phase-4 pass they were quota-blocked | `agent.test.ts`, `chat-api.test.ts` (incl. mocked 429/retry/recovery) |
 
 New this phase: `apps/gateway/test/dod-flow.test.ts` (5 tests — the in-process
 twin of the runbook's team-and-control steps) and the live-gated
