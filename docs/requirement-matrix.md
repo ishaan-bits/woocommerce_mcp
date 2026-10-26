@@ -386,6 +386,33 @@ it is real, enforced by the CNI when enabled, and correctly rendered.
 Test data created (sanctioned, uniquely named): product `LLM-DEMO-001`
 ("Local LLM Demo Product", $5.99) and order **#22**.
 
+## 18. Chatbot factual-accuracy fix (screenshot regression, 2026-10-26)
+
+**Root cause (measured):** `list_products` serialized the FULL WooCommerce REST
+objects (~80 fields each) with `products` first and `pagination` **last** — a
+page of 6 products produced a **17,681-char** tool result that the agent's
+6,000-char cap truncated mid-JSON. The model lost the pagination block
+entirely and read shredded `"id": 21`/`"id": 20` fragments — hence invented
+"ProductId: 20 to 21" ranges and a phantom "page 2". A secondary issue: the
+model sometimes repeated an identical `list_products` call (double results to
+merge).
+
+| Fix | Where | Evidence |
+| --- | --- | --- |
+| Compact, accurate projections (id, name, price, status, sku, permalink per product; id/status/total/currency/date_created per order) | `services/woocommerce-mcp/src/tool-handlers.ts`, `woocommerce-types.ts` | tool result **17,681 → 1,738 chars**; live: every field in the chat answer matches the store exactly |
+| Explicit, real-only pagination (`page`, `per_page`, `returned`, `total_products`, `total_pages`, `has_more`) serialized **first** | `tool-handlers.ts` (`paginationSummary`, built only from X-WP-Total/X-WP-TotalPages via `numberHeader` — null when missing/malformed, never fabricated) | 9 new unit tests + re-pinned protocol test |
+| No-progress guard: an identical call (same tool+args) with no write in between returns the cached result instead of re-executing; a successful write invalidates the cache | `agent.ts` | regression tests (execute-once, write-invalidates) |
+| Accuracy rules in the system prompt (no id ranges/merged ids/fabricated totals; say when data is missing/truncated; label which system facts came from) | `agent.ts` | live: "Total products: 6 · More pages: No"; cross-upstream answer labels store vs inventory |
+| Honest truncation marker ("data omitted; do not guess") | `agent.ts` | truncation test re-pinned |
+
+**Live validation (Phase 5):** A) listing accurate (ids 21/20/13/12/11/10,
+real prices, `total_products: 6`, `has_more: false`) · B) single-product by id
+13 correct · C) product created via chat through the gateway (id 23,
+`MLLM-VERIFY-001`) · D) orders answered from real timestamps (no false "today";
+#22 returned for 2026-10-25) · E) cross-upstream: store + inventory tools both
+called, facts labelled per system · F) both providers usable (groq answered
+several turns; `ollama:qwen2.5:3b` answered others with correct tool calls).
+
 ## Explicitly not claimed
 
 - **Groq free-tier quota is intermittent** (real `429`s on 2026-10-22; a window

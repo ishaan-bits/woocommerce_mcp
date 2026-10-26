@@ -408,6 +408,18 @@ brew install ollama && brew services start ollama   # free, local, no API key
 ollama pull qwen2.5:3b                              # ~1.9 GB; verified tool-calling
 ```
 
+**Workflow (from zero to a verified local answer):**
+
+1. `brew install ollama && brew services start ollama` (free; no account, no API key).
+2. `ollama pull qwen2.5:3b` (~1.9 GB; the documented model — smallest class with reliable tool-calling).
+3. Configure the app: `gateway.llm.fallback` in `values-local.yaml` (below) — or the `CHAT_FALLBACK_PROVIDER=ollama`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL` env vars.
+4. Verify reachability **from the gateway's runtime**, not just the laptop: `kubectl -n urumi exec deploy/gateway -c gateway -- node -e "fetch('http://host.docker.internal:11434/api/version').then(r=>r.json()).then(console.log)"`.
+5. Restart what must see the config: `helm -n urumi upgrade urumi infra/helm/mcp-gateway -f infra/helm/mcp-gateway/values-local.yaml && kubectl -n urumi rollout restart deploy/gateway` (ConfigMap changes don't restart pods by themselves).
+6. Confirm the provider: `GET /api/settings` or the boot log's `fallback_llm`, and the chat UI's per-reply label ("Using local model qwen2.5:3b").
+7. Send a chat message that needs a tool ("List the products…") — the tool chip appears.
+8. Confirm the tool call went through the gateway: `GET /api/audit` shows `tool_call` rows for your user.
+9. Troubleshooting: `ollama ps` shows the model loaded (first inference loads ~2.5 GB — give it a few seconds); `brew services restart ollama` if the port is down; if the gateway logs "connection failed", re-run step 4 (the gateway must reach `host.docker.internal`); provider errors in chat name both providers when both fail.
+
 Then `values-local.yaml` (already wired) enables it:
 
 ```yaml

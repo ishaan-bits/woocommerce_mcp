@@ -1145,3 +1145,26 @@ leaves it unset and never requires Ollama. Tool execution happens only after a
 successful completion, so a provider fallback can never duplicate a tool call
 (case G). Evidence: `fallback.test.ts` (12) + `config.test.ts` (7) + live
 2026-10-26 (`provider: ollama:qwen2.5:3b` answering with real tool calls).
+
+
+## D40 — Tool results: compact real-field projections, real-only pagination, no-progress guard
+
+**Context.** The local 3B model's answers contained invented product-ID ranges
+("20 to 21") and phantom pages. Measured cause: `list_products` returned the
+full ~80-field REST objects (17,681 chars) which the agent's 6,000-char cap
+truncated mid-JSON — losing the trailing pagination block and shredding ids.
+
+**Decision.** (1) Project tool results to the real fields that matter (id,
+name, price, status, sku, permalink for products; id, status, total, currency,
+date_created for orders) — ~10x smaller, still 100% real data, no invented
+values. (2) Serialize pagination FIRST with explicit keys
+(`total_products`/`total_pages`/`has_more`/`returned`) built ONLY from the
+store's X-WP-Total headers — `null` when absent or malformed, never guessed.
+(3) Agent no-progress guard: an identical tool call (same tool+arguments) that
+already ran and had no intervening write returns the cached result instead of
+re-executing (and a successful write clears the cache, so a re-list after a
+create still fetches fresh data). (4) System-prompt accuracy rules: never
+invent ids/ranges/totals; state when data is missing; label which system facts
+came from. Trade-off: the full REST object is no longer visible to the model —
+acceptable because the model needed facts, not `_links`/meta blobs, and the
+compact shape is what keeps results inside the safety cap.

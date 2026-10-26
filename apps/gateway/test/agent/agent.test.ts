@@ -431,12 +431,15 @@ describe("chat agent — prompt injection containment", () => {
 describe("chat agent — bounds", () => {
   test("stops at the tool-round limit without executing another batch", async () => {
     const f = await fixture({
+      // Distinct pages on purpose: identical repeats are deduplicated by
+      // design (the no-progress guard has its own test), and this test is
+      // about the round LIMIT.
       turns: [
-        { toolCalls: [{ name: "woocommerce_list_products", arguments: {} }] },
-        { toolCalls: [{ name: "woocommerce_list_products", arguments: {} }] },
-        { toolCalls: [{ name: "woocommerce_list_products", arguments: {} }] },
-        { toolCalls: [{ name: "woocommerce_list_products", arguments: {} }] },
-        { toolCalls: [{ name: "woocommerce_list_products", arguments: {} }] },
+        { toolCalls: [{ name: "woocommerce_list_products", arguments: { page: 1 } }] },
+        { toolCalls: [{ name: "woocommerce_list_products", arguments: { page: 2 } }] },
+        { toolCalls: [{ name: "woocommerce_list_products", arguments: { page: 3 } }] },
+        { toolCalls: [{ name: "woocommerce_list_products", arguments: { page: 4 } }] },
+        { toolCalls: [{ name: "woocommerce_list_products", arguments: { page: 5 } }] },
       ],
       maxToolRounds: 2,
     });
@@ -512,7 +515,7 @@ describe("chat agent — bounds", () => {
       await agent.run({ message: "go" }, ADMIN);
       const toolMessage = provider.requests[1]?.messages.find((m) => m.role === "tool");
       assert.ok((toolMessage?.content.length ?? 0) < 7_000);
-      assert.match(toolMessage?.content ?? "", /\[truncated\]/);
+      assert.match(toolMessage?.content ?? "", /\[truncated: data omitted; do not guess/);
     } finally {
       await registry.close();
       await woocommerce.close();
@@ -1080,6 +1083,141 @@ describe("chat agent — bounded provider retries (transient rate limits)", () =
       assert.equal(f.fakes.get("woocommerce")?.calls.length, 1);
     } finally {
       await f.close();
+    }
+  });
+});
+
+describe("tool-result accuracy and no-progress guard (screenshot regression)", () => {
+  test("repeated identical tool calls execute once; the repeat returns the same real result", async () => {
+    const calls: number[] = [];
+    const tools: FakeToolSpec[] = [
+      {
+        name: "list_products",
+        inputSchema: { type: "object", properties: {} },
+        handler: () => {
+          calls.push(1);
+          return {
+            content: [{ type: "text", text: JSON.stringify({ pagination: { page: 1, total_products: 1, total_pages: 1, has_more: false }, products: [{ id: 21, name: "P" }] }) }],
+          };
+        },
+      },
+    ];
+    const woocommerce = await startFakeUpstream({ name: "woocommerce-fake", tools });
+    const logger = createLogger({ level: "error", sink: { write: () => undefined } });
+    const auditRepo = new FakeAuditRepository();
+    const registry = createUpstreamRegistry({
+      configs: [{ id: "woocommerce", baseUrl: woocommerce.mcpUrl, enabled: true, timeoutMs: 3_000, connectTimeoutMs: 2_000 }],
+      toolCacheTtlMs: 60_000,
+      logger,
+      ssrf: { allowedPrivateHosts: ["*"] },
+    });
+    const provider = new ScriptedProvider([
+      { toolCalls: [{ name: "woocommerce_list_products", arguments: {}, id: "call_first" }] },
+      { toolCalls: [{ name: "woocommerce_list_products", arguments: {}, id: "call_repeat" }] },
+      { content: "21 P" },
+    ]);
+    const agent = createChatAgent({ provider, registry, logger, audit: createAuditWriter(auditRepo, logger) });
+    try {
+      const result = await agent.run({ message: "list" }, ADMIN);
+      assert.equal(calls.length, 1, "the identical repeat must NOT execute twice");
+      assert.equal(result.toolCalls.length, 2, "both model requests are reported honestly");
+      assert.equal(result.toolCalls[1]?.outcome, "success");
+      const toolMessages = provider.requests[2]?.messages.filter((m) => m.role === "tool") ?? [];
+      assert.equal(toolMessages.length, 2, "each call gets its own tool message (never merged)");
+      assert.match(toolMessages[1]?.content ?? "", /Duplicate of an earlier call/);
+      // The cached result still carries the real facts (id 21), not a rewrite.
+      assert.match(toolMessages[1]?.content ?? "", /"id":\s*21/);
+      assert.equal(toolMessages[0]?.tool_call_id, "call_first");
+      assert.equal(toolMessages[1]?.tool_call_id, "call_repeat", "each result stays tied to its own tool_call_id");
+    } finally {
+      await registry.close();
+      await woocommerce.close();
+    }
+  });
+
+  test("a successful write invalidates the cache: re-listing after a create is a REAL call", async () => {
+    const listCalls: number[] = [];
+    const tools: FakeToolSpec[] = [
+      {
+        name: "list_products",
+        inputSchema: { type: "object", properties: {} },
+        handler: () => {
+          listCalls.push(1);
+          return { content: [{ type: "text", text: `list#${listCalls.length}` }] };
+        },
+      },
+      {
+        name: "create_product",
+        inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+        handler: () => ({ content: [{ type: "text", text: "created" }] }),
+      },
+    ];
+    const woocommerce = await startFakeUpstream({ name: "woocommerce-fake", tools });
+    const logger = createLogger({ level: "error", sink: { write: () => undefined } });
+    const auditRepo = new FakeAuditRepository();
+    const registry = createUpstreamRegistry({
+      configs: [{ id: "woocommerce", baseUrl: woocommerce.mcpUrl, enabled: true, timeoutMs: 3_000, connectTimeoutMs: 2_000 }],
+      toolCacheTtlMs: 60_000,
+      logger,
+      ssrf: { allowedPrivateHosts: ["*"] },
+    });
+    const provider = new ScriptedProvider([
+      { toolCalls: [{ name: "woocommerce_list_products", arguments: {} }] },
+      { toolCalls: [{ name: "woocommerce_create_product", arguments: { name: "X", regular_price: "1" } }] },
+      { toolCalls: [{ name: "woocommerce_list_products", arguments: {} }] },
+      { content: "done" },
+    ]);
+    const agent = createChatAgent({ provider, registry, logger, audit: createAuditWriter(auditRepo, logger) });
+    try {
+      await agent.run({ message: "create then re-list" }, ADMIN);
+      assert.equal(listCalls.length, 2, "the post-write re-list must actually re-fetch (state changed)");
+    } finally {
+      await registry.close();
+      await woocommerce.close();
+    }
+  });
+
+  test("the fallback provider sees the real tool result, not a reconstruction", async () => {
+    const tools: FakeToolSpec[] = [
+      {
+        name: "list_products",
+        inputSchema: { type: "object", properties: {} },
+        handler: () => ({ content: [{ type: "text", text: '{"pagination":{"total_products":2},"products":[{"id":7,"name":"Blue Mug"}]}' }] }),
+      },
+    ];
+    const woocommerce = await startFakeUpstream({ name: "woocommerce-fake", tools });
+    const logger = createLogger({ level: "error", sink: { write: () => undefined } });
+    const auditRepo = new FakeAuditRepository();
+    const registry = createUpstreamRegistry({
+      configs: [{ id: "woocommerce", baseUrl: woocommerce.mcpUrl, enabled: true, timeoutMs: 3_000, connectTimeoutMs: 2_000 }],
+      toolCacheTtlMs: 60_000,
+      logger,
+      ssrf: { allowedPrivateHosts: ["*"] },
+    });
+    const primary = new ScriptedProvider([
+      { toolCalls: [{ name: "woocommerce_list_products", arguments: {} }] },
+      { error: new ProviderError("rate_limited", "rate limited", 429) },
+    ]);
+    const fallback = new ScriptedProvider([{ content: "Blue Mug (id 7)" }]);
+    const agent = createChatAgent({
+      provider: primary,
+      fallbackProvider: fallback,
+      registry,
+      logger,
+      audit: createAuditWriter(auditRepo, logger),
+      wait: async () => undefined,
+      random: () => 0,
+      maxProviderAttempts: 1,
+    });
+    try {
+      const result = await agent.run({ message: "list" }, ADMIN);
+      assert.equal(result.provider, "scripted");
+      const toolMessage = fallback.requests[0]?.messages.find((m) => m.role === "tool");
+      assert.match(toolMessage?.content ?? "", /"id":\s*7/, "the fallback receives the exact tool result");
+      assert.match(toolMessage?.content ?? "", /"total_products":\s*2/);
+    } finally {
+      await registry.close();
+      await woocommerce.close();
     }
   });
 });

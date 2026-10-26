@@ -40,17 +40,34 @@ describe("mcp protocol over Streamable HTTP", () => {
     }
   });
 
-  test("list_products returns store products with pagination", async () => {
+  test("list_products returns store products with real ids and explicit pagination", async () => {
     const result = await harness.client.callTool({ name: "list_products", arguments: {} });
     assert.ok(result.isError !== true, textContent(result));
+    const raw = textContent(result);
+    // Pagination is serialized FIRST so size-capping can never hide page facts.
+    assert.ok(raw.indexOf('"pagination"') < raw.indexOf('"products"'), "pagination must precede products");
     const payload = parsedContent(result) as {
-      products: Array<{ id: number; name: string }>;
-      pagination: { total: number; page: number; per_page: number };
+      products: Array<{ id: number; name: string; price?: string; sku?: string; permalink?: string; status?: string }>;
+      pagination: {
+        page: number;
+        per_page: number;
+        returned: number;
+        total_products: number | null;
+        total_pages: number | null;
+        has_more: boolean | null;
+      };
     };
     assert.equal(payload.products.length, store.products.length);
-    assert.equal(payload.pagination.total, store.products.length);
     assert.equal(payload.pagination.page, 1);
     assert.equal(payload.pagination.per_page, 10);
+    assert.equal(payload.pagination.returned, store.products.length);
+    assert.equal(payload.pagination.total_products, store.products.length);
+    assert.equal(payload.pagination.has_more, false, "a complete single page must not claim more pages");
+    // Every product carries its OWN real id — never a range or merged ids.
+    const ids = payload.products.map((product) => product.id);
+    assert.equal(new Set(ids).size, ids.length, "each product keeps its own distinct id");
+    assert.ok(ids.every((id) => Number.isInteger(id) && id > 0));
+    assert.ok(payload.products.every((product) => product.name !== ""), "names preserved");
     assert.ok(payload.products.some((product) => product.name === "Green Tea"));
   });
 

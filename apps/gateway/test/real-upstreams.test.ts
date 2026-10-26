@@ -231,10 +231,11 @@ describe("gateway to real Inventory, Support and WooCommerce servers", () => {
     // WooCommerce: real server backed by the mock REST store (process-to-process).
     const wooPayload = parsedContent(
       await harness.client.callTool({ name: "woocommerce_list_products", arguments: {} }),
-    ) as { products?: Array<{ name: string }>; source?: string; pagination?: { total: number | null } };
+    ) as { products?: Array<{ name: string }>; source?: string; pagination?: { total_products: number | null; has_more: boolean | null } };
     assert.equal(wooPayload.products?.[0]?.name, "Canvas Tote", "data came through the real WooCommerce server");
     assert.equal(wooPayload.source, undefined, "the seeded-demo source marker belongs to the new servers only");
-    assert.equal(wooPayload.pagination?.total, 2);
+    assert.equal(wooPayload.pagination?.total_products, 2, "real metadata from X-WP-Total");
+    assert.equal(wooPayload.pagination?.has_more, false);
 
     // Inventory: its own seeded store, tagged with its own source marker.
     const inventoryPayload = parsedContent(

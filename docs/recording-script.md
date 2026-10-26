@@ -48,99 +48,66 @@ Pre-open two browser tabs: `http://dashboard.urumi.test:18080` and
 
 ## The 7-minute outline
 
-### 0:00–0:40 — What this is
+### 0:00–0:40 — What this is (beat 1)
 - **Screen:** dashboard `#/overview` (signed in as **admin-demo**).
 - **Say:** "One authenticated MCP gateway in front of a real WooCommerce store
   and two more backends. AI clients — this chat, IDEs, MCP Inspector — call
   tools through one endpoint; the gateway enforces identity, permissions and
   auditability."
-- **Do:** point at the topbar connection pill (green = gateway connectivity).
 
-### 0:40–1:30 — Architecture & Kubernetes
-- **Screen:** dashboard `#/upstreams` (3 upstreams with status) + one terminal
-  `kubectl get pods,pvc -n urumi`.
-- **Say:** "Nine workloads on one kind cluster via a single Helm chart —
-  gateway, dashboard, three MCP servers, PostgreSQL and WordPress/WooCommerce,
-  each with probes and resource limits; three PVCs hold the data. Local and
-  production differ only by values files."
-- **Do:** show `values-local.yaml` vs `values-prod.yaml` names only (no secret
-  contents).
+### 0:40–1:30 — Architecture, Kubernetes, healthy upstreams (beats 1–2)
+- **Screen:** `#/upstreams` (3 servers, live Refresh) + terminal
+  `kubectl get pods,pvc -n urumi` (9/9, 3 Bound PVCs).
+- **Say:** "Nine workloads, one Helm chart, probes and limits everywhere; three
+  PVCs hold the data. Local and production differ only by values files."
 
-### 1:30–2:30 — MCP internals (discovery, routing, collisions)
-- **Screen:** `#/tools` catalogue, then the **chat** or MCP Inspector.
-- **Do (live):** ask: *"compare my products with inventory stock"* — one
-  question, tools from **two upstreams** (`woocommerce_list_products` +
-  `inventory_list_products`), chips under the answer.
-- **Say:** "Tools are aggregated under qualified names `<upstream>_<tool>` —
-  two servers can expose `list_products` without colliding. Calls route to the
-  right server; a slow or dead upstream fails alone with a structured error."
+### 1:30–2:30 — Product listing: accurate IDs and pagination (beat 3)
+- **Screen:** Chat → ask *"List the products in the store and show each
+  product's actual ID, name, and price, plus the pagination facts."*
+- **Do:** point at the answer — one **real id per product** (21, 20, 13, 12,
+  11, 10), real prices, and `Total products: 6 · More pages: No` — the tool
+  result carries explicit `total_products`/`total_pages`/`has_more` from the
+  store's own API metadata (no invented ranges or pages).
 
-### 2:30–3:30 — Security posture (member vs admin)
-- **Screen:** new browser profile → sign in as **reader-demo** (`$USER_B_KEY`).
-- **Do (live):** on `#/tools`, open a write tool — the indicator says
-  **denied**. Try the same call via MCP Inspector/curl → `-32003 role 'reader'
-  may not call write tool`. Then show reader's Settings → "Your API keys"
-  (their own keys only) and that **Team** is hidden.
-- **Say:** "Roles are enforced server-side with no admin bypass; keys are
-  stored hashed; upstream credentials never reach the browser. Tool calls are
-  signed as *you* — one audit row each."
+### 2:30–3:15 — External MCP client + discovery (beat 7)
+- **Screen:** MCP Inspector (or the SDK test output) with **user B's** key.
+- **Do:** `tools/list` → exactly the 5 tools the member may call (writes are
+  hidden and rejected). **Say:** "One URL and a member key — tools from every
+  enabled server, permission-filtered at discovery."
 
-### 3:30–4:30 — Definition of done: buy something
-- **Screen:** storefront tab (👤 **MANUAL** browser steps — runbook T1/T2).
-- **Do:** shop → product → Add to cart → Checkout → Cash on delivery → Place
-  order (order number on screen). Then `shop.urumi.test:18080/wp-login.php` →
-  WooCommerce → Orders shows the order (**keep the password field off camera**).
-- **Say:** "The store is real WordPress/WooCommerce in the same cluster — the
-  order lands in admin immediately, and `woocommerce_list_orders` through the
-  gateway returns it too."
-- **Fallback:** if the browser hiccups, show the pre-verified result in
-  `docs/demo-runbook.md` T1/T2 and say the step is script-verified
-  (`scripts/demo/storefront-checkout.cjs`).
+### 3:15–4:00 — Cross-upstream workflow (beat 8)
+- **Screen:** Chat → *"Report separately: two store products (IDs, prices) and
+  two inventory items (SKUs, quantities) — label which system each fact is
+  from."*
+- **Do:** show the two tool chips (`woocommerce_list_products` +
+  `inventory_list_products`) and the labelled, accurate combined answer.
 
-### 4:30–5:45 — Control plane: keys, upstreams, failure isolation, audit
-- **Screen:** dashboard as **admin-demo**.
-- **Do (live, in order):**
-  1. Team → issue a key for reader-demo, then **Revoke** it (show the audit row
-     appear — don't reuse it afterwards).
-  2. Upstreams → **disable** `inventory` → `#/tools` loses `inventory_*`
-     (9→7 tools) → re-enable (back to 9).
-  3. Terminal: `kubectl -n urumi scale deploy/inventory-mcp --replicas=0` →
-     call `inventory_list_products` (structured "unreachable") while
-     `woocommerce_list_products` still works; show `/api/upstreams` degraded
-     badge → `--replicas=1` restore.
-  4. Audit page: every action attributed to the right user.
-- **Say:** "Revoke takes effect on the next call. Disabling or killing an
-  upstream isolates it — siblings keep serving — and the dashboard shows why."
+### 4:00–4:45 — Product creation through chat (beats 4–5)
+- **Screen:** Chat → *"Create a product named … (unique SKU)"* → chip
+  `woocommerce_create_product` → storefront `/shop/` shows it.
+- **Say:** "Same tool loop, same authorization and audit — the product is real."
 
-### 5:45–6:45 — Chat agent with the tool loop (verified working)
-- **Screen:** Chat as admin.
-- **Do (live):** ask *"List my products."* — watch the tool chip
-  (`woocommerce_list_products`) and the grounded answer. The reply shows which
-  model answered ("via groq:…" or **"Using local model qwen2.5:3b"** when the
-  free-tier quota is exhausted — the local Ollama fallback runs the exact same
-  gateway tool loop).
-- **Do (optional):** *"Create a product named …"* → the chip shows
-  `woocommerce_create_product` → open the storefront to see it.
-- **Say:** "One tool loop for every model — hosted or local, tool calls go
-  through the same gateway authorization and audit as everything else. If the
-  free tier 429s, the local model answers instead; the response says which
-  provider produced it."
-- **Never:** fake an LLM response; if both providers fail, show the honest
-  banner (names both, keeps the turn's tool chips, safe Retry).
+### 4:45–5:30 — Order retrieval + permissions/revocation (beats 6, 9)
+- **Screen:** Chat *"Which orders came in on <date>?"* → order number + total +
+  timestamp. Then **Team**: issue a **disposable** key, show a member call
+  working, **Revoke** it, next call → 401. Also show a write tool **denied**
+  for the member (Tools page badge + `-32003`).
 
-### 6:30–7:00 — Production story + wrap
-- **Screen:** `infra/helm/README.md` "Deploying to a future VPS" heading.
-- **Do (optional, 30s):** terminal `bash scripts/scale-drill.sh` — it prints
-  PASS lines (2 replicas, per-replica upstreams, one MCP session across
-  requests) and restores the original replica count automatically.
-- **Say:** "Local and VPS differ only through Helm values — real DNS, TLS at
-  the ingress, operator-managed Secrets, storage class, 2 gateway replicas
-  (this drill proves sessions and upstreams survive multi-replica). The VPS
-  path is documented but not executed — nothing public is claimed.
-  Everything is free-tier tooling; total cost zero."
-- **Do:** end on the dashboard overview.
+### 5:30–6:30 — Audit, failure isolation, cluster (beat 10)
+- **Screen:** **Audit** page — filter `tool_call`: every row attributed
+  (user/server/tool/time/duration/outcome). Optional 30s: `bash
+  scripts/scale-drill.sh` (PASS + auto-restore) or the disable-upstream toggle
+  (tools 9→7→9). Terminal: `kubectl get pvc` — data intact.
 
----
+### 6:30–7:15 — Local LLM status + honest limitations (beat 11)
+- **Screen:** a chat reply showing **"Using local model qwen2.5:3b"** (or the
+  Settings/`/api/settings` fallback line) + the audit rows behind it.
+- **Say:** "Free-tier Groq quota is intermittent — when it 429s, the local
+  Ollama model answers through the identical gateway tool loop, and the reply
+  names the provider. No API key for local inference; production never needs
+  it. Remaining limits: no public VPS (documented only), no OAuth."
+- **If short on time:** skip the scale-drill demo (beat 10's optional part)
+  and the cross-upstream deep-dive — the mandatory DoD beats are 3–6 and 9–10.
 
 ## Truthful limitations (state these if asked, or in the closing slide)
 
