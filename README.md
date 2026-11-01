@@ -49,12 +49,12 @@ execution pipeline that enforces identity, permissions, rate limits and audit.
 
 ```mermaid
 flowchart LR
-  U["User / client<br/>(browser chat, IDE, MCP Inspector)"] -->|"POST /mcp or /api/chat<br/>Bearer key or session"| G["MCP gateway<br/>authn → authz → rate limit → audit"]
-  G -->|"qualified tool name<br/>&lt;upstream&gt;_&lt;tool&gt;| R["Upstream registry<br/>(enabled servers only)"]
+  U["User or client<br/>browser chat, IDE, MCP Inspector"] -->|POST /mcp or /api/chat| G["MCP gateway<br/>authn, authz, rate limit, audit"]
+  G -->|qualified tool name| R["Upstream registry<br/>enabled servers only"]
   R --> W["woocommerce-mcp"]
   R --> I["inventory-mcp"]
   R --> S["support-mcp"]
-  W --> ST["WordPress + WooCommerce<br/>+ MariaDB (PVC)"]
+  W --> ST["WordPress and WooCommerce<br/>MariaDB with persistent volume"]
   I --> D1["seeded demo data"]
   S --> D2["seeded demo data"]
   G -.->|never exposed to the browser| ST
@@ -62,14 +62,14 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  U["User (dashboard chat)"] --> A["Chat agent (gateway)<br/>history + tool definitions"]
-  A --> P["LLM provider<br/>primary: hosted · fallback: local Ollama"]
-  P -->|"tool_calls (validated)| A
-  A -->|"same executeToolCall pipeline<br/>authz + rate limit + audit"| G["MCP gateway"]
+  U["User<br/>dashboard chat"] --> A["Chat agent in the gateway<br/>history and tool definitions"]
+  A --> P["LLM provider<br/>primary hosted, fallback local Ollama"]
+  P -->|tool calls validated| A
+  A -->|same executeToolCall pipeline| G["MCP gateway<br/>authz, rate limit, audit"]
   G --> W["authorized upstream tool"]
-  W -->|"tool result (untrusted data)"| A
+  W -->|tool result, untrusted| A
   A --> P
-  P -->|"final answer"| U
+  P -->|final answer| U
 ```
 
 The browser never calls upstream MCP servers directly; upstream credentials stay
