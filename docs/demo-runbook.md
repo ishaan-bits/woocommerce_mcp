@@ -155,7 +155,7 @@ message"). **This is a provider quota limitation, not fixed by code** — the
 chat stack is ready and is pinned by tests; a fresh live LLM turn is simply not
 available this pass. Historical evidence: the full agent loop (incl. model-led
 `create_product`) ran live on Groq in Milestone 9 (see
-`docs/requirement-matrix.md` §4 and README "Current status").
+`docs/requirement-matrix.md` §4).
 🧪 **TEST**: `apps/gateway/test/agent/agent.test.ts` (grounded tool loop,
 injection containment, exactly-one audit row per call),
 `apps/gateway/test/chat-api.test.ts`, `apps/gateway/test/dod-flow.test.ts` D8

@@ -108,7 +108,7 @@ items, which the PDF itself marks non-mandatory.
 | R5 | Helm charts + values files (local and production) | ✅ verified | `infra/helm/mcp-gateway` + both values files |
 | R6 | Short "System design and tradeoffs" note (architecture, aggregation/routing/failure, prod changes) | ✅ verified | `docs/architecture.md` **§12 "System design and tradeoffs"** — framed as the PDF asks: architecture choices (one gateway server+client, shared `executeToolCall`), aggregation/routing/failure handling (qualified names, structural isolation), production deltas (DNS/TLS, storage class, secret `keyRef`s, replicas) with the unverified VPS step called out |
 | R7 | Threat-model note with the 4 required bullets (shared upstream creds vs members; why client tokens aren't passed through; untrusted upstreams/tool-description manipulation; member-vs-member) | ✅ verified | `docs/threat-model.md` **§3c** covers all four, each mapped to controls + test names; C3 rewritten (no longer claims "the gateway holds only URLs" — now states both credential classes and what a member can do with a credential they never see) |
-| R8 | If bonus/stand-out attempted: list which and where | ✅ verified | §0.9 table now carries a "Where to find" column (tool permissions, SSRF on admin-added URLs, NetworkPolicies/non-root, encrypted upstream credentials); README "Stand-out items attempted" points at it; unattempted items say so |
+| R8 | If bonus/stand-out attempted: list which and where | ✅ verified | §0.9 table now carries a "Where to find" column (tool permissions, SSRF on admin-added URLs, NetworkPolicies/non-root, encrypted upstream credentials); README "Standout features" points at it; unattempted items say so |
 | R9 | Repo contains the original assignment PDF | ✅ verified | tracked at `docs/Urumi-MCP-Gateway-Assignment.pdf` (8 pages, included in the Milestone 11 commit); §0 reconciles every mandatory requirement against it |
 
 ### 0.9 Bonus / stand-out items (PDF pp.5–6 — optional, recorded honestly)
@@ -137,7 +137,7 @@ items, which the PDF itself marks non-mandatory.
 | X3 | DoD/user stories need the member to reach **multiple** upstreams and a two-upstream prompt (D6, M2); `reader-demo` is granted only `woocommerce` | ✅ resolved | migration `005_demo_grants.sql` (additive, keyed on the two seed users, sorted-DISTINCT so re-runs are a no-op): admin gains the 4 inventory/support tools; reader gains `inventory`+`support` upstreams and the 2 read-only tools (writes stay admin-only). Live on kind: one reader key calls `inventory_list_products` **and** `woocommerce_list_products` in a single MCP session |
 | X4 | Member story M1: self-service key issuance; repo issues keys admin-only | ✅ resolved | same evidence as M1 — `POST/GET /api/me/keys` + Settings-page UI; `listKeysForUser` scopes the listing to the caller so no other member's keys are visible |
 | X5 | Threat model must contain the 4 PDF bullets (R7) and stop claiming the gateway holds only URLs once dynamic credentials exist | ✅ resolved | `docs/threat-model.md` §3c (all four bullets with control/test mapping) + C3 rewritten for the two credential classes (D34) |
-| X6 | README lacks order-placement how-to; "System design and tradeoffs" note and stand-out list missing (R3/R6/R8) | ✅ resolved | README "Place an order (storefront, cash on delivery)" + "Stand-out items attempted"; `docs/architecture.md` §12 |
+| X6 | README lacks order-placement how-to; "System design and tradeoffs" note and stand-out list missing (R3/R6/R8) | ✅ resolved | README "Placing an order" + "Standout features"; `docs/architecture.md` §12 |
 | X7 | Stale claim in §9 below ("the PDF is not present") | fixed in this edit — PDF now tracked at `docs/Urumi-MCP-Gateway-Assignment.pdf` |
 
 ## 1. Backend regressions and honest settings (Phase A)
@@ -199,7 +199,7 @@ items, which the PDF itself marks non-mandatory.
 | --- | --- | --- |
 | Typecheck, build, unit + integration tests (PostgreSQL included), shared import smoke, Helm assertions, npm audit | `TEST_DATABASE_URL=… bash scripts/check.sh` | `All required checks passed.` (`npm audit`: 0 vulnerabilities) |
 | All five images build | `docker build -f infra/docker/<name>/Dockerfile -t urumi/<name>:0.1.0 .` | five `Successfully tagged` results |
-| Test totals | `TEST_DATABASE_URL=… npm run test` | see README "Current status" (updated each milestone) |
+| Test totals | `TEST_DATABASE_URL=… npm run test` | see README "Testing and verification" (updated each milestone) |
 | Secret scan of the staged diff + tree | forbidden-pattern scan (demo keys, Groq keys, `umk_`/`ck_`/`cs_` literals) | run before the commit; 0 matches (only documented fixtures allowed) |
 
 ## 8. Documentation (Phase H)
@@ -288,7 +288,7 @@ deployed). What this pass added, with evidence:
 
 | Deliverable | Evidence |
 | --- | --- |
-| Recruiter-first README entry point (what/architecture/security/prereqs/quick start/demo/tests/limitations, with links to architecture §12, this matrix, threat model, runbook) | `README.md` "For recruiters (start here)"; explicitly states **no public deployment exists** |
+| Recruiter-first README entry point (what/architecture/security/prereqs/quick start/demo/tests/limitations, with links to architecture §12, this matrix, threat model, runbook) | `README.md` "Overview"; explicitly states **no public deployment exists** |
 | Demo runbook review — two demo identities + secure credential handling (`.tmp/demo-keys.json`, 0600, git-ignored; keys loaded as shell vars without printing; regeneration path documented) | `docs/demo-runbook.md` identity block + §0; `git check-ignore .tmp/demo-keys.json` → `.gitignore:23` |
 | Reproducible sequence kept (store data → two-upstream routing → reader permissions → revocation → upstream disable/failure isolation → audit → restart persistence) with browser/Groq steps marked MANUAL/BLOCKED | `docs/demo-runbook.md` T1–T11 + legend (dual-status note for T1–T4; §11 chat reliability) |
 | Cleanup that never touches PVCs/persistent data | `docs/demo-runbook.md` §12 |
